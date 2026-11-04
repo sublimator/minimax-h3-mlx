@@ -512,8 +512,9 @@ The official forward embeds its distinct timesteps in two lines: `temb = self.ti
 
 Points that matter for the port:
 
-- **Same base weights.** `endpoint` is a `deepcopy` of `time_embedder` made *before* any LoRA, so both embedders share
-  base weights and differ only in their LoRAs.
+- **Same base weights.** `endpoint` is a `deepcopy` of `time_embedder` made *before* any LoRA: new storage with the
+  same values, so the two embedders have equal base weights and differ only in their LoRAs. Ours aliases the same
+  arrays instead (§2), which is the same at inference: nothing writes the weights.
 - **`r` gets the same sinusoid.** `r` goes through a copy of the same parameter-free `time_proj`, in f32, cast to the
   dtype of `sample` (f32 here).
 - **The blend.** It is `t_emb + gate * (r_emb - t_emb)`, with the gate a Python float: 0.25, exact in f32.
