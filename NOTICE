@@ -1,0 +1,25 @@
+h3mlx
+Copyright 2026 the h3mlx authors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+h3mlx is an MLX port of MiniMax H3. Parts of it are translated from, or quote, other projects. Their copyright and
+licence notices are reproduced in THIRD_PARTY_NOTICES.md, as their licences require:
+
+- diffusers (Hugging Face), Apache License 2.0: the MiniMax H3 implementation this port was translated from and is
+  tested against. The modules in src/h3mlx/ that implement the transformer, scheduler, denoise loop, packing,
+  presentation, reference geometry, video VAE, audio VAE and pipeline are modified derivatives of it, translated from
+  PyTorch to MLX and NumPy. docs/porting.md quotes it.
+- HyperFlow (Video Rebirth), Apache License 2.0: the 8-step LoRA loader, two-time embedder and sigma grid, translated in
+  src/h3mlx/hyperflow.py, ops.py and denoise.py (modified derivatives), transcribed in torch in tests/test_hyperflow.py
+  as oracles, and quoted in docs/porting-hyperflow.md.
+- PEFT (Hugging Face), Apache License 2.0: quoted in docs/porting-hyperflow.md; the tests use it as an oracle.
+- mlx-vlm (Prince Canuma), MIT License: quoted in docs/porting.md; it runs the Qwen3-VL text encoder.
+- torchaudio (PyTorch), BSD 2-Clause License: src/h3mlx/resample.py is its sinc resampler, copied verbatim, with its
+  licence in that file.
+
+Also credited, with no code copied: MLX (Apple, MIT License), and ComfyUI-MiniMax-H3-MLX-SolAttn (yshenaw, Apache
+License 2.0), an earlier MLX port of MiniMax H3 whose AdaLN modulation cache inspired the one in src/h3mlx/ops.py.
+
+The MiniMax H3 weights, configs, tokenizer and processor are not included. They come under the MiniMax H3 Community
+License, which has its own terms, including territory exclusions.

@@ -1,0 +1,270 @@
+"""MiniMax H3 transformer ops in MLX, one function per op.
+
+Each op names the diffusers 0.42.1 code it mirrors (`transformer_minimax_h3.py` unless said otherwise). Weights are
+passed in as arrays so the tests can copy them from a small randomly initialised torch module.
+"""
+
+import math
+
+import mlx.core as mx
+import numpy as np
+
+MODALITY_NUM = 3  # 0 video, 1 text, 2 audio (MINIMAX_H3_MODALITY_NUM)
+
+
+# --- rotary embedding (MiniMaxH3RotaryPosEmbed, _apply_rotary_emb) --------------------------------------------------
+
+
+def rope_inv_freq(rope_freq_dim: int = 16, rope_theta: float = 10000.0) -> mx.array:
+    """Built in numpy float32: bit-identical to torch's `theta ** (arange / 2f)`; MLX's pow is 1 ulp off at f=16."""
+    exps = np.arange(0, 2 * rope_freq_dim, 2, dtype=np.float32) / np.float32(2 * rope_freq_dim)
+    return mx.array((np.float32(1) / np.power(np.float32(rope_theta), exps)).astype(np.float32))
+
+
+def rope_cos_sin(position_ids: mx.array, inv_freq: mx.array) -> tuple[mx.array, mx.array]:
+    """(seq, 3) positions -> cos, sin of shape (seq, 2 * 3 * rope_freq_dim), float32."""
+    pos = position_ids.astype(mx.float32)
+    freqs = pos[:, :, None] * inv_freq[None, None, :]  # (seq, 3, f)
+    freqs = freqs.reshape(pos.shape[0], -1)  # t block, h block, w block
+    freqs = mx.concatenate([freqs, freqs], axis=-1)
+    return mx.cos(freqs), mx.sin(freqs)
+
+
+def apply_rotary(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
+    """x: (batch, seq, heads, head_dim); rotates the leading cos.shape[-1] channels (rotate_half), passes the rest."""
+    rot = cos.shape[-1]
+    xr, xp = x[..., :rot], x[..., rot:]
+    c = cos.astype(x.dtype)[None, :, None, :]
+    s = sin.astype(x.dtype)[None, :, None, :]
+    x1, x2 = xr[..., : rot // 2], xr[..., rot // 2 :]
+    rotated = mx.concatenate([-x2, x1], axis=-1)
+    return mx.concatenate([xr * c + rotated * s, xp], axis=-1)
+
+
+# --- norms and AdaLN ---------------------------------------------------------------------------------------------
+
+
+def rms_norm(x: mx.array, weight: mx.array | None, eps: float) -> mx.array:
+    """torch.nn.RMSNorm over the last axis."""
+    if weight is None:
+        weight = mx.ones((x.shape[-1],), dtype=x.dtype)
+    return mx.fast.rms_norm(x, weight, eps)
+
+
+def silu(x: mx.array) -> mx.array:
+    return x * mx.sigmoid(x)
+
+
+def linear(x: mx.array, w: mx.array, b: mx.array | None = None) -> mx.array:
+    """torch.nn.Linear: w is (out, in)."""
+    y = x @ w.T
+    return y + b if b is not None else y
+
+
+def adaln_modulation(temb: mx.array, w: mx.array, b: mx.array, hidden_size: int) -> list[mx.array]:
+    """MiniMaxH3AdaLayerNormModulation: (num_t, temb_dim) -> 6 x (num_t * 3, hidden), rows [t0m0, t0m1, t0m2, t1m0..].
+
+    Order: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp. silu at temb's precision, then cast to
+    the projection's dtype.
+    """
+    out = linear(silu(temb).astype(w.dtype), w, b)
+    out = out.reshape(-1, 6 * hidden_size)
+    return mx.split(out, 6, axis=-1)
+
+
+def modulate(x: mx.array, shift: mx.array, scale: mx.array, rows: mx.array) -> mx.array:
+    """x * (1 + scale[rows]) + shift[rows]; x is (batch, seq, hidden), rows (seq,) index the AdaLN table."""
+    return x * (1.0 + mx.take(scale, rows, axis=0)) + mx.take(shift, rows, axis=0)
+
+
+def norm_out(
+    x: mx.array, temb: mx.array, norm_w: mx.array, w: mx.array, b: mx.array, timestep_indices: mx.array, eps: float
+) -> mx.array:
+    """MiniMaxH3AdaLayerNormOut: RMSNorm, then shift/scale (in that order) picked per row by timestep index."""
+    shift, scale = mx.split(linear(silu(temb).astype(w.dtype), w, b), 2, axis=-1)
+    h = rms_norm(x, norm_w, eps)
+    return h * (1.0 + mx.take(scale, timestep_indices, axis=0)) + mx.take(shift, timestep_indices, axis=0)
+
+
+# --- attention ---------------------------------------------------------------------------------------------------
+
+
+def attention(q: mx.array, k: mx.array, v: mx.array, mask: mx.array | None = None) -> mx.array:
+    """Full self-attention. q, k, v: (batch, seq, heads, head_dim) as diffusers lays them out; returns the same layout.
+
+    `mask` is an additive or boolean mask broadcastable to (batch, heads, seq_q, seq_k); the model itself passes none.
+    """
+    scale = 1.0 / math.sqrt(q.shape[-1])
+    qt, kt, vt = (t.transpose(0, 2, 1, 3) for t in (q, k, v))
+    o = mx.fast.scaled_dot_product_attention(qt, kt, vt, scale=scale, mask=mask)
+    return o.transpose(0, 2, 1, 3)
+
+
+def key_padding_mask(used: int, total: int) -> mx.array:
+    """Boolean (1, 1, total, total) mask letting every query see only the first `used` keys (the reference pads the
+    packed sequence to a multiple of 64 and splits the tail off with cu_seqlens = [0, used, S])."""
+    keep = mx.arange(total) < used
+    return mx.broadcast_to(keep[None, None, None, :], (1, 1, total, total))
+
+
+def attn_block(
+    x: mx.array,
+    p: dict,
+    heads: int,
+    qk_eps: float,
+    rotary: tuple[mx.array, mx.array] | None,
+    mask: mx.array | None = None,
+) -> mx.array:
+    """MiniMaxH3AttnProcessor with separate to_q/to_k/to_v (no bias), per-head RMSNorm on q/k, rope, to_out."""
+    b, s, _ = x.shape
+    q = linear(x, p["to_q.weight"]).reshape(b, s, heads, -1)
+    k = linear(x, p["to_k.weight"]).reshape(b, s, heads, -1)
+    v = linear(x, p["to_v.weight"]).reshape(b, s, heads, -1)
+    q = rms_norm(q, p["norm_q.weight"], qk_eps)
+    k = rms_norm(k, p["norm_k.weight"], qk_eps)
+    if rotary is not None:
+        q = apply_rotary(q, *rotary)
+        k = apply_rotary(k, *rotary)
+    o = attention(q, k, v, mask).reshape(b, s, -1)
+    return linear(o, p["to_out.0.weight"])
+
+
+def swiglu_ff(x: mx.array, p: dict) -> mx.array:
+    """diffusers FeedForward(activation_fn="swiglu", bias=False): proj -> (h, gate) -> h * silu(gate) -> out."""
+    h = linear(x, p["net.0.proj.weight"])
+    h, gate = mx.split(h, 2, axis=-1)
+    return linear(h * silu(gate), p["net.2.weight"])
+
+
+# --- timestep embedding (embeddings.Timesteps + TimestepEmbedding) -------------------------------------------------
+
+
+def timestep_sinusoid(t: mx.array, dim: int = 256, max_period: float = 10000.0) -> mx.array:
+    """get_timestep_embedding with flip_sin_to_cos=True, downscale_freq_shift=0, scale=1: [cos, sin]."""
+    half = dim // 2
+    exponent = -math.log(max_period) * mx.arange(half, dtype=mx.float32) / half
+    args = t.astype(mx.float32)[:, None] * mx.exp(exponent)[None, :]
+    emb = mx.concatenate([mx.cos(args), mx.sin(args)], axis=-1)
+    if dim % 2:
+        emb = mx.pad(emb, [(0, 0), (0, 1)])
+    return emb
+
+
+def timestep_embedding(t: mx.array, p: dict, freq_dim: int = 256) -> mx.array:
+    """time_proj then time_embedder (linear_1, silu, linear_2)."""
+    e = timestep_sinusoid(t, freq_dim)
+    e = linear(e, p["linear_1.weight"], p["linear_1.bias"])
+    return linear(silu(e), p["linear_2.weight"], p["linear_2.bias"])
+
+
+# --- patchify (modular_pipelines/minimax_h3/before_denoise.py, decoders.py) ---------------------------------------
+
+
+def patchify(latents: mx.array, patch: tuple[int, int, int] = (1, 2, 2)) -> mx.array:
+    """(B, C, F, H, W) -> (B * patches, C * pt * ph * pw); rows frame-major then row-major."""
+    pt, ph, pw = patch
+    b, c, f, h, w = latents.shape
+    if f % pt or h % ph or w % pw:
+        raise ValueError(f"latents {latents.shape} not divisible by patch {patch}")
+    x = latents.reshape(b, c, f // pt, pt, h // ph, ph, w // pw, pw)
+    x = x.transpose(0, 2, 4, 6, 1, 3, 5, 7)
+    return x.reshape(-1, c * pt * ph * pw)
+
+
+def unpatchify(rows: mx.array, channels: int, frames: int, height: int, width: int, patch=(1, 2, 2)) -> mx.array:
+    pt, ph, pw = patch
+    x = rows.reshape(-1, frames // pt, height // ph, width // pw, channels, pt, ph, pw)
+    x = x.transpose(0, 4, 1, 5, 2, 6, 3, 7)
+    return x.reshape(-1, channels, frames, height, width)
+
+
+# --- rotary position grids (before_denoise.py), float64 numpy like the reference ----------------------------------
+
+ROPE_FRAME_RESCALE = 5.0 / 3.0
+ROPE_FRAMES_PER_LATENT = (1, 4, 4, 4, 4)
+ROPE_SPATIAL_SCALE = 32
+
+
+def spatial_position_grid(dim: int, patch: int, sqrt_area: float) -> np.ndarray:
+    ratio = dim / sqrt_area
+    left = (1.0 - ratio) / 2.0
+    return np.linspace(left, left + ratio, dim // patch, endpoint=False) * ROPE_SPATIAL_SCALE
+
+
+def temporal_position_grid(num_latent_frames: int, origin: float) -> np.ndarray:
+    spans = np.array(
+        [ROPE_FRAME_RESCALE * ROPE_FRAMES_PER_LATENT[i % len(ROPE_FRAMES_PER_LATENT)] for i in range(num_latent_frames)],
+        dtype=np.float64,
+    )
+    return origin + np.concatenate([np.zeros(1), np.cumsum(spans[:-1])])
+
+
+def frame_position_grid(latent_h: int, latent_w: int, patch_h: int, patch_w: int) -> tuple[np.ndarray, np.ndarray]:
+    sqrt_area = np.sqrt(latent_h * latent_w)
+    hg = spatial_position_grid(latent_h, patch_h, sqrt_area)
+    wg = spatial_position_grid(latent_w, patch_w, sqrt_area)
+    gh, gw = np.meshgrid(hg, wg, indexing="ij")
+    return np.stack([gh.reshape(-1), gw.reshape(-1)], axis=-1), wg
+
+
+# --- scheduler (schedulers/scheduling_minimax_h3.py) ----------------------------------------------------------------
+
+
+def torch_linspace_f32(start: float, end: float, steps: int) -> np.ndarray:
+    """torch.linspace(start, end, steps, dtype=float32) bit for bit (CPU, arm64): float32 step, the first half filled
+    from `start` and the second from `end`, each as one fused multiply-add (exact product, single rounding).
+    np.linspace differs by 1 ulp at e.g. steps=50."""
+    start32, end32 = np.float32(start), np.float32(end)
+    step = np.float32((end32 - start32) / np.float32(steps - 1))
+    i = np.arange(steps, dtype=np.float64)
+    out = np.where(
+        i < steps // 2,
+        np.float64(start32) + np.float64(step) * i,
+        np.float64(end32) - np.float64(step) * (steps - 1 - i),
+    )
+    return out.astype(np.float32)
+
+
+def flow_sigmas(num_inference_steps: int, shift: float) -> np.ndarray:
+    """linspace(1, 0, n) in float32, exponential shift, consecutive duplicates collapsed. Terminal 0 included."""
+    base = torch_linspace_f32(1.0, 0.0, num_inference_steps)
+    shift32 = np.float32(shift)
+    sig = (shift32 * base / (np.float32(1) + (shift32 - np.float32(1)) * base)).astype(np.float32)
+    keep = np.concatenate([[True], sig[1:] != sig[:-1]])
+    return sig[keep]
+
+
+def flow_step(v: mx.array, t: float, x: mx.array, sigma: float, sigma_next: float) -> mx.array:
+    """x0 = x + (1 - t) * v (sigma from the timestep, in x's dtype); x_next = r*x + (1 - r)*x0, r = s_next / s, f32."""
+    st = (mx.array(1.0, dtype=x.dtype) - mx.array(t, dtype=x.dtype)).astype(x.dtype)
+    x0 = x + st * v
+    cdt = mx.float32 if x.dtype in (mx.float16, mx.bfloat16) else x.dtype
+    s = mx.array(sigma, dtype=cdt)
+    sn = mx.array(sigma_next, dtype=cdt)
+    r = sn / s
+    return (r * x.astype(cdt) + (1.0 - r) * x0.astype(cdt)).astype(x.dtype)
+
+
+# --- one transformer block (MiniMaxH3TransformerBlock) --------------------------------------------------------------
+
+
+def dit_block(
+    x: mx.array,
+    temb: mx.array,
+    adaln_indices: mx.array,
+    rotary: tuple[mx.array, mx.array],
+    p: dict,
+    heads: int,
+    hidden_size: int,
+    norm_eps: float = 1e-5,
+    qk_eps: float = 1e-5,
+) -> mx.array:
+    """Pre-norm attention and SwiGLU FF, each shift/scale-modulated and gated per row from the (t, modality) table."""
+    shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = adaln_modulation(
+        temb, p["adaln_proj.linear.weight"], p["adaln_proj.linear.bias"], hidden_size
+    )
+    sub = lambda prefix: {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}  # noqa: E731
+    h = modulate(rms_norm(x, p["norm1.weight"], norm_eps), shift_msa, scale_msa, adaln_indices)
+    x = x + mx.take(gate_msa, adaln_indices, axis=0) * attn_block(h, sub("attn."), heads, qk_eps, rotary)
+    h = modulate(rms_norm(x, p["norm2.weight"], norm_eps), shift_mlp, scale_mlp, adaln_indices)
+    return x + mx.take(gate_mlp, adaln_indices, axis=0) * swiglu_ff(h, sub("ff."))
