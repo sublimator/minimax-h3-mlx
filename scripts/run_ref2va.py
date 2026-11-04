@@ -14,6 +14,7 @@ Order (so the 51 GB text encoder and the 66 GB transformer are not evaluated tog
 
 `--plan-only` reads only configs, the tokenizer and the processor (no weight files) and prints the sizes the run would
 use. `--decode-from <final_rows.npz>` skips steps 1-4 and decodes saved latents. Writes only under --out.
+`--hyperflow <file.safetensors>` runs Video Rebirth's 8-step LoRA (its own sigma grid: 8 calls; `--steps` refused).
 """
 
 import argparse
@@ -35,7 +36,7 @@ from PIL import Image, ImageOps
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from h3mlx import load, references as R  # noqa: E402
+from h3mlx import hyperflow, load, references as R  # noqa: E402
 from h3mlx.denoise import Schedules  # noqa: E402
 from h3mlx.packing import Ref, build_ref2va_packed_sequence  # noqa: E402
 from h3mlx.pipeline import Components, ImageRef, decode, ref2va, setup, vision_features  # noqa: E402
@@ -66,6 +67,13 @@ def dit_tflop_per_call(rows: int, cfg: dict) -> float:
     times the block count; refiner, AdaLN and norms are left out (small)."""
     h, inner, ffn = cfg["hidden_size"], cfg["num_attention_heads"] * cfg["attention_head_dim"], cfg["ffn_dim"]
     per_block = 2 * rows * (4 * h * inner + 3 * h * ffn) + 4 * rows * rows * inner
+    return per_block * cfg["num_layers"] / 1e12
+
+
+def lora_tflop_per_call(rows: int, cfg: dict, rank: int) -> float:
+    """HyperFlow's unmerged LoRA on q, k, v, out, ff in, ff out: 2 * S * rank * (in + out) each, per block."""
+    h, inner, ffn = cfg["hidden_size"], cfg["num_attention_heads"] * cfg["attention_head_dim"], cfg["ffn_dim"]
+    per_block = 2 * rows * rank * (4 * (h + inner) + (h + 2 * ffn) + (ffn + h))
     return per_block * cfg["num_layers"] / 1e12
 
 
@@ -167,11 +175,14 @@ def config_components(args, weights: Path, encode_text=None) -> Components:
     return c
 
 
-def load_weights(c: Components, weights: Path) -> None:
-    """Attach the weights lazily (mx.load reads data on first use). The audio VAE is small and loaded eagerly."""
+def load_weights(c: Components, weights: Path, hyperflow_path: Path | None = None):
+    """Attach the weights lazily (mx.load reads data on first use). The audio VAE is small and loaded eagerly. With
+    `hyperflow_path`, the LoRA is attached to transformer_ref's params (2.8 GB more, read on first use too)."""
     c.vae, _, _ = load.load_vae(weights / "vae")
     c.audio_vae, _, _ = load.load_audio_vae(weights / "audio_vae")
     c.dit_params, _ = load.load_transformer(weights / "transformer_ref")
+    if hyperflow_path is not None:
+        c.dit_params, c.dit_cfg, _ = hyperflow.load(hyperflow_path, c.dit_params, c.dit_cfg, "transformer_ref")
 
 
 def plan(c: Components, prompt: str, image: Image.Image, args) -> dict:
@@ -185,11 +196,20 @@ def plan(c: Components, prompt: str, image: Image.Image, args) -> dict:
     na = R.audio_latent_num_frames(n)
     layout = build_ref2va_packed_sequence(np.asarray(tags), [Ref(r.kind, r.has_audio) for r in refs], ref_shapes, [],
                                           lf, lh, lw, na, tuple(c.dit_cfg["patch_size"]), 2)
-    sch = Schedules.make(args.steps)
-    return {"height": h, "width": w, "frames": n, "seconds": round(n / R.FPS, 3), "latent_frames": lf,
+    if args.hyperflow:
+        meta, _ = hyperflow.read_header(args.hyperflow)
+        sch = meta.schedules()
+    else:
+        sch = Schedules.make(args.steps)
+    extra = {}
+    if args.hyperflow:
+        extra["hyperflow"] = {"file": str(args.hyperflow), "version": meta.version, "gate": meta.gate,
+                              "rank": meta.lora_rank, "sigmas": list(meta.sigmas),
+                              "base_model_revision": meta.base_model_revision}
+    return {**extra, "height": h, "width": w, "frames": n, "seconds": round(n / R.FPS, 3), "latent_frames": lf,
             "reference_size": list(refs[0].image.size), "text_rows": len(ids), "vision_tokens": int(sum(ic)),
             "reference_video_rows": layout.num_condition_video_rows, "target_audio_rows": na * 2,
-            "sequence_rows": int(layout.position_ids.shape[0]), "grid_points": args.steps,
+            "sequence_rows": int(layout.position_ids.shape[0]), "grid_points": int(len(sch.video_sigmas)),
             "model_calls": int(len(sch.video_timesteps))}
 
 
@@ -202,7 +222,8 @@ def main(argv=None) -> int:
     ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--width", type=int, default=864)
     ap.add_argument("--frames", type=int, default=124)
-    ap.add_argument("--steps", type=int, default=50, help="sigma grid points incl. the final 0 (N-1 model calls)")
+    ap.add_argument("--steps", type=int, help="sigma grid points incl. the final 0 (N-1 model calls); default 50")
+    ap.add_argument("--hyperflow", type=Path, help="HyperFlow LoRA .safetensors: its 9-point grid, 8 model calls")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--plan-only", action="store_true", help="configs, tokenizer and processor only; no weights")
     ap.add_argument("--check-headers", action="store_true",
@@ -214,6 +235,13 @@ def main(argv=None) -> int:
     ap.add_argument("--ref-short-edge", type=int, default=0, help="override 2048 (tests only)")
     ap.add_argument("--canvas-short-edge", type=int, default=0, help="override 768 (tests only)")
     args = ap.parse_args(argv)
+    if args.hyperflow is not None:
+        if args.steps is not None:
+            ap.error("--hyperflow runs the grid stored in its file; drop --steps")
+        args.hyperflow = args.hyperflow.expanduser()
+        hyperflow.read_header(args.hyperflow)  # fail now, not after the text encoder, if it is not a HyperFlow file
+    elif args.steps is None:
+        args.steps = 50
 
     t0 = time.time()
     previous_limits = {"memory_limit_gb": round(mx.set_memory_limit(int(args.memory_limit_gb * 1e9)) / 1e9, 2),
@@ -273,7 +301,14 @@ def main(argv=None) -> int:
             save_log()
             return 0
 
-        load_weights(c, weights)
+        if args.hyperflow:
+            hf = args.hyperflow
+            got = sha256(hf)
+            want = hyperflow.KNOWN_SHA256.get(hf.name)
+            event("hyperflow_file", file=hf.name, bytes=hf.stat().st_size, sha256=got, known_sha256=want)
+            if want is not None and got != want:
+                raise ValueError(f"{hf.name}: sha256 {got} is not the released {want}")
+        load_weights(c, weights, None if args.decode_from else args.hyperflow)
         if args.decode_from:
             z = np.load(args.decode_from.expanduser())
             meta = {k: int(z[k]) for k in ("ncv", "nca", "lf", "lh", "lw", "na")}
@@ -282,6 +317,9 @@ def main(argv=None) -> int:
             sr = c.audio_sampling_rate
         else:
             per_call = dit_tflop_per_call(log["plan"]["sequence_rows"], c.dit_cfg)
+            if args.hyperflow:
+                per_call += lora_tflop_per_call(log["plan"]["sequence_rows"], c.dit_cfg, log["plan"]["hyperflow"]["rank"])
+            sched = hyperflow.read_header(args.hyperflow)[0].schedules() if args.hyperflow else None
             n_calls = log["plan"]["model_calls"]
             clock = {"prev": None}
 
@@ -308,7 +346,7 @@ def main(argv=None) -> int:
             video, audio, sr = ref2va(c, prompt, [ImageRef(image)], num_frames=args.frames, height=args.height,
                                       width=args.width, num_inference_steps=args.steps, seed=args.seed,
                                       on_step=on_step, check_finite=True, on_denoised=on_denoised,
-                                      free_transformer=True, on_stage=stage)
+                                      free_transformer=True, on_stage=stage, schedules=sched)
         event("decoded", video_shape=list(video.shape), audio_shape=list(audio.shape),
               video_mean=float(video.mean()), video_std=float(video.std()),
               audio_rms=float(np.sqrt((audio ** 2).mean())))

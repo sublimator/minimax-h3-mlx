@@ -228,12 +228,13 @@ def decode(c: Components, video_rows: mx.array, audio_rows: mx.array, ncv: int, 
 
 def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, width=None, num_inference_steps=50,
            seed=0, on_step=None, debug: dict | None = None, check_finite: bool = False, on_denoised=None,
-           free_transformer: bool = False, on_stage=None):
+           free_transformer: bool = False, on_stage=None, schedules: Schedules | None = None):
     """Returns (video float32 (F, H, W, 3) in [0, 1], audio float32 (2, samples), sampling rate). `debug`, if given,
     collects the intermediates under diffusers' state names. `check_finite` raises on a NaN/inf at each stage boundary
     and denoise step. `on_denoised(video_rows, audio_rows, meta)` runs before decoding (e.g. to save the latents).
     `free_transformer` empties `c.dit_params` before decoding so the VAEs don't sit on top of the 66 GB transformer.
-    `on_stage(name)` is called as each stage starts: references, layout, denoise, decode."""
+    `on_stage(name)` is called as each stage starts: references, layout, denoise, decode. `schedules` replaces
+    `Schedules.make(num_inference_steps)` (HyperFlow: `HyperFlowMeta.schedules()`, with `hyperflow.attach`ed params)."""
     dbg = debug if debug is not None else {}
     stage = on_stage or (lambda name: None)
     height, width, num_frames, refs = setup(c, references, height, width, num_frames)
@@ -283,8 +284,9 @@ def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, 
 
     dbg.update(layout=layout, initial_video_rows=video_rows, initial_audio_rows=audio_rows)
     stage("denoise")  # the first step also reads the transformer's 66 GB from disk (lazy load)
-    v, a = denoise(c.dit_params, c.dit_cfg, layout, text, video_rows, audio_rows, Schedules.make(num_inference_steps),
-                   on_step=on_step, check_finite=check_finite)
+    sched = schedules if schedules is not None else Schedules.make(num_inference_steps)
+    v, a = denoise(c.dit_params, c.dit_cfg, layout, text, video_rows, audio_rows, sched, on_step=on_step,
+                   check_finite=check_finite)
 
     dbg.update(final_video_rows=v, final_audio_rows=a)
     meta = dict(ncv=layout.num_condition_video_rows, nca=layout.num_condition_audio_rows, lf=lf, lh=lh, lw=lw, na=na)

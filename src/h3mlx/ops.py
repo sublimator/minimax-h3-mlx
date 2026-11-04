@@ -64,6 +64,19 @@ def linear(x: mx.array, w: mx.array, b: mx.array | None = None) -> mx.array:
     return y + b if b is not None else y
 
 
+def plinear(x: mx.array, p: dict, name: str, bias: bool = False) -> mx.array:
+    """The Linear `name` of state dict `p`, plus its LoRA when `name.lora_A.weight` / `name.lora_B.weight` are present.
+
+    PEFT's lora.Linear as HyperFlow loads it: the adapter is in the base layer's dtype, the input is cast to it, the
+    two products round in that dtype, and the sum is cast back to the base result's dtype. Scaling (alpha / rank) must
+    be 1, so the `* scaling` is exact and left out (`hyperflow.attach` checks it)."""
+    y = linear(x, p[name + ".weight"], p[name + ".bias"] if bias else None)
+    a = p.get(name + ".lora_A.weight")
+    if a is None:
+        return y
+    return (y + linear(linear(x.astype(a.dtype), a), p[name + ".lora_B.weight"])).astype(y.dtype)
+
+
 def adaln_modulation(temb: mx.array, w: mx.array, b: mx.array, hidden_size: int) -> list[mx.array]:
     """MiniMaxH3AdaLayerNormModulation: (num_t, temb_dim) -> 6 x (num_t * 3, hidden), rows [t0m0, t0m1, t0m2, t1m0..].
 
@@ -120,23 +133,23 @@ def attn_block(
 ) -> mx.array:
     """MiniMaxH3AttnProcessor with separate to_q/to_k/to_v (no bias), per-head RMSNorm on q/k, rope, to_out."""
     b, s, _ = x.shape
-    q = linear(x, p["to_q.weight"]).reshape(b, s, heads, -1)
-    k = linear(x, p["to_k.weight"]).reshape(b, s, heads, -1)
-    v = linear(x, p["to_v.weight"]).reshape(b, s, heads, -1)
+    q = plinear(x, p, "to_q").reshape(b, s, heads, -1)
+    k = plinear(x, p, "to_k").reshape(b, s, heads, -1)
+    v = plinear(x, p, "to_v").reshape(b, s, heads, -1)
     q = rms_norm(q, p["norm_q.weight"], qk_eps)
     k = rms_norm(k, p["norm_k.weight"], qk_eps)
     if rotary is not None:
         q = apply_rotary(q, *rotary)
         k = apply_rotary(k, *rotary)
     o = attention(q, k, v, mask).reshape(b, s, -1)
-    return linear(o, p["to_out.0.weight"])
+    return plinear(o, p, "to_out.0")
 
 
 def swiglu_ff(x: mx.array, p: dict) -> mx.array:
     """diffusers FeedForward(activation_fn="swiglu", bias=False): proj -> (h, gate) -> h * silu(gate) -> out."""
-    h = linear(x, p["net.0.proj.weight"])
+    h = plinear(x, p, "net.0.proj")
     h, gate = mx.split(h, 2, axis=-1)
-    return linear(h * silu(gate), p["net.2.weight"])
+    return plinear(h * silu(gate), p, "net.2")
 
 
 # --- timestep embedding (embeddings.Timesteps + TimestepEmbedding) -------------------------------------------------
@@ -156,8 +169,23 @@ def timestep_sinusoid(t: mx.array, dim: int = 256, max_period: float = 10000.0) 
 def timestep_embedding(t: mx.array, p: dict, freq_dim: int = 256) -> mx.array:
     """time_proj then time_embedder (linear_1, silu, linear_2)."""
     e = timestep_sinusoid(t, freq_dim)
-    e = linear(e, p["linear_1.weight"], p["linear_1.bias"])
-    return linear(silu(e), p["linear_2.weight"], p["linear_2.bias"])
+    e = plinear(e, p, "linear_1", bias=True)
+    return plinear(silu(e), p, "linear_2", bias=True)
+
+
+def two_time_embedding(t: mx.array, r: mx.array | None, p: dict, cfg: dict) -> mx.array:
+    """The DiT's timestep embedding; with HyperFlow loaded, HyperFlow's TwoTimeEmbedder: the step's start t and its
+    endpoint r are embedded by `time_embedder` and `endpoint_time_embedder` (same base weights, separate LoRAs) and
+    blended, emb(t) + gate * (emb_r(r) - emb(t)). Refuses to run a two-time model without endpoints, and the reverse."""
+    two_time = "endpoint_time_embedder.linear_1.weight" in p
+    if two_time != (r is not None):
+        raise ValueError("HyperFlow weights need the step endpoints, and endpoints need HyperFlow weights"
+                         f" (endpoint embedder loaded: {two_time}, endpoints given: {r is not None})")
+    temb = timestep_embedding(t, _sub(p, "time_embedder."), cfg["freq_dim"])
+    if r is None:
+        return temb
+    r_emb = timestep_embedding(r, _sub(p, "endpoint_time_embedder."), cfg["freq_dim"])
+    return temb + cfg["hyperflow_gate"] * (r_emb - temb)
 
 
 # --- patchify (modular_pipelines/minimax_h3/before_denoise.py, decoders.py) ---------------------------------------
@@ -311,10 +339,13 @@ def dit_forward(
     audio_indices: mx.array,
     text_indices: mx.array,
     cache: "ModulationCache | None" = None,
+    endpoint: mx.array | None = None,
 ) -> tuple[mx.array, mx.array]:
     """MiniMaxH3Transformer3DModel.forward over one packed sequence. `p` is the state dict (diffusers names), `cfg`
     its config. Returns (video velocity rows, audio velocity rows) in the order of video_indices / audio_indices.
-    With `cache`, the AdaLN tables come from it (the `adaln_proj` / `norm_out.linear` weights may then be absent)."""
+    With `cache`, the AdaLN tables come from it (the `adaln_proj` / `norm_out.linear` weights may then be absent).
+    With HyperFlow attached (`hyperflow.attach`), `endpoint` holds each distinct timestep's endpoint r, aligned with
+    `timestep` (the distinct (t, r) pairs)."""
     hidden, heads = cfg["hidden_size"], cfg["num_attention_heads"]
     eps, qk_eps, final_eps = cfg["norm_eps"], cfg["qk_norm_eps"], cfg["final_norm_eps"]
     seq = position_ids.shape[0]
@@ -335,9 +366,11 @@ def dit_forward(
     #@@start adaln-rows-and-blocks
     mx.eval(x)  # projections + refiner + scatter as their own graph, before the first block
     if cache is None:
-        temb = timestep_embedding(timestep, _sub(p, "time_embedder."), cfg["freq_dim"])
+        temb = two_time_embedding(timestep, endpoint, p, cfg)
         t_rows = timestep_indices
     else:
+        if endpoint is not None or "endpoint_time_embedder.linear_1.weight" in p:
+            raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
         temb = None
         t_rows = cache.rows(timestep, timestep_indices)  # step-local timestep index -> row of the cached table
     adaln_indices = t_rows * MODALITY_NUM + token_tags

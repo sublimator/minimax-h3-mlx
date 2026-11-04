@@ -159,3 +159,46 @@ def test_check_headers_passes_on_a_release_layout_and_catches_a_wrong_dtype(rele
     save_file(sd, str(shard))
     with pytest.raises(ValueError, match="expected"):
         load.check_headers(broken, keep_layers=50)
+
+
+def _hyperflow_file(release, path):
+    from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
+    from safetensors.torch import save_file
+    from test_hyperflow import make_file
+
+    model = MiniMaxH3Transformer3DModel.from_pretrained(release / "transformer_ref")
+    tensors, md = make_file(model, dict(model.config), scale=0.05)
+    save_file(tensors, str(path), metadata=md)
+    return path
+
+
+def test_run_script_with_hyperflow(release, tmp_path):
+    """--hyperflow: the file's 9-point grid (8 calls), the plan and the file's hash logged, a clip written."""
+    run = _script()
+    hf = _hyperflow_file(release, tmp_path / "hf_test.safetensors")
+    args = _args(release, tmp_path, tmp_path / "out")
+    i = args.index("--steps")
+    del args[i : i + 2]
+    with pytest.raises(SystemExit):
+        run.main(args + ["--steps", "3", "--hyperflow", str(hf)])  # the grid comes from the file
+    assert run.main(args + ["--hyperflow", str(hf)]) == 0
+    log = json.loads((tmp_path / "out" / "run.json").read_text())
+    assert log["status"] == "done"
+    assert log["plan"]["model_calls"] == 8 and log["plan"]["grid_points"] == 9
+    assert log["plan"]["hyperflow"]["gate"] == 0.25 and log["plan"]["hyperflow"]["rank"] == 4
+    f = next(e for e in log["events"] if e["event"] == "hyperflow_file")
+    assert len(f["sha256"]) == 64 and f["known_sha256"] is None
+    steps = [e for e in log["events"] if e["event"] == "step"]
+    assert [e["i"] for e in steps] == list(range(8))
+    assert int(_probe(tmp_path / "out" / "video.mp4")["video"]["nb_frames"]) == 124
+
+
+def test_run_script_refuses_a_released_name_with_other_bytes(release, tmp_path):
+    run = _script()
+    hf = _hyperflow_file(release, tmp_path / "minimax_h3_hyperflow_8step_v1.0.safetensors")
+    args = _args(release, tmp_path, tmp_path / "out")
+    i = args.index("--steps")
+    del args[i : i + 2]
+    with pytest.raises(ValueError, match="not the released"):
+        run.main(args + ["--hyperflow", str(hf)])
+    assert json.loads((tmp_path / "out" / "run.json").read_text())["status"] == "error"
