@@ -16,10 +16,17 @@ from .ops import ROPE_FRAME_RESCALE, ROPE_FRAMES_PER_LATENT, frame_position_grid
 
 @dataclass(frozen=True)
 class Ref:
-    """What the packer reads of a reference: its kind ('image' | 'video' | 'audio') and whether a video has audio."""
+    """What the packer reads of a reference: its kind ('image' | 'video' | 'audio') and whether it carries audio.
+    As in diffusers: an image never has audio, an audio reference always does, a video does when it has a soundtrack."""
 
     kind: str
     has_audio: bool = False
+
+    def __post_init__(self):
+        if self.kind == "audio":
+            object.__setattr__(self, "has_audio", True)
+        elif self.kind == "image" and self.has_audio:
+            raise ValueError("an image reference has no audio")
 
 
 @dataclass
