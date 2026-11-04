@@ -10,6 +10,7 @@
 Safetensors are opened lazily (`mx.load`), so only what is kept is materialised.
 """
 
+import gc
 import json
 import re
 from pathlib import Path
@@ -133,6 +134,7 @@ def staged_text_encoder(d, keep_layers: int = 50, dtype=None):
         out = run(token_ids, vision_inputs)
         mx.eval(out)
         del model, run
+        gc.collect()  # a reference cycle would otherwise keep ~51 GB alive into the denoise
         mx.clear_cache()
         return out
 

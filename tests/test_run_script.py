@@ -79,7 +79,9 @@ def test_run_script_writes_a_clip_and_can_redecode(release, tmp_path):
     names = [e["event"] for e in log["events"]]
     assert log["status"] == "done"
     assert names[0] == "writer_ok"
-    assert names.index("text_done") < names.index("step") < names.index("denoised") < names.index("written")
+    assert names.index("text_done") < names.index("stage_references") < names.index("stage_denoise") \
+        < names.index("step") < names.index("denoised") < names.index("stage_decode") < names.index("written")
+    assert log["limits"]["memory_limit_gb"] == 110.0 and "pressure" in log["events"][0]
     assert all("mlx_cache_gb" in e and "rss_gb" in e for e in log["events"])
     assert log["provenance"]["packages"]["mlx"] and len(log["image_sha256"]) == 64
     streams = _probe(out / "video.mp4")

@@ -48,10 +48,17 @@ def current_rss_gb() -> float:
     return round(int(out or 0) * 1024 / 1e9, 2)
 
 
+def pressure_level() -> int | None:
+    """macOS kernel memory pressure: 1 normal, 2 warning, 4 critical (None elsewhere)."""
+    p = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"], capture_output=True, text=True)
+    return int(p.stdout.strip()) if p.returncode == 0 and p.stdout.strip().isdigit() else None
+
+
 def mem() -> dict:
     return {"mlx_active_gb": round(mx.get_active_memory() / 1e9, 2), "mlx_cache_gb": round(mx.get_cache_memory() / 1e9, 2),
             "mlx_peak_gb": round(mx.get_peak_memory() / 1e9, 2), "rss_gb": current_rss_gb(),
-            "max_rss_gb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9, 2)}
+            "max_rss_gb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9, 2),
+            "pressure": pressure_level()}
 
 
 def sha256(path: Path) -> str:
@@ -166,11 +173,16 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--plan-only", action="store_true", help="configs, tokenizer and processor only; no weights")
     ap.add_argument("--decode-from", type=Path, help="decode a saved final_rows.npz instead of running the model")
+    ap.add_argument("--memory-limit-gb", type=float, default=110.0,
+                    help="MLX memory limit (a guideline: allocations wait and drop cache before failing)")
+    ap.add_argument("--cache-limit-gb", type=float, default=4.0, help="cap on memory MLX keeps cached after use")
     ap.add_argument("--ref-short-edge", type=int, default=0, help="override 2048 (tests only)")
     ap.add_argument("--canvas-short-edge", type=int, default=0, help="override 768 (tests only)")
     args = ap.parse_args(argv)
 
     t0 = time.time()
+    previous_limits = {"memory_limit_gb": round(mx.set_memory_limit(int(args.memory_limit_gb * 1e9)) / 1e9, 2),
+                       "cache_limit_gb": round(mx.set_cache_limit(int(args.cache_limit_gb * 1e9)) / 1e9, 2)}
     weights = args.weights.expanduser()
     prompt_path, image_path = args.prompt_file.expanduser(), args.image.expanduser()
     prompt = prompt_path.read_text().strip()
@@ -181,7 +193,9 @@ def main(argv=None) -> int:
            "image": str(image_path), "image_sha256": sha256(image_path), "image_size": list(image.size),
            "prompt_sha256": sha256(prompt_path), "prompt_chars": len(prompt), "seed": args.seed,
            "settings": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
-           "provenance": provenance(), "status": "running", "events": []}
+           "provenance": provenance(), "limits": {"memory_limit_gb": args.memory_limit_gb,
+                                                  "cache_limit_gb": args.cache_limit_gb, "previous": previous_limits},
+           "status": "running", "events": []}
 
     def save_log():
         tmp = out / "run.json.tmp"
@@ -233,7 +247,7 @@ def main(argv=None) -> int:
             video, audio, sr = ref2va(c, prompt, [ImageRef(image)], num_frames=args.frames, height=args.height,
                                       width=args.width, num_inference_steps=args.steps, seed=args.seed,
                                       on_step=on_step, check_finite=True, on_denoised=on_denoised,
-                                      free_transformer=True)
+                                      free_transformer=True, on_stage=lambda name: event(f"stage_{name}"))
         event("decoded", video_shape=list(video.shape), audio_shape=list(audio.shape),
               video_mean=float(video.mean()), video_std=float(video.std()),
               audio_rms=float(np.sqrt((audio ** 2).mean())))

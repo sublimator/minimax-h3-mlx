@@ -228,12 +228,14 @@ def decode(c: Components, video_rows: mx.array, audio_rows: mx.array, ncv: int, 
 
 def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, width=None, num_inference_steps=50,
            seed=0, on_step=None, debug: dict | None = None, check_finite: bool = False, on_denoised=None,
-           free_transformer: bool = False):
+           free_transformer: bool = False, on_stage=None):
     """Returns (video float32 (F, H, W, 3) in [0, 1], audio float32 (2, samples), sampling rate). `debug`, if given,
     collects the intermediates under diffusers' state names. `check_finite` raises on a NaN/inf at each stage boundary
     and denoise step. `on_denoised(video_rows, audio_rows, meta)` runs before decoding (e.g. to save the latents).
-    `free_transformer` empties `c.dit_params` before decoding so the VAEs don't sit on top of the 66 GB transformer."""
+    `free_transformer` empties `c.dit_params` before decoding so the VAEs don't sit on top of the 66 GB transformer.
+    `on_stage(name)` is called as each stage starts: references, layout, denoise, decode."""
     dbg = debug if debug is not None else {}
+    stage = on_stage or (lambda name: None)
     height, width, num_frames, refs = setup(c, references, height, width, num_frames)
     #@@start text
     vision, ic, vc, vts = vision_features(c, refs)
@@ -244,11 +246,13 @@ def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, 
     if check_finite:
         assert_finite("prompt embeddings", text)
 
+    stage("references")
     cond, ref_audio = encode_references(c, refs)
     dbg.update(condition_latents=cond, audio_condition_latents=ref_audio)
     if check_finite:
         for i, x in enumerate(cond + ref_audio):
             assert_finite(f"reference latents {i}", x)
+    stage("layout")
     #@@start layout
     ratio = c.vae.cfg.spatial_ratio
     lf, lh, lw = R.video_latent_num_frames(num_frames), height // ratio, width // ratio
@@ -278,6 +282,7 @@ def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, 
     #@@end noise-draws
 
     dbg.update(layout=layout, initial_video_rows=video_rows, initial_audio_rows=audio_rows)
+    stage("denoise")  # the first step also reads the transformer's 66 GB from disk (lazy load)
     v, a = denoise(c.dit_params, c.dit_cfg, layout, text, video_rows, audio_rows, Schedules.make(num_inference_steps),
                    on_step=on_step, check_finite=check_finite)
 
@@ -288,6 +293,7 @@ def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, 
     if free_transformer:
         c.dit_params.clear()
         mx.clear_cache()
+    stage("decode")
     video, audio = decode(c, v, a, **meta)
     if check_finite:
         assert_finite("decoded video", mx.array(video))
