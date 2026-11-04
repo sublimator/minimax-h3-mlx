@@ -340,6 +340,7 @@ def dit_forward(
     for i in range(cfg["num_layers"]):
         x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps,
                       modulation=None if cache is None else cache.blocks[i])
+        mx.eval(x)  # one block's graph at a time: bounds activation memory at 20-50k rows
 
     if cache is None:
         x = norm_out(x, temb, p["norm_out.norm.weight"], p["norm_out.linear.weight"], p["norm_out.linear.bias"],

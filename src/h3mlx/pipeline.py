@@ -93,30 +93,44 @@ class Components:
         return self.vae.cfg.spatial_ratio * self.dit_cfg["patch_size"][2]
 
 
+MAX_IMAGES, MAX_VIDEOS, MAX_AUDIOS, MAX_REFERENCES = 9, 3, 3, 12
+
+
 def _normalize_audio(wave: np.ndarray, sr: int, target_sr: int, max_duration: float) -> np.ndarray:
-    wave = np.asarray(wave, dtype=np.float32)
-    if wave.ndim != 2 or wave.shape[0] not in (1, 2):
-        raise ValueError(f"audio must be (channels, samples) mono or stereo, got {wave.shape}")
-    wave = wave[:, : int(max_duration * sr)]
-    if wave.shape[0] != 2:
-        wave = np.repeat(wave, 2, axis=0)
-    if sr != target_sr:
-        raise NotImplementedError(f"resample {sr} -> {target_sr} Hz first (diffusers uses torchaudio here)")
-    return wave
+    """`MiniMaxH3Ref2VASetupStep._normalize_audio_condition`: truncate at the native rate, mono -> stereo, one
+    torchaudio sinc resample (h3mlx.resample is torchaudio's own code)."""
+    import torch
 
+    from .resample import resample
 
-def _normalize_image(img: Image.Image, short_edge: int, multiple: int) -> Image.Image:
-    img = img.convert("RGB")
-    w, h = img.size
-    if w > 4 * h or h > 4 * w:
-        raise ValueError(f"image must be within 1:4 and 4:1, got {w}x{h}")
-    s = short_edge / min(w, h)
-    size = (max(multiple, round(w * s / multiple) * multiple), max(multiple, round(h * s / multiple) * multiple))
-    return img if img.size == size else img.resize(size, Image.Resampling.LANCZOS)
+    w = torch.as_tensor(np.asarray(wave))
+    if w.ndim != 2 or w.shape[0] not in (1, 2):
+        raise ValueError(f"audio must be (channels, samples) mono or stereo, got {tuple(w.shape)}")
+    w = w.to(torch.float32)[:, : int(max_duration * sr)]
+    if w.shape[0] != 2:
+        w = w.expand(2, -1).contiguous()
+    return resample(w, int(sr), int(target_sr)).numpy()
 
 
 def setup(c: Components, references, height, width, num_frames):
+    """`MiniMaxH3Ref2VASetupStep`: validate, resolve the canvas and frame count, normalise references in order."""
     m = c.canvas_multiple
+    if (height is None) != (width is None):
+        raise ValueError("height and width have to be passed together, or neither of them")
+    if height is not None and (height % m or width % m):
+        raise ValueError(f"height and width must be multiples of {m}, got {height}x{width}")
+    if not references:
+        raise ValueError("ref2va needs at least one reference")
+    kinds = [getattr(r, "kind", None) for r in references]
+    if any(k not in ("image", "video", "audio") for k in kinds):
+        raise ValueError(f"references must be ImageRef, VideoRef or AudioRef, got kinds {kinds}")
+    for kind, limit in (("image", MAX_IMAGES), ("video", MAX_VIDEOS), ("audio", MAX_AUDIOS)):
+        if kinds.count(kind) > limit:
+            raise ValueError(f"at most {limit} {kind} references, got {kinds.count(kind)}")
+    if len(kinds) > MAX_REFERENCES:
+        raise ValueError(f"at most {MAX_REFERENCES} references in total, got {len(kinds)}")
+    if set(kinds) == {"audio"}:
+        raise ValueError("an audio reference has to be paired with at least one image or video reference")
     if height is None:
         height, width = R.resolve_canvas_size(16, 9, m, c.canvas_short_edge, c.canvas_max_pixels)
     num_frames = R.align_num_frames(num_frames)
@@ -128,7 +142,7 @@ def setup(c: Components, references, height, width, num_frames):
         if r.has_audio:
             wave = _normalize_audio(r.audio, r.sample_rate or c.audio_sampling_rate, c.audio_sampling_rate, num_frames / R.FPS)
         if r.kind == "image":
-            out.append(ImageRef(_normalize_image(r.image, c.reference_image_short_edge, m)))
+            out.append(ImageRef(R.normalize_image(r.image, c.reference_image_short_edge, m)))
         elif r.kind == "video":
             frames = R.normalize_video_frames(r.frames, float(r.fps), num_frames, m, c.canvas_short_edge,
                                               c.canvas_max_pixels)

@@ -95,8 +95,9 @@ def load_text_encoder(d, keep_layers: int = 50, dtype=None):
     if not 0 < keep_layers <= n_layers:
         raise ValueError(f"keep_layers must be in (0, {n_layers}], got {keep_layers}")
 
+    config.text_config.num_hidden_layers = keep_layers  # never build the layers past the cut
     model = Model(config)
-    model.language_model.model.layers = model.language_model.model.layers[:keep_layers]
+    model.language_model.pop("lm_head", None)  # unused; would be a random 5120 x 151936 matrix
     layer_re = re.compile(r"language_model\.layers\.(\d+)\.")
 
     def keep(k):
@@ -120,3 +121,18 @@ def load_text_encoder(d, keep_layers: int = 50, dtype=None):
         return model.hidden_state_at_layer(mx.array([token_ids]), keep_layers, **kw)
 
     return model, encode
+
+
+def staged_text_encoder(d, keep_layers: int = 50, dtype=None):
+    """An `encode(token_ids, vision_inputs)` that loads the text encoder, runs it, and frees it before returning, so
+    it is never resident together with the transformer (~51 GB bf16 for 50 layers of the release)."""
+
+    def encode(token_ids, vision_inputs):
+        model, run = load_text_encoder(d, keep_layers, dtype)
+        out = run(token_ids, vision_inputs)
+        mx.eval(out)
+        del model, run
+        mx.clear_cache()
+        return out
+
+    return encode

@@ -192,7 +192,8 @@ def vit_decoder(
     rotary = vit_rope(vit_positions(f, h, w, regs.shape[1] + 1), vit_rope_inv_freq(rope_dim, rope_theta))
     for i in range(num_layers):
         x = vit_block(x, _sub(p, f"transformer_blocks.{i}."), heads, eps, rotary)
-    x = mx.fast.layer_norm(x.astype(mx.float32), p["norm_out.weight"], p["norm_out.bias"], eps)
+    x = mx.fast.layer_norm(x.astype(mx.float32), p["norm_out.weight"].astype(mx.float32),
+                           p["norm_out.bias"].astype(mx.float32), eps)
     x = _lin(x.astype(p["proj_out.weight"].dtype), p, "proj_out")[:, :n]
     x = x.reshape(b, f, h, w, out_channels, patch_size_t, patch_size, patch_size)
     x = x.transpose(0, 1, 5, 2, 6, 3, 7, 4)  # (b, f, pt, h, p, w, p, c)

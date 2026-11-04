@@ -63,9 +63,9 @@ def image_reference_size(width: int, height: int, short_edge=REFERENCE_IMAGE_SHO
     return max(multiple, round(width * s / multiple) * multiple), max(multiple, round(height * s / multiple) * multiple)
 
 
-def normalize_image(image: Image.Image) -> Image.Image:
+def normalize_image(image: Image.Image, short_edge=REFERENCE_IMAGE_SHORT_EDGE, multiple=CANVAS_MULTIPLE) -> Image.Image:
     image = image.convert("RGB")
-    size = image_reference_size(*image.size)
+    size = image_reference_size(*image.size, short_edge=short_edge, multiple=multiple)
     return image if image.size == size else image.resize(size, Image.Resampling.LANCZOS)
 
 

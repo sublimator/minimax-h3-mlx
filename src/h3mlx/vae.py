@@ -124,6 +124,11 @@ def _sub(p, prefix):
     return {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}
 
 
+def _evaluated(a: mx.array) -> mx.array:
+    mx.eval(a)
+    return a
+
+
 class VideoVAE:
     """Holds MLX-layout weights (conv weights already transposed with `vae_ops.conv3d_weight`)."""
 
@@ -146,7 +151,8 @@ class VideoVAE:
             return self._encoder(x)
         ys, yl, yo = split_tiles(x.shape[2], c.tile_h, c.tile_overlap_h, c.spatial_ratio)
         xs, xl, xo = split_tiles(x.shape[3], c.tile_w, c.tile_overlap_w, c.spatial_ratio)
-        rows = [[self._encoder(x[:, :, i : i + il, j : j + jl]) for j, jl in zip(xs, xl)] for i, il in zip(ys, yl)]
+        rows = [[_evaluated(self._encoder(x[:, :, i : i + il, j : j + jl])) for j, jl in zip(xs, xl)]
+                for i, il in zip(ys, yl)]  # one tile at a time: a 2048 px reference is ~200 tiles
         r = c.spatial_ratio
         return stitch_tiles(rows, [o // r for o in yo], [o // r for o in xo])
 
@@ -159,7 +165,8 @@ class VideoVAE:
         if n % c.clip_length:
             x = mx.concatenate([x, mx.repeat(x[:, -1:], (-n) % c.clip_length, axis=1)], axis=1)
         m = mx.concatenate(
-            [self.encode_clip(x[:, i * c.clip_length : (i + 1) * c.clip_length]) for i in range(x.shape[1] // c.clip_length)],
+            [_evaluated(self.encode_clip(x[:, i * c.clip_length : (i + 1) * c.clip_length]))
+             for i in range(x.shape[1] // c.clip_length)],
             axis=1,
         )
         return m[:, : -c.token_drop] if c.token_drop > 0 else m
@@ -180,8 +187,8 @@ class VideoVAE:
         r = c.spatial_ratio
         ys, yl, yo = split_tiles(z.shape[2] * r, c.tile_h, c.tile_overlap_h, r)
         xs, xl, xo = split_tiles(z.shape[3] * r, c.tile_w, c.tile_overlap_w, r)
-        rows = [[self._decoder(z[:, :, i // r : i // r + il // r, j // r : j // r + jl // r]) for j, jl in zip(xs, xl)]
-                for i, il in zip(ys, yl)]
+        rows = [[_evaluated(self._decoder(z[:, :, i // r : i // r + il // r, j // r : j // r + jl // r]))
+                 for j, jl in zip(xs, xl)] for i, il in zip(ys, yl)]
         return stitch_tiles(rows, yo, xo)
 
     def decode(self, z):
@@ -196,7 +203,7 @@ class VideoVAE:
             z = mx.concatenate([z, mx.repeat(z[:, -1:], pad, axis=1)], axis=1)
         out, overlap = [], None
         for i in range(n_chunks):
-            clip = self.decode_clip(z[:, i * tcs : i * tcs + tcs + c.token_overlap])
+            clip = _evaluated(self.decode_clip(z[:, i * tcs : i * tcs + tcs + c.token_overlap]))
             for j in range(int(drop > 0) + 1):
                 ch = clip[:, j * chunk_frames : j * chunk_frames + chunk_frames][:, c.frame_pre_padding :]
                 if j == 0:
