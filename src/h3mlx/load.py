@@ -161,3 +161,64 @@ def staged_text_encoder(d, keep_layers: int = 50, dtype=None):
         return out
 
     return encode
+
+
+KEEP_F32 = ("proj_in", "audio_proj_in", "time_embedder", "proj_out", "audio_proj_out")
+
+
+def check_headers(weights: Path, keep_layers: int = 50) -> dict:
+    """Read only the safetensors headers (mx.load is lazy: shapes and dtypes, no data) and check them against what the
+    code will build: transformer_ref's keys against its index and its dtypes against the release's precision split;
+    the text encoder's kept parameters against the mlx-vlm model built from its config (built lazily, never evaluated);
+    the VAEs' conv weights are 5-D. Raises ValueError listing what is wrong."""
+    from mlx.utils import tree_flatten
+    from mlx_vlm.models.qwen3_vl import Model, ModelConfig
+    from mlx_vlm.models.qwen3_vl.vision import VisionModel
+    from mlx_vlm.utils import sanitize_weights
+
+    weights = Path(weights)
+    problems, report = [], {}
+
+    t = load_safetensors(weights / "transformer_ref")
+    index = json.loads(next((weights / "transformer_ref").glob("*.index.json")).read_text())["weight_map"]
+    if set(t) != set(index):
+        problems.append(f"transformer_ref keys differ from its index: {len(set(t) ^ set(index))}")
+    for k, v in t.items():
+        want = mx.float32 if k.split(".")[0] in KEEP_F32 else mx.bfloat16
+        if v.dtype != want:
+            problems.append(f"transformer_ref {k}: {v.dtype}, expected {want}")
+    cfg = _config(weights / "transformer_ref")
+    h, inner = cfg["hidden_size"], cfg["num_attention_heads"] * cfg["attention_head_dim"]
+    for k, shape in {"transformer_blocks.0.attn.to_q.weight": (inner, h), "proj_in.weight": (h, cfg["in_channels"] * 4),
+                     "transformer_blocks.49.ff.net.0.proj.weight": (2 * cfg["ffn_dim"], h)}.items():
+        if k in t and tuple(t[k].shape) != shape:
+            problems.append(f"transformer_ref {k}: shape {tuple(t[k].shape)}, expected {shape}")
+    report["transformer_ref"] = {"tensors": len(t), "gb": round(sum(v.nbytes for v in t.values()) / 1e9, 2)}
+
+    config = ModelConfig.from_dict(qwen_params(_config(weights / "text_encoder")))
+    config.text_config.num_hidden_layers = keep_layers
+    model = Model(config)  # parameters are created lazily and never evaluated here
+    model.language_model.pop("lm_head", None)
+    layer_re = re.compile(r"language_model\.layers\.(\d+)\.")
+    w = load_safetensors(weights / "text_encoder",
+                         lambda k: "lm_head" not in k and not ((m := layer_re.search(k)) and int(m.group(1)) >= keep_layers))
+    w = sanitize_weights(VisionModel, sanitize_weights(model, w), config.vision_config)
+    want = dict(tree_flatten(model.parameters()))
+    missing = sorted(set(want) - set(w))
+    extra = sorted(k for k in set(w) - set(want) if "rotary" not in k)
+    bad_shape = [k for k in want if k in w and tuple(w[k].shape) != tuple(want[k].shape)]
+    for name, items in (("missing", missing), ("unexpected", extra), ("wrong shape", bad_shape)):
+        if items:
+            problems.append(f"text_encoder {name}: {items[:5]} (+{max(0, len(items) - 5)})")
+    report["text_encoder"] = {"kept_tensors": len(want), "gb": round(sum(w[k].nbytes for k in want if k in w) / 1e9, 2),
+                              "dtypes": sorted({str(w[k].dtype) for k in want if k in w})}
+
+    for sub in ("vae", "audio_vae"):
+        sd = load_safetensors(weights / sub)
+        report[sub] = {"tensors": len(sd), "gb": round(sum(v.nbytes for v in sd.values()) / 1e9, 2),
+                       "dtypes": sorted({str(v.dtype) for v in sd.values()})}
+    if not any(v.ndim == 5 for v in load_safetensors(weights / "vae").values()):
+        problems.append("vae: no 5-D conv weights")
+    if problems:
+        raise ValueError("weight headers: " + "; ".join(problems))
+    return report

@@ -172,6 +172,8 @@ def main(argv=None) -> int:
     ap.add_argument("--steps", type=int, default=50, help="sigma grid points incl. the final 0 (N-1 model calls)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--plan-only", action="store_true", help="configs, tokenizer and processor only; no weights")
+    ap.add_argument("--check-headers", action="store_true",
+                    help="read only the weight files' headers and check names, shapes and dtypes against the code")
     ap.add_argument("--decode-from", type=Path, help="decode a saved final_rows.npz instead of running the model")
     ap.add_argument("--memory-limit-gb", type=float, default=110.0,
                     help="MLX memory limit (a guideline: allocations wait and drop cache before failing)")
@@ -219,6 +221,8 @@ def main(argv=None) -> int:
             event("text_done", hidden=list(h.shape))
             return h
 
+        if args.check_headers:
+            event("headers_ok", **load.check_headers(weights))
         c = config_components(args, weights, encode_text)
         log["plan"] = plan(c, prompt, image, args)
         event("plan", **log["plan"])

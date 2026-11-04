@@ -24,7 +24,9 @@ def release(tmp_path_factory):
     t = build()
     d = tmp_path_factory.mktemp("MiniMax-H3")
     t["qwen"].save_pretrained(d / "text_encoder")
-    t["dit"].save_pretrained(d / "transformer_ref", max_shard_size="200KB")
+    from test_dit_mixed_precision import to_mixed
+
+    to_mixed(t["dit"]).save_pretrained(d / "transformer_ref", max_shard_size="200KB")  # the release's precision split
     t["vae"].save_pretrained(d / "vae")
     t["audio"].save_pretrained(d / "audio_vae")
     shutil.copytree(HF / "tokenizer", d / "tokenizer")
@@ -132,3 +134,21 @@ def test_exif_rotated_photo_is_upright_like_diffusers(release, tmp_path):
     assert _script().main(args + ["--plan-only"]) == 0
     log = json.loads((tmp_path / "plan" / "run.json").read_text())
     assert want.size == (48, 64) and log["image_size"] == [48, 64]
+
+
+def test_check_headers_passes_on_a_release_layout_and_catches_a_wrong_dtype(release, tmp_path):
+    from safetensors.numpy import load_file, save_file
+
+    from h3mlx import load
+
+    report = load.check_headers(release, keep_layers=50)
+    assert report["transformer_ref"]["tensors"] > 0 and report["text_encoder"]["kept_tensors"] > 0
+    broken = tmp_path / "broken"
+    shutil.copytree(release, broken)
+    shard = sorted((broken / "transformer_ref").glob("*.safetensors"))[0]
+    sd = load_file(str(shard))
+    k = next(k for k in sd if k.startswith("transformer_blocks"))
+    sd[k] = sd[k].astype(np.float32) if sd[k].dtype != np.float32 else sd[k].astype(np.float16)
+    save_file(sd, str(shard))
+    with pytest.raises(ValueError, match="expected"):
+        load.check_headers(broken, keep_layers=50)

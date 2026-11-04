@@ -63,3 +63,15 @@ def test_dit_forward_reads_exactly_the_released_names():
     ops.dit_forward(p, dict(model.config), mx.zeros((1, 12, 16)), mx.zeros((1, 7, 6)), mx.zeros((1, 5, 20)),
                     **{k: to_mx(v) for k, v in lay.items()})
     assert layer_pattern(p.read, 2, 1) == layer_pattern(keys, 50, 2)
+
+
+
+def test_precision_rule_matches_the_released_headers():
+    """tests/data/transformer_ref.dtypes.json: every tensor's dtype from the 14 real shard headers (HTTP range reads,
+    no weights). load.KEEP_F32 must reproduce it exactly, or check_headers would block a good run."""
+    from h3mlx.load import KEEP_F32
+
+    dtypes = json.loads((DATA / "transformer_ref.dtypes.json").read_text())
+    assert len(dtypes) == 638
+    for k, v in dtypes.items():
+        assert v == ("F32" if k.split(".")[0] in KEEP_F32 else "BF16"), k
