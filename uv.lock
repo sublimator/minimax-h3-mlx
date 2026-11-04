@@ -634,6 +634,10 @@ dependencies = [
     { name = "mlx-vlm" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pillow" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "transformers" },
 ]
 
 [package.dev-dependencies]
@@ -641,9 +645,6 @@ dev = [
     { name = "diffusers" },
     { name = "peft" },
     { name = "pytest" },
-    { name = "torch" },
-    { name = "torchvision" },
-    { name = "transformers" },
 ]
 
 [package.metadata]
@@ -651,6 +652,10 @@ requires-dist = [
     { name = "mlx", specifier = ">=0.32.4" },
     { name = "mlx-vlm", specifier = "==0.7.11" },
     { name = "numpy", specifier = ">=2" },
+    { name = "pillow" },
+    { name = "torch", specifier = ">=2.8" },
+    { name = "torchvision" },
+    { name = "transformers", specifier = ">=5.14" },
 ]
 
 [package.metadata.requires-dev]
@@ -658,9 +663,6 @@ dev = [
     { name = "diffusers", specifier = "==0.42.1" },
     { name = "peft" },
     { name = "pytest", specifier = ">=8" },
-    { name = "torch", specifier = ">=2.8" },
-    { name = "torchvision" },
-    { name = "transformers", specifier = ">=4.57" },
 ]
 
 [[package]]

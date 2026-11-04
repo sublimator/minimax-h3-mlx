@@ -204,5 +204,5 @@ def test_one_transformer_block_matches():
 
 
 def test_torch_linspace_f32_bit_exact():
-    for n in range(2, 600):
+    for n in range(2, 2000):
         assert np.array_equal(ops.torch_linspace_f32(1.0, 0.0, n), torch.linspace(1.0, 0.0, n).numpy()), n
