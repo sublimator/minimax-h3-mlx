@@ -16,7 +16,7 @@ from PIL import Image
 
 from . import ops
 from . import references as R
-from .denoise import Schedules, denoise
+from .denoise import Schedules, assert_finite, denoise
 from .packing import Ref, build_ref2va_packed_sequence
 from .presentation import build_presentation, sample_video_condition_frames
 from .vae import VideoVAE, encode_condition
@@ -205,10 +205,34 @@ def encode_references(c: Components, refs):
     return cond, audio_rows
 
 
+def decode(c: Components, video_rows: mx.array, audio_rows: mx.array, ncv: int, nca: int, lf: int, lh: int, lw: int,
+           na: int):
+    """Final packed rows -> (video float32 (F, H, W, 3) in [0, 1], audio float32 (2, samples)). Conditioning rows (the
+    first `ncv` video / `nca` audio rows) are dropped; latents are de-normalised before the VAEs, ImageNet's
+    normalisation is undone on the pixels after."""
+    patch = tuple(c.dit_cfg["patch_size"])
+    lat_ch, audio_ch = c.dit_cfg["in_channels"], c.dit_cfg["audio_in_channels"]
+    #@@start decode
+    v_lat = ops.unpatchify(video_rows[ncv:], lat_ch, lf, lh, lw, patch)  # (1, C, F, H, W)
+    v_lat = v_lat.transpose(0, 2, 3, 4, 1) * mx.array(c.vae_latents_std) + mx.array(c.vae_latents_mean)
+    px = c.vae.decode(v_lat)[0]  # (frames, H, W, 3)
+    video = mx.clip(px * mx.array(PIXEL_STD) + mx.array(PIXEL_MEAN), 0.0, 1.0)
+
+    a_lat = audio_rows[nca:].reshape(AUDIO_CHANNELS, na, audio_ch)
+    a_lat = a_lat * mx.array(c.audio_latents_std) + mx.array(c.audio_latents_mean)
+    audio = c.audio_vae.decode(a_lat)[:, :, 0]  # (2, samples)
+    #@@end decode
+    mx.eval(video, audio)
+    return np.array(video), np.array(audio)
+
+
 def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, width=None, num_inference_steps=50,
-           seed=0, on_step=None, debug: dict | None = None):
+           seed=0, on_step=None, debug: dict | None = None, check_finite: bool = False, on_denoised=None,
+           free_transformer: bool = False):
     """Returns (video float32 (F, H, W, 3) in [0, 1], audio float32 (2, samples), sampling rate). `debug`, if given,
-    collects the intermediates under diffusers' state names."""
+    collects the intermediates under diffusers' state names. `check_finite` raises on a NaN/inf at each stage boundary
+    and denoise step. `on_denoised(video_rows, audio_rows, meta)` runs before decoding (e.g. to save the latents).
+    `free_transformer` empties `c.dit_params` before decoding so the VAEs don't sit on top of the 66 GB transformer."""
     dbg = debug if debug is not None else {}
     height, width, num_frames, refs = setup(c, references, height, width, num_frames)
     #@@start text
@@ -217,9 +241,14 @@ def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, 
     text = c.encode_text(ids, vision)
     #@@end text
     dbg.update(prompt_embeds=text, text_token_tags=np.asarray(tags), token_ids=ids)
+    if check_finite:
+        assert_finite("prompt embeddings", text)
 
     cond, ref_audio = encode_references(c, refs)
     dbg.update(condition_latents=cond, audio_condition_latents=ref_audio)
+    if check_finite:
+        for i, x in enumerate(cond + ref_audio):
+            assert_finite(f"reference latents {i}", x)
     #@@start layout
     ratio = c.vae.cfg.spatial_ratio
     lf, lh, lw = R.video_latent_num_frames(num_frames), height // ratio, width // ratio
@@ -250,18 +279,17 @@ def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, 
 
     dbg.update(layout=layout, initial_video_rows=video_rows, initial_audio_rows=audio_rows)
     v, a = denoise(c.dit_params, c.dit_cfg, layout, text, video_rows, audio_rows, Schedules.make(num_inference_steps),
-                   on_step=on_step)
+                   on_step=on_step, check_finite=check_finite)
 
     dbg.update(final_video_rows=v, final_audio_rows=a)
-    #@@start decode
-    v_lat = ops.unpatchify(v[layout.num_condition_video_rows :], lat_ch, lf, lh, lw, patch)  # (1, C, F, H, W)
-    v_lat = v_lat.transpose(0, 2, 3, 4, 1) * mx.array(c.vae_latents_std) + mx.array(c.vae_latents_mean)
-    px = c.vae.decode(v_lat)[0]  # (frames, H, W, 3)
-    video = mx.clip(px * mx.array(PIXEL_STD) + mx.array(PIXEL_MEAN), 0.0, 1.0)
-
-    a_lat = a[layout.num_condition_audio_rows :].reshape(AUDIO_CHANNELS, na, audio_ch)
-    a_lat = a_lat * mx.array(c.audio_latents_std) + mx.array(c.audio_latents_mean)
-    audio = c.audio_vae.decode(a_lat)[:, :, 0]  # (2, samples)
-    #@@end decode
-    mx.eval(video, audio)
-    return np.array(video), np.array(audio), c.audio_sampling_rate
+    meta = dict(ncv=layout.num_condition_video_rows, nca=layout.num_condition_audio_rows, lf=lf, lh=lh, lw=lw, na=na)
+    if on_denoised:
+        on_denoised(v, a, meta)
+    if free_transformer:
+        c.dit_params.clear()
+        mx.clear_cache()
+    video, audio = decode(c, v, a, **meta)
+    if check_finite:
+        assert_finite("decoded video", mx.array(video))
+        assert_finite("decoded audio", mx.array(audio))
+    return video, audio, c.audio_sampling_rate

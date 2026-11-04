@@ -35,6 +35,12 @@ class Schedules:
         return (np.float32(1) - self.audio_sigmas[:-1]).astype(np.float32)
 
 
+def assert_finite(what: str, a: mx.array) -> None:
+    """Raise if `a` holds a NaN or an infinity (a silent NaN would otherwise become a black or silent clip)."""
+    if not bool(mx.all(mx.isfinite(a.astype(mx.float32)))):
+        raise FloatingPointError(f"non-finite values in {what}")
+
+
 def row_timesteps(layout: Layout, video_t: float, audio_t: float, cond_video_t: float, cond_audio_t: float):
     """Per-row timesteps reduced to (sorted distinct values, inverse index), like `build_row_timesteps`."""
     seq = len(layout.video_indices) + len(layout.audio_indices) + len(layout.text_indices)
@@ -56,6 +62,7 @@ def denoise(
     schedules: Schedules,
     on_step=None,
     cache: "ops.ModulationCache | None" = None,
+    check_finite: bool = False,
 ):
     """video_rows (n_video, patch_dim) with conditioning rows first; audio_rows (n_audio, audio_ch) with reference rows
     first; prompt_embeds (1, n_text, text_dim). Returns the final (video_rows, audio_rows). With `cache`
@@ -82,6 +89,9 @@ def denoise(
         video_rows = mx.concatenate([video_rows[:ncv], new_v]) if ncv else new_v
         audio_rows = mx.concatenate([audio_rows[:nca], new_a]) if nca else new_a
         mx.eval(video_rows, audio_rows)
+        if check_finite:
+            assert_finite(f"step {i} video rows", video_rows)
+            assert_finite(f"step {i} audio rows", audio_rows)
         if on_step:
             on_step(i, t)
     return video_rows, audio_rows
