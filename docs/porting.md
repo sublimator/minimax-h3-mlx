@@ -3000,8 +3000,9 @@ for audio. This is one tiny f32 configuration, not the bf16 release.
 - **LoRA.** diffusers' generic MiniMax H3 LoRA loader (which routes each LoRA to `transformer` or `transformer_ref`)
   is not ported. One specific LoRA is: HyperFlow, Video Rebirth's 8-step LoRA, with its two-time embedder and fixed
   grid; see `docs/porting-hyperflow.md`. Its hook is `ops.plinear`: every targeted linear adds a LoRA when the weight
-  dict carries `<name>.lora_A.weight` / `.lora_B.weight`, and without them it is exactly `linear(x, p[name + ".weight"])`, the call §2's attention and
-  feed-forward extracts made before HyperFlow.
+  dict carries `<name>.lora_A.weight` / `.lora_B.weight`, and without them it is exactly `linear(x, p[name + ".weight"], p[name + ".bias"] if bias else
+  None)`, the call §2's attention, feed-forward and time-embedder code made before HyperFlow. Only the linears that go
+  through `plinear` can carry a LoRA (`hyperflow.wired_shapes`); a file targeting any other is refused.
 - **Speedups.** Sparse attention and quantisation: a dense bf16 baseline comes first.
 - **Caller-supplied inputs.** diffusers accepts caller-supplied latents and tensor inputs; the port takes the input
   types listed in §8 only.
@@ -3009,5 +3010,6 @@ for audio. This is one tiny f32 configuration, not the bf16 release.
   assembled end to end.
 - **Real weights.** Everything above was checked with tiny random weights and the release's configs, index, tokenizer
   and processor. The released weights have run once end to end on an M3 Ultra (256 GB): run-001, 512×288, 124 frames, 49 calls,
-  1,014 s, a coherent clip. Quality against diffusers' own output on the same
+  1,014 s, with the reference image at a 512 px short edge (off-spec; the release normalises to 2048). It made a clip
+  judged coherent by eye. Quality against diffusers' own output on the same
   inputs is not measured.

@@ -103,7 +103,11 @@ def summarize(events: list) -> dict:
 
 
 def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    h = hashlib.sha256()
+    with open(path, "rb") as f:  # in 16 MB chunks: the HyperFlow file is 2.8 GB
+        for chunk in iter(lambda: f.read(1 << 24), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def provenance() -> dict:
@@ -302,13 +306,15 @@ def main(argv=None) -> int:
             save_log()
             return 0
 
-        if args.hyperflow:
+        #@@start hyperflow-file
+        if args.hyperflow and not args.decode_from:  # a re-decode never reads the adapter
             hf = args.hyperflow
             got = sha256(hf)
             want = hyperflow.KNOWN_SHA256.get(hf.name)
             event("hyperflow_file", file=hf.name, bytes=hf.stat().st_size, sha256=got, known_sha256=want)
             if want is not None and got != want:
                 raise ValueError(f"{hf.name}: sha256 {got} is not the released {want}")
+        #@@end hyperflow-file
         load_weights(c, weights, None if args.decode_from else args.hyperflow)
         if args.decode_from:
             z = np.load(args.decode_from.expanduser())

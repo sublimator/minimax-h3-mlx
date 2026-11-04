@@ -1,6 +1,8 @@
 # Porting HyperFlow to MLX: Video Rebirth's loader → `h3mlx`
 
-<sub>Revision 2: a review found the plan step skipped
+<sub>Revision 3: a review: memory and speed in §7 measured and
+qualified, the seed probe committed, provenance files saved, read_header and the run script's file check linked. Revision
+2: a review found the plan step skipped
 the key and shape checks, LoRAs on unwired linears were accepted, and an explicit empty grid fell back to the
 default. All fixed; §1, §3, §7 and §8 updated.</sub>
 
@@ -16,7 +18,11 @@ transformer, the scheduler and the denoise loop.
 | --- | --- | --- |
 | loader (Apache-2.0) | `github.com/Video-Rebirth/hyperflow` | `1dd2f342aba5ab51da02b62885939655e8e268da` |
 | weights (MiniMax H3 Community License) | HF `VideoRebirthAI/hyperflow`, `minimax_h3_hyperflow_8step_v1.0.safetensors`, 2,795,328,008 bytes | revision `5bde94d7`, sha256 `9297f450…f447` (its `hyperflow.json`) |
-| base model the LoRA was trained on | header `base_model_revision` | `MiniMaxAI/MiniMax-H3` `83db0c0e`; all 14 `transformer_ref` shards have the same LFS oids as our `42ed227` |
+| base model the LoRA was trained on | header `base_model_revision` | `MiniMaxAI/MiniMax-H3` `83db0c0e`; all 16 `transformer_ref` files (14 shards, config, index) have the same oids as our `42ed227` |
+
+The manifest and both revisions' `transformer_ref` file listings are saved in `tests/data/`
+(`hyperflow.manifest-5bde94d7.json`, `transformer_ref.lfs-42ed227-vs-83db0c0.json`), and
+`test_provenance_files_back_the_constants` ties the run script's sha256 and the base revision to them.
 
 **Read, not run.** Their package was read, not executed here. The torch oracle in
 the tests is therefore diffusers 0.42.1 and PEFT 0.21.2 doing the injection their `_load_into` does, plus two short
@@ -104,7 +110,8 @@ Ours parses the same header with the same required fields, and keeps the file's 
 embedder is not a sub-module in MLX. It is a second name prefix in the flat weight dict (§2), and `_base_name` says
 which base `Linear` each LoRA sits on.
 
-`check_plan` adds the checks their PEFT injection performs implicitly, and one theirs doesn't need:
+`check_plan` makes the checks their `_load_into` makes explicitly (every target an `nn.Linear`, one rank matching the
+header, each tensor's shape against its parameter), and one theirs doesn't need:
 
 - **Shapes:** every LoRA must fit its base 2-D `Linear` weight.
 - **Rank and scaling:** all LoRAs share one positive rank, and the scaling must be 1 (§2).
@@ -446,6 +453,16 @@ exactly 1, and multiplying by 1.0 is exact.
  183         out[module + ".lora_B.weight"] = tensors[keys["B"]].astype(dtype)
  184     return out, {**cfg, "hyperflow_gate": float(meta.gate)}
 ```
+📍 `src/h3mlx/hyperflow.py:203-209`
+```python
+ 203 def read_header(path) -> tuple[HyperFlowMeta, dict]:
+ 204     """(meta, {key: shape}) from the safetensors header alone, no tensor data."""
+ 205     with open(path, "rb") as f:
+ 206         n = int.from_bytes(f.read(8), "little")
+ 207         header = json.loads(f.read(n))
+ 208     md = header.pop("__metadata__", None)
+ 209     return HyperFlowMeta.from_header(md), {k: tuple(v["shape"]) for k, v in header.items()}
+```
 📍 `src/h3mlx/hyperflow.py:212-218`
 ```python
  212 def load(path, params: dict, cfg: dict, subfolder: str = "transformer_ref"):
@@ -566,7 +583,7 @@ timestep count (MLX would otherwise broadcast a length-1 array silently).
 ```
 
 The modulation cache (main guide, §2.6) is keyed by `t` alone. With HyperFlow the tables depend on `(t, r)`, so
-`ModulationCache` itself, `dit_forward` and `schedule_timesteps` all raise rather than build or use wrong tables. Extending the cache to pairs is
+`ModulationCache` itself, `dit_forward` and `schedule_timesteps` all raise rather than build or use wrong tables. (`ref2va` never builds a cache.) Extending the cache to pairs is
 possible but not done.
 
 ## 4. The sigma grid
@@ -1045,53 +1062,87 @@ from the schedule actually used. The TFLOP/s in each step event adds the LoRA's 
   76     per_block = 2 * rows * rank * (4 * (h + inner) + (h + 2 * ffn) + (ffn + h))
   77     return per_block * cfg["num_layers"] / 1e12
 ```
-📍 `scripts/run_ref2va.py:178-185`
+📍 `scripts/run_ref2va.py:182-189`
 ```python
- 178 def load_weights(c: Components, weights: Path, hyperflow_path: Path | None = None):
- 179     """Attach the weights lazily (mx.load reads data on first use). The audio VAE is small and loaded eagerly. With
- 180     `hyperflow_path`, the LoRA is attached to transformer_ref's params (2.8 GB more, read on first use too)."""
- 181     c.vae, _, _ = load.load_vae(weights / "vae")
- 182     c.audio_vae, _, _ = load.load_audio_vae(weights / "audio_vae")
- 183     c.dit_params, _ = load.load_transformer(weights / "transformer_ref")
- 184     if hyperflow_path is not None:
- 185         c.dit_params, c.dit_cfg, _ = hyperflow.load(hyperflow_path, c.dit_params, c.dit_cfg, "transformer_ref")
+ 182 def load_weights(c: Components, weights: Path, hyperflow_path: Path | None = None):
+ 183     """Attach the weights lazily (mx.load reads data on first use). The audio VAE is small and loaded eagerly. With
+ 184     `hyperflow_path`, the LoRA is attached to transformer_ref's params (2.8 GB more, read on first use too)."""
+ 185     c.vae, _, _ = load.load_vae(weights / "vae")
+ 186     c.audio_vae, _, _ = load.load_audio_vae(weights / "audio_vae")
+ 187     c.dit_params, _ = load.load_transformer(weights / "transformer_ref")
+ 188     if hyperflow_path is not None:
+ 189         c.dit_params, c.dit_cfg, _ = hyperflow.load(hyperflow_path, c.dit_params, c.dit_cfg, "transformer_ref")
 ```
-📍 `scripts/run_ref2va.py:188-214`
+📍 `scripts/run_ref2va.py:192-218`
 ```python
- 188 def plan(c: Components, prompt: str, image: Image.Image, args) -> dict:
- 189     """Everything up to the layout, without the models: sizes the run would use."""
- 190     h, w, n, refs = setup(c, [ImageRef(image)], args.height, args.width, args.frames)
- 191     vision, ic, vc, vts = vision_features(c, refs)
- 192     ids, tags = build_presentation(c.tokenizer, prompt, [Ref(r.kind, r.has_audio) for r in refs], ic, vc, vts)
- 193     ratio = c.vae.cfg.spatial_ratio
- 194     ref_shapes = [(1, r.image.size[1] // ratio, r.image.size[0] // ratio) for r in refs]
- 195     lf, lh, lw = R.video_latent_num_frames(n), h // ratio, w // ratio
- 196     na = R.audio_latent_num_frames(n)
- 197     layout = build_ref2va_packed_sequence(np.asarray(tags), [Ref(r.kind, r.has_audio) for r in refs], ref_shapes, [],
- 198                                           lf, lh, lw, na, tuple(c.dit_cfg["patch_size"]), 2)
- 199     if args.hyperflow:
- 200         meta, shapes = hyperflow.read_header(args.hyperflow)
- 201         sch = meta.schedules()
- 202     else:
- 203         sch = Schedules.make(args.steps)
- 204     extra = {}
- 205     if args.hyperflow:
- 206         rank = hyperflow.check_file(meta, shapes, c.dit_cfg, "transformer_ref")  # before the hash and any weights
- 207         extra["hyperflow"] = {"file": str(args.hyperflow), "version": meta.version, "gate": meta.gate,
- 208                               "rank": rank, "sigmas": list(meta.sigmas),
- 209                               "base_model_revision": meta.base_model_revision}
- 210     return {**extra, "height": h, "width": w, "frames": n, "seconds": round(n / R.FPS, 3), "latent_frames": lf,
- 211             "reference_size": list(refs[0].image.size), "text_rows": len(ids), "vision_tokens": int(sum(ic)),
- 212             "reference_video_rows": layout.num_condition_video_rows, "target_audio_rows": na * 2,
- 213             "sequence_rows": int(layout.position_ids.shape[0]), "grid_points": int(len(sch.video_sigmas)),
- 214             "model_calls": int(len(sch.video_timesteps))}
+ 192 def plan(c: Components, prompt: str, image: Image.Image, args) -> dict:
+ 193     """Everything up to the layout, without the models: sizes the run would use."""
+ 194     h, w, n, refs = setup(c, [ImageRef(image)], args.height, args.width, args.frames)
+ 195     vision, ic, vc, vts = vision_features(c, refs)
+ 196     ids, tags = build_presentation(c.tokenizer, prompt, [Ref(r.kind, r.has_audio) for r in refs], ic, vc, vts)
+ 197     ratio = c.vae.cfg.spatial_ratio
+ 198     ref_shapes = [(1, r.image.size[1] // ratio, r.image.size[0] // ratio) for r in refs]
+ 199     lf, lh, lw = R.video_latent_num_frames(n), h // ratio, w // ratio
+ 200     na = R.audio_latent_num_frames(n)
+ 201     layout = build_ref2va_packed_sequence(np.asarray(tags), [Ref(r.kind, r.has_audio) for r in refs], ref_shapes, [],
+ 202                                           lf, lh, lw, na, tuple(c.dit_cfg["patch_size"]), 2)
+ 203     if args.hyperflow:
+ 204         meta, shapes = hyperflow.read_header(args.hyperflow)
+ 205         sch = meta.schedules()
+ 206     else:
+ 207         sch = Schedules.make(args.steps)
+ 208     extra = {}
+ 209     if args.hyperflow:
+ 210         rank = hyperflow.check_file(meta, shapes, c.dit_cfg, "transformer_ref")  # before the hash and any weights
+ 211         extra["hyperflow"] = {"file": str(args.hyperflow), "version": meta.version, "gate": meta.gate,
+ 212                               "rank": rank, "sigmas": list(meta.sigmas),
+ 213                               "base_model_revision": meta.base_model_revision}
+ 214     return {**extra, "height": h, "width": w, "frames": n, "seconds": round(n / R.FPS, 3), "latent_frames": lf,
+ 215             "reference_size": list(refs[0].image.size), "text_rows": len(ids), "vision_tokens": int(sum(ic)),
+ 216             "reference_video_rows": layout.num_condition_video_rows, "target_audio_rows": na * 2,
+ 217             "sequence_rows": int(layout.position_ids.shape[0]), "grid_points": int(len(sch.video_sigmas)),
+ 218             "model_calls": int(len(sch.video_timesteps))}
+```
+📍 `scripts/run_ref2va.py:310-316`
+```python
+ 310         if args.hyperflow and not args.decode_from:  # a re-decode never reads the adapter
+ 311             hf = args.hyperflow
+ 312             got = sha256(hf)
+ 313             want = hyperflow.KNOWN_SHA256.get(hf.name)
+ 314             event("hyperflow_file", file=hf.name, bytes=hf.stat().st_size, sha256=got, known_sha256=want)
+ 315             if want is not None and got != want:
+ 316                 raise ValueError(f"{hf.name}: sha256 {got} is not the released {want}")
 ```
 
+`ref2va` frees the weight dict before decoding (`free_transformer`, main guide §8). The dict holds the LoRAs and the
+endpoint aliases too, so nothing of HyperFlow outlives the denoise. A `--decode-from` re-decode with `--hyperflow`
+still runs the plan's header check, but doesn't hash or load the adapter.
+
 **What to expect on an M3 Ultra (a projection, not a measurement).** run-002, at 1344×768 with a 2048 px image reference and
-52,487 rows, measured 368 s per call at 16.2 TFLOP/s. By the FLOP count above, the LoRA adds about 2.3% per call at that
-size. So 8 calls ≈ 8 × 368 × 1.023 ≈ 50 min of denoise, against about 5 h for 49 calls. Text, references and decode
-are unchanged (33 s, 17 s, and a decode not yet measured at 768p). Memory rises by the LoRA's 2.8 GB on top of
-run-002's peak.
+52,487 rows, measured 368 s per call at 16.2 TFLOP/s.
+
+- **Speed.** The LoRA adds 2.34% more FLOPs per call at that size (5.51% at run-001's 6,823 rows). Its small rank-256
+  matmuls run a little less efficiently than the big ones, so FLOPs undercount the time a little.
+  `bench/lora_speed.py` times the largest projection (`ff.net.0.proj`, 52,487 rows, bf16, M2 Max), warm, over 3 repeats:
+
+  | mode | time per call |
+  | --- | --- |
+  | base | 1.664 s |
+  | with the LoRA | 1.793 s (+7.8%, against +5.7% FLOPs for that op) |
+  | merged into the weight | 1.669 s |
+
+  Scaling the whole call's 2.34% by that ratio gives about 3%. So 8 calls ≈ 8 × 368 × 1.03 ≈ 50–51 min of denoise,
+  against about 5 h for 49 calls, assuming the M3 Ultra keeps run-002's throughput otherwise.
+- **Cold calls.** A reviewer's single cold call of the same op took 4.17 s against 2.31 s, under a 20 GB
+  limit with no allocator cache. Expect the first call to be slower.
+- **Unchanged stages.** Text, references and decode are unchanged: 33 s, 17 s, and a decode not yet measured at 768p.
+- **Memory.** It adds 2.8 GB of adapter weights plus transient LoRA outputs. The largest transient is the
+  `ff.net.0.proj` delta, rows × 28,672 in bf16, about 3.0 GB at 52,487 rows. The same probe measured that op's peak
+  over its inputs going from 3.01 to 6.05 GB. Blocks are evaluated one at a time, so these transients don't pile up
+  across blocks. HyperFlow's whole-run peak is unmeasured.
+- **Merging.** Merging the LoRA into the weights at load (`W + B·A`) would remove both the extra time and the
+  transients. It is not done: it rounds differently from PEFT's unmerged path, and it would need its own error budget,
+  like the modulation cache's.
 
 ## 8. The tests and the oracle
 
@@ -1176,20 +1227,25 @@ The transcriptions to compare against §3 and §5:
 | `test_read_header_from_a_file`, `test_refusals` | header-only read, `load`, and each refusal: an endpoint count that doesn't match the distinct timesteps (as their wrapper checks); a LoRA on an unwired linear (`proj_in`, `adaln_proj`) or a 1-D weight; an explicit empty grid; rank 0; no LoRA tensors; a modulation cache on HyperFlow params; a header without `lora_rank` still checks |
 | `test_run_script_with_hyperflow`, `..._refuses_a_released_name_with_other_bytes`, `test_plan_only_checks_the_hyperflow_file` (`tests/test_run_script.py`) | 8 step events, 9 grid points, the plan block, the hash event, a 124-frame mp4; a hash mismatch fails the run; a file with an unwired LoRA fails `--plan-only`, before any hash |
 
-**The bf16 bound is close to the noise.** Over 8 seeds (a scratch probe, not a test), MLX's bf16 error divided by
-torch's ranged:
+**The bf16 bound is close to the noise.** Over 8 seeds (`bench/hyperflow_bf16_seeds.py`, not a test; model seed `s`,
+file seed `s + 50`, input seed `100 + s`, 4 tiny layers), MLX's bf16 error divided by torch's ranged:
 
 - **HyperFlow:** 0.58–1.52 (video) and 0.93–1.54 (audio); the median of the 16 is about 1.04.
 - **Base model:** 0.94–1.16 (video) and 0.64–1.22 (audio).
 
 Two of the 16 HyperFlow ratios (1.52 and 1.54) were above 1.5. The test's bound also has an absolute slack of 1e-3,
 which at these error sizes (torch about 0.008–0.01) lifts it to about 1.6×, above every observed ratio. The margin is
-thin. The probe shows a wider spread than the base model's, not a bias: the median is about 1.
+thin. These are ratios of error norms, so they say how large MLX's error is next to torch's, not in which direction.
+Eight tiny seeds show a wider spread than the base model's; they say nothing about the real rank-256, 50-layer,
+8-call trajectory.
 
 ## 9. Not done, and open
 
 - **No real-weight run yet.** No real-weight HyperFlow run had been made when this was written. Quality,
-  memory and speed with HyperFlow are unmeasured.
+  memory and speed with HyperFlow are unmeasured. The tests pin a tiny model: one f32 8-call loop at rank 4, and one
+  mixed-precision forward on 4 layers. Nothing here compares a decoded clip against their diffusers pipeline.
+- **Shifts.** The run script uses the release's shifts (12 and 3). It does not read a modified scheduler config; a
+  caller who changes those passes them to `HyperFlowMeta.schedules`.
 - **Not ported:** Sol-Attn (CUDA only), Ulysses context parallel, merged LoRA, a two-time modulation cache, and the
   disable/enable toggle.
 - **Licence:** the weights carry the same MiniMax H3 Community License as the base model, with the same territory

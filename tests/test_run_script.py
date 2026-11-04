@@ -192,6 +192,14 @@ def test_run_script_with_hyperflow(release, tmp_path):
     assert [e["i"] for e in steps] == list(range(8))
     assert int(_probe(tmp_path / "out" / "video.mp4")["video"]["nb_frames"]) == 124
 
+    again = tmp_path / "again"  # a re-decode with --hyperflow neither hashes nor loads the adapter
+    redo = _args(release, tmp_path, again)
+    i = redo.index("--steps")
+    del redo[i : i + 2]
+    assert run.main(redo + ["--hyperflow", str(hf), "--decode-from", str(tmp_path / "out" / "final_rows.npz")]) == 0
+    events = [e["event"] for e in json.loads((again / "run.json").read_text())["events"]]
+    assert "hyperflow_file" not in events and "step" not in events and "decoded" in events
+
 
 def test_run_script_refuses_a_released_name_with_other_bytes(release, tmp_path):
     run = _script()

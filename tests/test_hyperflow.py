@@ -393,3 +393,16 @@ def test_refusals():
         hyperflow.attach(base, dict(model.config), bad, meta)
     with pytest.warns(UserWarning, match="trained with shifts"):
         hyperflow.HyperFlowMeta.from_header({**md, "hyperflow_video_shift": "5.0"}).schedules()
+
+
+def test_provenance_files_back_the_constants():
+    """The published manifest's sha256 is the one the run script enforces, and HyperFlow's base revision has the same
+    transformer_ref files as the release we run (both fetched from the HF API, 2026-11-04)."""
+    manifest = json.loads((DATA / "hyperflow.manifest-5bde94d7.json").read_text())
+    name = manifest["default"]
+    assert hyperflow.KNOWN_SHA256[name] == manifest["weights"][name]["sha256"]
+    oids = json.loads((DATA / "transformer_ref.lfs-42ed227-vs-83db0c0.json").read_text())
+    ours, theirs = oids["revisions"].values()
+    assert ours == theirs and len(ours) == 16
+    header = json.loads((DATA / "hyperflow_v1.0.header.json").read_text())
+    assert header["__metadata__"]["base_model_revision"] in oids["revisions"]
