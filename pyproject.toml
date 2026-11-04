@@ -3,10 +3,10 @@ name = "h3mlx"
 version = "0.0.1"
 description = "MiniMax H3 in MLX, op by op, tested against diffusers 0.42.1"
 requires-python = ">=3.11,<3.14"
-dependencies = ["mlx>=0.32", "numpy>=2"]
+dependencies = ["mlx>=0.32.4", "numpy>=2", "mlx-vlm==0.7.11"]
 
 [dependency-groups]
-dev = ["pytest>=8", "torch>=2.8", "diffusers==0.42.1", "transformers>=4.57", "peft"]
+dev = ["pytest>=8", "torch>=2.8", "diffusers==0.42.1", "transformers>=4.57", "peft", "torchvision"]
 
 [build-system]
 requires = ["hatchling"]
