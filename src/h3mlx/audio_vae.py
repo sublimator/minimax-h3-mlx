@@ -77,12 +77,8 @@ def upsample(x, filt: mx.array, ratio: int):
     pad_left = pad * ratio + (k - ratio) // 2
     pad_right = pad * ratio + (k - ratio + 1) // 2
     x = mx.pad(x, [(0, 0), (pad, pad), (0, 0)], mode="edge")
-    b, n, c = x.shape
-    # transposed depthwise conv as zero-insertion + conv with the flipped kernel
-    up = mx.zeros((b, (n - 1) * ratio + 1, c), dtype=x.dtype)
-    up[:, ::ratio] = x
-    up = mx.pad(up, [(0, 0), (k - 1, k - 1), (0, 0)])
-    y = ratio * mx.conv1d(up, _depthwise(filt.reshape(-1)[::-1], c), groups=c)
+    c = x.shape[-1]
+    y = ratio * mx.conv_transpose1d(x, _depthwise(filt, c), stride=ratio, groups=c)
     return y[:, pad_left : y.shape[1] - pad_right]
 
 

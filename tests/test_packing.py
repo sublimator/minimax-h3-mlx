@@ -51,7 +51,9 @@ REF_CASES = {
     "audio then image": [("audio", False), ("image", False)],
     "video with audio": [("video", True)],
     "video without audio": [("video", False)],
-    "long video (ulp case)": [("video", True), ("image", False)],
+    "long video, long soundtrack": [("video", True), ("image", False)],  # audio wins max(): span order irrelevant
+    "long silent video (ulp case)": [("video", False), ("image", False)],  # the span decides: order matters
+    "long video, short soundtrack (ulp case)": [("video", True), ("image", False)],
     "mixed": [("image", False), ("video", True), ("audio", False), ("video", False), ("image", False)],
 }
 
@@ -60,7 +62,7 @@ REF_CASES = {
 def test_ref2va_layout_matches(case):
     g = torch.Generator().manual_seed(len(case))
     refs = [Ref(k, a) for k, a in REF_CASES[case]]
-    long = "ulp" in case
+    long = "long" in case
     shapes, audio_rows = [], []
     for r in refs:
         if r.kind == "image":
@@ -69,7 +71,7 @@ def test_ref2va_layout_matches(case):
             frames = 26 if long else int(torch.randint(2, 9, (1,), generator=g))
             shapes.append((frames, 16, 28))
             if r.has_audio:
-                audio_rows.append(AUDIO_CH * (frames * 7 + 3))
+                audio_rows.append(AUDIO_CH * (20 if "short soundtrack" in case else frames * 7 + 3))
         else:
             audio_rows.append(AUDIO_CH * int(torch.randint(5, 60, (1,), generator=g)))
     tags = text_tags(53, n_vision=20 * sum(r.kind != "audio" for r in refs) // 2)

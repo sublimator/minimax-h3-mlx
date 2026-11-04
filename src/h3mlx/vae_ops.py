@@ -17,8 +17,9 @@ def reflect_pad(x: mx.array, axis: int, before: int, after: int) -> mx.array:
     n = x.shape[axis]
     if before >= n or after >= n:
         raise ValueError(f"reflect pad ({before}, {after}) needs size > pad, got {n}")
-    idx = list(range(before, 0, -1)) + list(range(n)) + list(range(n - 2, n - 2 - after, -1))
-    return mx.take(x, mx.array(idx), axis=axis)
+    widths = [(0, 0)] * x.ndim
+    widths[axis] = (before, after)
+    return mx.pad(x, widths, mode="reflect")
 
 
 def causal_conv3d(
