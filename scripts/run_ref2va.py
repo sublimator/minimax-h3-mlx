@@ -61,6 +61,39 @@ def mem() -> dict:
             "pressure": pressure_level()}
 
 
+def dit_tflop_per_call(rows: int, cfg: dict) -> float:
+    """Matmul FLOPs of one transformer forward: projections + SwiGLU (2*S*params) and dense attention (4*S^2*inner),
+    times the block count; refiner, AdaLN and norms are left out (small)."""
+    h, inner, ffn = cfg["hidden_size"], cfg["num_attention_heads"] * cfg["attention_head_dim"], cfg["ffn_dim"]
+    per_block = 2 * rows * (4 * h * inner + 3 * h * ffn) + 4 * rows * rows * inner
+    return per_block * cfg["num_layers"] / 1e12
+
+
+def summarize(events: list) -> dict:
+    """Stage durations and peaks from the event log (seconds, GB)."""
+    t = {}
+    for e in events:
+        t.setdefault(e["event"], e["t"])
+    steps = [e for e in events if e["event"] == "step"]
+    out = {"total_s": events[-1]["t"] if events else None}
+    for name, a, b in (("text_s", "text_start", "text_done"), ("references_s", "stage_references", "stage_layout"),
+                       ("decode_s", "stage_decode", "decoded"), ("write_s", "decoded", "written")):
+        if a in t and b in t:
+            out[name] = round(t[b] - t[a], 1)
+    if steps and "stage_denoise" in t:
+        out["denoise_s"] = round(steps[-1]["t"] - t["stage_denoise"], 1)
+        out["first_step_s"] = steps[0]["step_s"]  # includes reading the transformer's weights on first use
+        rest = [s["step_s"] for s in steps[1:]]
+        if rest:
+            out["step_s_mean"] = round(sum(rest) / len(rest), 2)
+            out["step_s_min"], out["step_s_max"] = min(rest), max(rest)
+            out["tflops_mean"] = round(sum(s["tflops"] for s in steps[1:]) / len(rest), 1)
+    out["stage_peak_gb"] = {e["event"]: e["stage_peak_gb"] for e in events if e.get("closes_stage")}
+    out["process_peak_rss_gb"] = max((e["max_rss_gb"] for e in events), default=None)
+    out["worst_pressure"] = max((e["pressure"] or 0 for e in events), default=None)
+    return out
+
+
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -204,8 +237,17 @@ def main(argv=None) -> int:
         tmp.write_text(json.dumps(log, indent=1))
         os.replace(tmp, out / "run.json")  # atomic: a reader never sees a half-written file
 
+    last = {"t": 0.0}
+    stage_closers = {"text_done", "stage_layout", "denoised", "decoded", "written"}
+
     def event(name, **kw):
-        e = {"t": round(time.time() - t0, 1), "event": name, **mem(), **kw}
+        now = round(time.time() - t0, 1)
+        e = {"t": now, "dt": round(now - last["t"], 1), "event": name, **mem(), **kw}
+        if name in stage_closers or name.startswith("stage_") or name == "text_start":
+            # the peak since the previous boundary, then start a fresh window for the next stage
+            e["stage_peak_gb"], e["closes_stage"] = round(mx.get_peak_memory() / 1e9, 2), True
+            mx.reset_peak_memory()
+        last["t"] = now
         log["events"].append(e)
         print(json.dumps(e), flush=True)
         save_log()
@@ -239,8 +281,23 @@ def main(argv=None) -> int:
             video, audio = decode(c, mx.array(z["video_rows"]), mx.array(z["audio_rows"]), **meta)
             sr = c.audio_sampling_rate
         else:
+            per_call = dit_tflop_per_call(log["plan"]["sequence_rows"], c.dit_cfg)
+            n_calls = log["plan"]["model_calls"]
+            clock = {"prev": None}
+
             def on_step(i, t):
-                event("step", i=i, timestep=float(t))
+                now = time.time()
+                step_s = round(now - (clock["prev"] or clock["denoise_start"]), 2)
+                clock["prev"] = now
+                done = [e["step_s"] for e in log["events"] if e["event"] == "step"][1:] + ([step_s] if i else [])
+                eta = (sum(done) / len(done)) * (n_calls - 1 - i) if done else None
+                event("step", i=i, timestep=float(t), step_s=step_s, tflops=round(per_call / step_s, 1),
+                      eta_min=None if eta is None else round(eta / 60, 1))
+
+            def stage(name):
+                if name == "denoise":
+                    clock["denoise_start"] = time.time()
+                event(f"stage_{name}")
 
             def on_denoised(v, a, meta):
                 np.savez(out / "final_rows.npz", video_rows=np.array(v.astype(mx.float32)),
@@ -251,7 +308,7 @@ def main(argv=None) -> int:
             video, audio, sr = ref2va(c, prompt, [ImageRef(image)], num_frames=args.frames, height=args.height,
                                       width=args.width, num_inference_steps=args.steps, seed=args.seed,
                                       on_step=on_step, check_finite=True, on_denoised=on_denoised,
-                                      free_transformer=True, on_stage=lambda name: event(f"stage_{name}"))
+                                      free_transformer=True, on_stage=stage)
         event("decoded", video_shape=list(video.shape), audio_shape=list(audio.shape),
               video_mean=float(video.mean()), video_std=float(video.std()),
               audio_rms=float(np.sqrt((audio ** 2).mean())))
@@ -261,6 +318,9 @@ def main(argv=None) -> int:
         write_mp4(out / "video.mp4", video, out / "audio.wav")
         log["status"] = "done"
         event("written", mp4=str(out / "video.mp4"))
+        log["summary"] = summarize(log["events"])
+        save_log()
+        print(json.dumps({"summary": log["summary"]}), flush=True)
         return 0
     except KeyboardInterrupt:
         log["status"] = "interrupted"

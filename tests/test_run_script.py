@@ -84,6 +84,13 @@ def test_run_script_writes_a_clip_and_can_redecode(release, tmp_path):
     assert names.index("text_done") < names.index("stage_references") < names.index("stage_denoise") \
         < names.index("step") < names.index("denoised") < names.index("stage_decode") < names.index("written")
     assert log["limits"]["memory_limit_gb"] == 110.0 and "pressure" in log["events"][0]
+    steps = [e for e in log["events"] if e["event"] == "step"]
+    assert all(e["step_s"] > 0 and e["tflops"] > 0 for e in steps) and steps[-1]["eta_min"] == 0.0
+    summ = log["summary"]
+    for key in ("total_s", "text_s", "references_s", "denoise_s", "first_step_s", "step_s_mean", "decode_s", "write_s",
+                "tflops_mean", "process_peak_rss_gb", "worst_pressure"):
+        assert summ[key] is not None, key
+    assert {"text_done", "stage_denoise", "denoised", "decoded"} <= set(summ["stage_peak_gb"])
     assert all("mlx_cache_gb" in e and "rss_gb" in e for e in log["events"])
     assert log["provenance"]["packages"]["mlx"] and len(log["image_sha256"]) == 64
     streams = _probe(out / "video.mp4")
