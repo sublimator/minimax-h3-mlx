@@ -268,3 +268,65 @@ def dit_block(
     x = x + mx.take(gate_msa, adaln_indices, axis=0) * attn_block(h, sub("attn."), heads, qk_eps, rotary)
     h = modulate(rms_norm(x, p["norm2.weight"], norm_eps), shift_mlp, scale_mlp, adaln_indices)
     return x + mx.take(gate_mlp, adaln_indices, axis=0) * swiglu_ff(h, sub("ff."))
+
+
+# --- token refiner and the whole forward (MiniMaxH3TokenRefiner, MiniMaxH3Transformer3DModel.forward) ---------------
+
+
+def _sub(p: dict, prefix: str) -> dict:
+    return {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}
+
+
+def token_refiner(x: mx.array, p: dict, num_layers: int, heads: int, norm_eps: float, qk_eps: float, final_eps: float):
+    """Plain pre-norm blocks (no AdaLN, no rope), then a final RMSNorm."""
+    for i in range(num_layers):
+        b = _sub(p, f"refiner_blocks.{i}.")
+        x = x + attn_block(rms_norm(x, b["norm1.weight"], norm_eps), _sub(b, "attn."), heads, qk_eps, None)
+        x = x + swiglu_ff(rms_norm(x, b["norm2.weight"], norm_eps), _sub(b, "ff."))
+    return rms_norm(x, p["final_norm.weight"], final_eps)
+
+
+def dit_forward(
+    p: dict,
+    cfg: dict,
+    video: mx.array,
+    audio: mx.array,
+    text: mx.array,
+    timestep: mx.array,
+    timestep_indices: mx.array,
+    token_tags: mx.array,
+    position_ids: mx.array,
+    video_indices: mx.array,
+    audio_indices: mx.array,
+    text_indices: mx.array,
+) -> tuple[mx.array, mx.array]:
+    """MiniMaxH3Transformer3DModel.forward over one packed sequence. `p` is the state dict (diffusers names), `cfg`
+    its config. Returns (video velocity rows, audio velocity rows) in the order of video_indices / audio_indices."""
+    hidden, heads = cfg["hidden_size"], cfg["num_attention_heads"]
+    eps, qk_eps, final_eps = cfg["norm_eps"], cfg["qk_norm_eps"], cfg["final_norm_eps"]
+    seq = position_ids.shape[0]
+    rotary = rope_cos_sin(position_ids, rope_inv_freq(cfg["rope_freq_dim"], cfg["rope_theta"]))
+
+    v = linear(video.astype(p["proj_in.weight"].dtype), p["proj_in.weight"], p["proj_in.bias"])
+    a = linear(audio.astype(p["audio_proj_in.weight"].dtype), p["audio_proj_in.weight"], p["audio_proj_in.bias"])
+    t = linear(text.astype(p["context_embedder.weight"].dtype), p["context_embedder.weight"], p["context_embedder.bias"])
+    t = token_refiner(t, _sub(p, "token_refiner."), cfg["num_refiner_layers"], heads, eps, qk_eps, final_eps)
+
+    x = mx.zeros((t.shape[0], seq, t.shape[-1]), dtype=t.dtype)
+    x[:, text_indices] = t
+    x[:, video_indices] = v.astype(t.dtype)
+    x[:, audio_indices] = a.astype(t.dtype)
+
+    tp = _sub(p, "time_embedder.")
+    temb = timestep_embedding(timestep, {k: v for k, v in tp.items()}, cfg["freq_dim"])
+    adaln_indices = timestep_indices * MODALITY_NUM + token_tags
+    for i in range(cfg["num_layers"]):
+        x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps)
+
+    x = norm_out(
+        x, temb, p["norm_out.norm.weight"], p["norm_out.linear.weight"], p["norm_out.linear.bias"], timestep_indices,
+        final_eps,
+    ).astype(p["proj_out.weight"].dtype)
+    vid = linear(x, p["proj_out.weight"], p["proj_out.bias"])[:, video_indices]
+    aud = linear(x, p["audio_proj_out.weight"], p["audio_proj_out.bias"])[:, audio_indices]
+    return vid, aud
