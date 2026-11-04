@@ -334,8 +334,17 @@ def test_refusals():
         ops.dit_forward(params, cfg, *args, **lay)  # two-time weights, no endpoints
     with pytest.raises(ValueError, match="endpoints"):
         ops.dit_forward(base, dict(model.config), *args, **lay, endpoint=mx.zeros(3))  # endpoints, no HyperFlow
+    with pytest.raises(ValueError, match="one endpoint per timestep"):
+        ops.dit_forward(params, cfg, *args, **lay, endpoint=mx.zeros(2))  # 3 distinct timesteps, 2 endpoints
     with pytest.raises(NotImplementedError):
         schedule_timesteps(tiny_layout(), meta.schedules())
+    with pytest.raises(ValueError, match="2-D"):
+        hyperflow.attach(base, dict(model.config), {**t_mx, "transformer.transformer_blocks.0.norm1.lora_A.weight":
+                                                    mx.zeros((4, 48)), "transformer.transformer_blocks.0.norm1.lora_B.weight":
+                                                    mx.zeros((48, 4))}, meta)
+    no_rank = {k: v for k, v in md.items() if k != "lora_rank"}
+    assert hyperflow.rank_from_shapes({k: v.shape for k, v in tensors.items()}) == RANK
+    assert hyperflow.HyperFlowMeta.from_header(no_rank).lora_rank is None
     with pytest.raises(ValueError, match="already attached"):
         hyperflow.attach(params, cfg, t_mx, meta)
     with pytest.raises(ValueError, match="not a HyperFlow"):

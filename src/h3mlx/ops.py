@@ -181,6 +181,8 @@ def two_time_embedding(t: mx.array, r: mx.array | None, p: dict, cfg: dict) -> m
     if two_time != (r is not None):
         raise ValueError("HyperFlow weights need the step endpoints, and endpoints need HyperFlow weights"
                          f" (endpoint embedder loaded: {two_time}, endpoints given: {r is not None})")
+    if r is not None and r.shape != t.shape:
+        raise ValueError(f"{t.shape[0]} distinct timesteps but {r.shape[0]} endpoints: one endpoint per timestep")
     temb = timestep_embedding(t, _sub(p, "time_embedder."), cfg["freq_dim"])
     if r is None:
         return temb

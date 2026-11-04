@@ -371,14 +371,14 @@ The rotary grids themselves:
   97     )
   98     return origin + torch.cat([torch.zeros(1, dtype=torch.float64), spans[:-1].cumsum(0)])
 ```
-📍 `src/h3mlx/ops.py:197-202`
+📍 `src/h3mlx/ops.py:227-232`
 ```python
- 197 def temporal_position_grid(num_latent_frames: int, origin: float) -> np.ndarray:
- 198     spans = np.array(
- 199         [ROPE_FRAME_RESCALE * ROPE_FRAMES_PER_LATENT[i % len(ROPE_FRAMES_PER_LATENT)] for i in range(num_latent_frames)],
- 200         dtype=np.float64,
- 201     )
- 202     return origin + np.concatenate([np.zeros(1), np.cumsum(spans[:-1])])
+ 227 def temporal_position_grid(num_latent_frames: int, origin: float) -> np.ndarray:
+ 228     spans = np.array(
+ 229         [ROPE_FRAME_RESCALE * ROPE_FRAMES_PER_LATENT[i % len(ROPE_FRAMES_PER_LATENT)] for i in range(num_latent_frames)],
+ 230         dtype=np.float64,
+ 231     )
+ 232     return origin + np.concatenate([np.zeros(1), np.cumsum(spans[:-1])])
 ```
 
 ---
@@ -469,23 +469,23 @@ its pair with `timestep_index · 3 + modality_tag`.
  130         temb = temb.view(-1, 6 * self.hidden_size)
  131         return temb.chunk(6, dim=-1)
 ```
-📍 `src/h3mlx/ops.py:67-75`
+📍 `src/h3mlx/ops.py:80-88`
 ```python
-  67 def adaln_modulation(temb: mx.array, w: mx.array, b: mx.array, hidden_size: int) -> list[mx.array]:
-  68     """MiniMaxH3AdaLayerNormModulation: (num_t, temb_dim) -> 6 x (num_t * 3, hidden), rows [t0m0, t0m1, t0m2, t1m0..].
-  69
-  70     Order: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp. silu at temb's precision, then cast to
-  71     the projection's dtype.
-  72     """
-  73     out = linear(silu(temb).astype(w.dtype), w, b)
-  74     out = out.reshape(-1, 6 * hidden_size)
-  75     return mx.split(out, 6, axis=-1)
+  80 def adaln_modulation(temb: mx.array, w: mx.array, b: mx.array, hidden_size: int) -> list[mx.array]:
+  81     """MiniMaxH3AdaLayerNormModulation: (num_t, temb_dim) -> 6 x (num_t * 3, hidden), rows [t0m0, t0m1, t0m2, t1m0..].
+  82
+  83     Order: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp. silu at temb's precision, then cast to
+  84     the projection's dtype.
+  85     """
+  86     out = linear(silu(temb).astype(w.dtype), w, b)
+  87     out = out.reshape(-1, 6 * hidden_size)
+  88     return mx.split(out, 6, axis=-1)
 ```
-📍 `src/h3mlx/ops.py:78-80`
+📍 `src/h3mlx/ops.py:91-93`
 ```python
-  78 def modulate(x: mx.array, shift: mx.array, scale: mx.array, rows: mx.array) -> mx.array:
-  79     """x * (1 + scale[rows]) + shift[rows]; x is (batch, seq, hidden), rows (seq,) index the AdaLN table."""
-  80     return x * (1.0 + mx.take(scale, rows, axis=0)) + mx.take(shift, rows, axis=0)
+  91 def modulate(x: mx.array, shift: mx.array, scale: mx.array, rows: mx.array) -> mx.array:
+  92     """x * (1 + scale[rows]) + shift[rows]; x is (batch, seq, hidden), rows (seq,) index the AdaLN table."""
+  93     return x * (1.0 + mx.take(scale, rows, axis=0)) + mx.take(shift, rows, axis=0)
 ```
 
 The `silu` here runs on the f32 timestep embedding, and only its result is cast to the bf16 projection, as the
@@ -493,13 +493,13 @@ original's comment explains. The place where a bf16 `silu` could round different
 `silu` computes in f32 and rounds once, as torch's does. Before this, a review found a one-ulp difference at 304 of 1,001
 bf16 values in [−5, 5]:
 
-📍 `src/h3mlx/ops.py:135-139`
+📍 `src/h3mlx/ops.py:148-152`
 ```python
- 135 def swiglu_ff(x: mx.array, p: dict) -> mx.array:
- 136     """diffusers FeedForward(activation_fn="swiglu", bias=False): proj -> (h, gate) -> h * silu(gate) -> out."""
- 137     h = linear(x, p["net.0.proj.weight"])
- 138     h, gate = mx.split(h, 2, axis=-1)
- 139     return linear(h * silu(gate), p["net.2.weight"])
+ 148 def swiglu_ff(x: mx.array, p: dict) -> mx.array:
+ 149     """diffusers FeedForward(activation_fn="swiglu", bias=False): proj -> (h, gate) -> h * silu(gate) -> out."""
+ 150     h = plinear(x, p, "net.0.proj")
+ 151     h, gate = mx.split(h, 2, axis=-1)
+ 152     return plinear(h * silu(gate), p, "net.2")
 ```
 📍 `src/h3mlx/ops.py:54-58`
 ```python
@@ -514,7 +514,8 @@ bf16 values in [−5, 5]:
 
 Separate `to_q`/`to_k`/`to_v` with no bias, a per-head RMSNorm on q and k, rope, scaled-dot-product attention, and
 `to_out`. The attention width, `heads · head_dim = 7168`, is wider than the residual stream (5376). The original also
-supports a fused QKV projection; the release uses separate ones, and so does the port.
+supports a fused QKV projection; the release uses separate ones, and so does the port. `plinear(x, p, "to_q")` is
+`linear(x, p["to_q.weight"])` unless the weight dict also carries a LoRA for that name (HyperFlow, §9).
 
 📍 [`diffusers:src/diffusers/models/transformers/transformer_minimax_h3.py:168-209`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/transformers/transformer_minimax_h3.py#L168-L209)
 ```python
@@ -561,40 +562,40 @@ supports a fused QKV projection; the release uses separate ones, and so does the
  208         hidden_states = attn.to_out[1](hidden_states)
  209         return hidden_states
 ```
-📍 `src/h3mlx/ops.py:113-132`
+📍 `src/h3mlx/ops.py:126-145`
 ```python
- 113 def attn_block(
- 114     x: mx.array,
- 115     p: dict,
- 116     heads: int,
- 117     qk_eps: float,
- 118     rotary: tuple[mx.array, mx.array] | None,
- 119     mask: mx.array | None = None,
- 120 ) -> mx.array:
- 121     """MiniMaxH3AttnProcessor with separate to_q/to_k/to_v (no bias), per-head RMSNorm on q/k, rope, to_out."""
- 122     b, s, _ = x.shape
- 123     q = linear(x, p["to_q.weight"]).reshape(b, s, heads, -1)
- 124     k = linear(x, p["to_k.weight"]).reshape(b, s, heads, -1)
- 125     v = linear(x, p["to_v.weight"]).reshape(b, s, heads, -1)
- 126     q = rms_norm(q, p["norm_q.weight"], qk_eps)
- 127     k = rms_norm(k, p["norm_k.weight"], qk_eps)
- 128     if rotary is not None:
- 129         q = apply_rotary(q, *rotary)
- 130         k = apply_rotary(k, *rotary)
- 131     o = attention(q, k, v, mask).reshape(b, s, -1)
- 132     return linear(o, p["to_out.0.weight"])
+ 126 def attn_block(
+ 127     x: mx.array,
+ 128     p: dict,
+ 129     heads: int,
+ 130     qk_eps: float,
+ 131     rotary: tuple[mx.array, mx.array] | None,
+ 132     mask: mx.array | None = None,
+ 133 ) -> mx.array:
+ 134     """MiniMaxH3AttnProcessor with separate to_q/to_k/to_v (no bias), per-head RMSNorm on q/k, rope, to_out."""
+ 135     b, s, _ = x.shape
+ 136     q = plinear(x, p, "to_q").reshape(b, s, heads, -1)
+ 137     k = plinear(x, p, "to_k").reshape(b, s, heads, -1)
+ 138     v = plinear(x, p, "to_v").reshape(b, s, heads, -1)
+ 139     q = rms_norm(q, p["norm_q.weight"], qk_eps)
+ 140     k = rms_norm(k, p["norm_k.weight"], qk_eps)
+ 141     if rotary is not None:
+ 142         q = apply_rotary(q, *rotary)
+ 143         k = apply_rotary(k, *rotary)
+ 144     o = attention(q, k, v, mask).reshape(b, s, -1)
+ 145     return plinear(o, p, "to_out.0")
 ```
-📍 `src/h3mlx/ops.py:95-103`
+📍 `src/h3mlx/ops.py:108-116`
 ```python
-  95 def attention(q: mx.array, k: mx.array, v: mx.array, mask: mx.array | None = None) -> mx.array:
-  96     """Full self-attention. q, k, v: (batch, seq, heads, head_dim) as diffusers lays them out; returns the same layout.
-  97
-  98     `mask` is an additive or boolean mask broadcastable to (batch, heads, seq_q, seq_k); the model itself passes none.
-  99     """
- 100     scale = 1.0 / math.sqrt(q.shape[-1])
- 101     qt, kt, vt = (t.transpose(0, 2, 1, 3) for t in (q, k, v))
- 102     o = mx.fast.scaled_dot_product_attention(qt, kt, vt, scale=scale, mask=mask)
- 103     return o.transpose(0, 2, 1, 3)
+ 108 def attention(q: mx.array, k: mx.array, v: mx.array, mask: mx.array | None = None) -> mx.array:
+ 109     """Full self-attention. q, k, v: (batch, seq, heads, head_dim) as diffusers lays them out; returns the same layout.
+ 110
+ 111     `mask` is an additive or boolean mask broadcastable to (batch, heads, seq_q, seq_k); the model itself passes none.
+ 112     """
+ 113     scale = 1.0 / math.sqrt(q.shape[-1])
+ 114     qt, kt, vt = (t.transpose(0, 2, 1, 3) for t in (q, k, v))
+ 115     o = mx.fast.scaled_dot_product_attention(qt, kt, vt, scale=scale, mask=mask)
+ 116     return o.transpose(0, 2, 1, 3)
 ```
 
 The original packs one request into one unpadded document, so no mask is passed. diffusers' comment says MiniMax's own
@@ -633,30 +634,30 @@ shows the two give the same rows in MLX, with a junk tail that does change the o
  372
  373         return hidden_states
 ```
-📍 `src/h3mlx/ops.py:260-281`
+📍 `src/h3mlx/ops.py:290-311`
 ```python
- 260 def dit_block(
- 261     x: mx.array,
- 262     temb: mx.array,
- 263     adaln_indices: mx.array,
- 264     rotary: tuple[mx.array, mx.array],
- 265     p: dict,
- 266     heads: int,
- 267     hidden_size: int,
- 268     norm_eps: float = 1e-5,
- 269     qk_eps: float = 1e-5,
- 270     modulation: list[mx.array] | None = None,
- 271 ) -> mx.array:
- 272     """Pre-norm attention and SwiGLU FF, each shift/scale-modulated and gated per row from the (t, modality) table.
- 273     `modulation`: the six precomputed tables (from `ModulationCache`) instead of projecting `temb` here."""
- 274     if modulation is None:
- 275         modulation = adaln_modulation(temb, p["adaln_proj.linear.weight"], p["adaln_proj.linear.bias"], hidden_size)
- 276     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation
- 277     sub = lambda prefix: {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}  # noqa: E731
- 278     h = modulate(rms_norm(x, p["norm1.weight"], norm_eps), shift_msa, scale_msa, adaln_indices)
- 279     x = x + mx.take(gate_msa, adaln_indices, axis=0) * attn_block(h, sub("attn."), heads, qk_eps, rotary)
- 280     h = modulate(rms_norm(x, p["norm2.weight"], norm_eps), shift_mlp, scale_mlp, adaln_indices)
- 281     return x + mx.take(gate_mlp, adaln_indices, axis=0) * swiglu_ff(h, sub("ff."))
+ 290 def dit_block(
+ 291     x: mx.array,
+ 292     temb: mx.array,
+ 293     adaln_indices: mx.array,
+ 294     rotary: tuple[mx.array, mx.array],
+ 295     p: dict,
+ 296     heads: int,
+ 297     hidden_size: int,
+ 298     norm_eps: float = 1e-5,
+ 299     qk_eps: float = 1e-5,
+ 300     modulation: list[mx.array] | None = None,
+ 301 ) -> mx.array:
+ 302     """Pre-norm attention and SwiGLU FF, each shift/scale-modulated and gated per row from the (t, modality) table.
+ 303     `modulation`: the six precomputed tables (from `ModulationCache`) instead of projecting `temb` here."""
+ 304     if modulation is None:
+ 305         modulation = adaln_modulation(temb, p["adaln_proj.linear.weight"], p["adaln_proj.linear.bias"], hidden_size)
+ 306     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation
+ 307     sub = lambda prefix: {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}  # noqa: E731
+ 308     h = modulate(rms_norm(x, p["norm1.weight"], norm_eps), shift_msa, scale_msa, adaln_indices)
+ 309     x = x + mx.take(gate_msa, adaln_indices, axis=0) * attn_block(h, sub("attn."), heads, qk_eps, rotary)
+ 310     h = modulate(rms_norm(x, p["norm2.weight"], norm_eps), shift_mlp, scale_mlp, adaln_indices)
+ 311     return x + mx.take(gate_mlp, adaln_indices, axis=0) * swiglu_ff(h, sub("ff."))
 ```
 
 `modulation=` lets a precomputed table replace the per-step projection (§2.6).
@@ -774,51 +775,54 @@ shows the two give the same rows in MLX, with a junk tail that does change the o
 The port, stage by stage. Each modality is projected at its own weights' dtype, the text goes through the 2-layer token
 refiner, and the rows are scattered into the packed buffer:
 
-📍 `src/h3mlx/ops.py:324-332`
+📍 `src/h3mlx/ops.py:357-365`
 ```python
- 324     v = linear(video.astype(p["proj_in.weight"].dtype), p["proj_in.weight"], p["proj_in.bias"])
- 325     a = linear(audio.astype(p["audio_proj_in.weight"].dtype), p["audio_proj_in.weight"], p["audio_proj_in.bias"])
- 326     t = linear(text.astype(p["context_embedder.weight"].dtype), p["context_embedder.weight"], p["context_embedder.bias"])
- 327     t = token_refiner(t, _sub(p, "token_refiner."), cfg["num_refiner_layers"], heads, eps, qk_eps, final_eps)
- 328
- 329     x = mx.zeros((t.shape[0], seq, t.shape[-1]), dtype=t.dtype)
- 330     x[:, text_indices] = t
- 331     x[:, video_indices] = v.astype(t.dtype)
- 332     x[:, audio_indices] = a.astype(t.dtype)
+ 357     v = linear(video.astype(p["proj_in.weight"].dtype), p["proj_in.weight"], p["proj_in.bias"])
+ 358     a = linear(audio.astype(p["audio_proj_in.weight"].dtype), p["audio_proj_in.weight"], p["audio_proj_in.bias"])
+ 359     t = linear(text.astype(p["context_embedder.weight"].dtype), p["context_embedder.weight"], p["context_embedder.bias"])
+ 360     t = token_refiner(t, _sub(p, "token_refiner."), cfg["num_refiner_layers"], heads, eps, qk_eps, final_eps)
+ 361
+ 362     x = mx.zeros((t.shape[0], seq, t.shape[-1]), dtype=t.dtype)
+ 363     x[:, text_indices] = t
+ 364     x[:, video_indices] = v.astype(t.dtype)
+ 365     x[:, audio_indices] = a.astype(t.dtype)
 ```
 
 The AdaLN rows, then the 50 blocks. Each block is evaluated before the next is built, so MLX's lazy graph never spans
 more than one block. This does not cap the sequence length or the total memory:
 
-📍 `src/h3mlx/ops.py:336-346`
+📍 `src/h3mlx/ops.py:369-382`
 ```python
- 336     if cache is None:
- 337         temb = timestep_embedding(timestep, _sub(p, "time_embedder."), cfg["freq_dim"])
- 338         t_rows = timestep_indices
- 339     else:
- 340         temb = None
- 341         t_rows = cache.rows(timestep, timestep_indices)  # step-local timestep index -> row of the cached table
- 342     adaln_indices = t_rows * MODALITY_NUM + token_tags
- 343     for i in range(cfg["num_layers"]):
- 344         x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps,
- 345                       modulation=None if cache is None else cache.blocks[i])
- 346         mx.eval(x)  # one block's graph at a time: bounds activation memory at 20-50k rows
+ 369     mx.eval(x)  # projections + refiner + scatter as their own graph, before the first block
+ 370     if cache is None:
+ 371         temb = two_time_embedding(timestep, endpoint, p, cfg)
+ 372         t_rows = timestep_indices
+ 373     else:
+ 374         if endpoint is not None or "endpoint_time_embedder.linear_1.weight" in p:
+ 375             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
+ 376         temb = None
+ 377         t_rows = cache.rows(timestep, timestep_indices)  # step-local timestep index -> row of the cached table
+ 378     adaln_indices = t_rows * MODALITY_NUM + token_tags
+ 379     for i in range(cfg["num_layers"]):
+ 380         x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps,
+ 381                       modulation=None if cache is None else cache.blocks[i])
+ 382         mx.eval(x)  # one block's graph at a time: bounds activation memory at 20-50k rows
 ```
 
 The final shift/scale norm, the cast to the f32 heads, and gathering the video and audio rows:
 
-📍 `src/h3mlx/ops.py:350-359`
+📍 `src/h3mlx/ops.py:386-395`
 ```python
- 350     if cache is None:
- 351         x = norm_out(x, temb, p["norm_out.norm.weight"], p["norm_out.linear.weight"], p["norm_out.linear.bias"],
- 352                      timestep_indices, final_eps)
- 353     else:
- 354         shift, scale = cache.out
- 355         h = rms_norm(x, p["norm_out.norm.weight"], final_eps)
- 356         x = h * (1.0 + mx.take(scale, t_rows, axis=0)) + mx.take(shift, t_rows, axis=0)
- 357     x = x.astype(p["proj_out.weight"].dtype)
- 358     vid = linear(x, p["proj_out.weight"], p["proj_out.bias"])[:, video_indices]
- 359     aud = linear(x, p["audio_proj_out.weight"], p["audio_proj_out.bias"])[:, audio_indices]
+ 386     if cache is None:
+ 387         x = norm_out(x, temb, p["norm_out.norm.weight"], p["norm_out.linear.weight"], p["norm_out.linear.bias"],
+ 388                      timestep_indices, final_eps)
+ 389     else:
+ 390         shift, scale = cache.out
+ 391         h = rms_norm(x, p["norm_out.norm.weight"], final_eps)
+ 392         x = h * (1.0 + mx.take(scale, t_rows, axis=0)) + mx.take(shift, t_rows, axis=0)
+ 393     x = x.astype(p["proj_out.weight"].dtype)
+ 394     vid = linear(x, p["proj_out.weight"], p["proj_out.bias"])[:, video_indices]
+ 395     aud = linear(x, p["audio_proj_out.weight"], p["audio_proj_out.bias"])[:, audio_indices]
 ```
 
 The port leaves out the original's input shape checks, the LoRA scale hook and the output class. It is a forward
@@ -860,58 +864,60 @@ where they differ by 0.0028 at one step of 49. `tests/test_modulation_cache.py` 
   accumulated trajectory). Cached and uncached must both be within 1.25× torch-bf16's own error against an f32 run,
   plus 0.0001. The worst observed is 1.06×.
 
-📍 `src/h3mlx/ops.py:367-406`
+📍 `src/h3mlx/ops.py:403-442`
 ```python
- 367 class ModulationCache:
- 368     """Every block's six AdaLN tables (and norm_out's shift/scale) for a fixed set of timestep values, computed once.
- 369
- 370     The modulation depends only on t and the weights, never on the latents, so a sampling run can precompute it for
- 371     the union of its timesteps and drop the `adaln_proj` weights (~26 GB of transformer_ref's ~66 GB in bf16). The
- 372     rows of each table are [t0m0, t0m1, t0m2, t1m0, ...] over `self.t`, exactly what `adaln_modulation` returns.
- 373     """
- 374
- 375     def __init__(self, p: dict, cfg: dict, timesteps):
- 376         t = np.unique(np.asarray(timesteps, dtype=np.float32))
- 377         self.t = t
- 378         self._index = {float(v): i for i, v in enumerate(t)}
- 379         temb = timestep_embedding(mx.array(t), _sub(p, "time_embedder."), cfg["freq_dim"])
- 380         hidden = cfg["hidden_size"]
- 381         self.blocks = []
- 382         for i in range(cfg["num_layers"]):
- 383             b = f"transformer_blocks.{i}.adaln_proj.linear."
- 384             tables = adaln_modulation(temb, p[b + "weight"], p[b + "bias"], hidden)
- 385             mx.eval(tables)
- 386             self.blocks.append(tables)
- 387         w, bias = p["norm_out.linear.weight"], p["norm_out.linear.bias"]
- 388         self.out = mx.split(linear(silu(temb).astype(w.dtype), w, bias), 2, axis=-1)
- 389         mx.eval(self.out)
- 390
- 391     def rows(self, timestep: mx.array, timestep_indices: mx.array) -> mx.array:
- 392         """Map a step's (distinct timesteps, per-row index into them) onto rows of the cached tables."""
- 393         local = np.array(timestep.astype(mx.float32))
- 394         try:
- 395             glob = np.array([self._index[float(v)] for v in local], dtype=np.int64)
- 396         except KeyError as e:
- 397             raise KeyError(f"timestep {e} not in the cache (built for {len(self.t)} values)") from None
- 398         return mx.take(mx.array(glob), timestep_indices)
- 399
- 400     @staticmethod
- 401     def drop_weights(p: dict, cfg: dict) -> dict:
- 402         """A new dict without the projections the cache replaces. The memory is freed only when nothing else (e.g. the
- 403         caller's original dict) still references those arrays."""
- 404         gone = {f"transformer_blocks.{i}.adaln_proj.linear.{n}" for i in range(cfg["num_layers"]) for n in ("weight", "bias")}
- 405         gone |= {"norm_out.linear.weight", "norm_out.linear.bias"}
- 406         return {k: v for k, v in p.items() if k not in gone}
+ 403 class ModulationCache:
+ 404     """Every block's six AdaLN tables (and norm_out's shift/scale) for a fixed set of timestep values, computed once.
+ 405
+ 406     The modulation depends only on t and the weights, never on the latents, so a sampling run can precompute it for
+ 407     the union of its timesteps and drop the `adaln_proj` weights (~26 GB of transformer_ref's ~66 GB in bf16). The
+ 408     rows of each table are [t0m0, t0m1, t0m2, t1m0, ...] over `self.t`, exactly what `adaln_modulation` returns.
+ 409     """
+ 410
+ 411     def __init__(self, p: dict, cfg: dict, timesteps):
+ 412         t = np.unique(np.asarray(timesteps, dtype=np.float32))
+ 413         self.t = t
+ 414         self._index = {float(v): i for i, v in enumerate(t)}
+ 415         temb = timestep_embedding(mx.array(t), _sub(p, "time_embedder."), cfg["freq_dim"])
+ 416         hidden = cfg["hidden_size"]
+ 417         self.blocks = []
+ 418         for i in range(cfg["num_layers"]):
+ 419             b = f"transformer_blocks.{i}.adaln_proj.linear."
+ 420             tables = adaln_modulation(temb, p[b + "weight"], p[b + "bias"], hidden)
+ 421             mx.eval(tables)
+ 422             self.blocks.append(tables)
+ 423         w, bias = p["norm_out.linear.weight"], p["norm_out.linear.bias"]
+ 424         self.out = mx.split(linear(silu(temb).astype(w.dtype), w, bias), 2, axis=-1)
+ 425         mx.eval(self.out)
+ 426
+ 427     def rows(self, timestep: mx.array, timestep_indices: mx.array) -> mx.array:
+ 428         """Map a step's (distinct timesteps, per-row index into them) onto rows of the cached tables."""
+ 429         local = np.array(timestep.astype(mx.float32))
+ 430         try:
+ 431             glob = np.array([self._index[float(v)] for v in local], dtype=np.int64)
+ 432         except KeyError as e:
+ 433             raise KeyError(f"timestep {e} not in the cache (built for {len(self.t)} values)") from None
+ 434         return mx.take(mx.array(glob), timestep_indices)
+ 435
+ 436     @staticmethod
+ 437     def drop_weights(p: dict, cfg: dict) -> dict:
+ 438         """A new dict without the projections the cache replaces. The memory is freed only when nothing else (e.g. the
+ 439         caller's original dict) still references those arrays."""
+ 440         gone = {f"transformer_blocks.{i}.adaln_proj.linear.{n}" for i in range(cfg["num_layers"]) for n in ("weight", "bias")}
+ 441         gone |= {"norm_out.linear.weight", "norm_out.linear.bias"}
+ 442         return {k: v for k, v in p.items() if k not in gone}
 ```
-📍 `src/h3mlx/denoise.py:90-96`
+📍 `src/h3mlx/denoise.py:149-157`
 ```python
-  90 def schedule_timesteps(layout: Layout, schedules: Schedules) -> np.ndarray:
-  91     """Every distinct timestep any row takes over the whole run: what a ModulationCache needs."""
-  92     vals = []
-  93     for t, ta in zip(schedules.video_timesteps, schedules.audio_timesteps):
-  94         uniq, _ = row_timesteps(layout, float(t), float(ta), max(float(t), KEYFRAME_NOISE_AUG), 1.0)
-  95         vals.append(uniq)
-  96     return np.unique(np.concatenate(vals))
+ 149 def schedule_timesteps(layout: Layout, schedules: Schedules) -> np.ndarray:
+ 150     """Every distinct timestep any row takes over the whole run: what a ModulationCache needs."""
+ 151     if schedules.two_time:
+ 152         raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
+ 153     vals = []
+ 154     for t, ta in zip(schedules.video_timesteps, schedules.audio_timesteps):
+ 155         uniq, _ = row_timesteps(layout, float(t), float(ta), max(float(t), KEYFRAME_NOISE_AUG), 1.0)
+ 156         vals.append(uniq)
+ 157     return np.unique(np.concatenate(vals))
 ```
 
 ---
@@ -974,42 +980,42 @@ calls**. diffusers' default of 50 runs 49 forwards. The tests' "3" and "5" run 2
  169         self._step_index = None
  170         self._begin_index = None
 ```
-📍 `src/h3mlx/ops.py:233-243`
+📍 `src/h3mlx/ops.py:263-273`
 ```python
- 233 def flow_sigmas(num_inference_steps: int, shift: float) -> np.ndarray:
- 234     """linspace(1, 0, n) in float32, exponential shift, consecutive duplicates collapsed. Terminal 0 included."""
- 235     if num_inference_steps is None or num_inference_steps < 2:
- 236         raise ValueError(f"num_inference_steps must be >= 2, got {num_inference_steps}")
- 237     if shift <= 0:
- 238         raise ValueError(f"shift must be positive, got {shift}")
- 239     base = torch_linspace_f32(1.0, 0.0, num_inference_steps)
- 240     shift32 = np.float32(shift)
- 241     sig = (shift32 * base / (np.float32(1) + (shift32 - np.float32(1)) * base)).astype(np.float32)
- 242     keep = np.concatenate([[True], sig[1:] != sig[:-1]])
- 243     return sig[keep]
+ 263 def flow_sigmas(num_inference_steps: int, shift: float) -> np.ndarray:
+ 264     """linspace(1, 0, n) in float32, exponential shift, consecutive duplicates collapsed. Terminal 0 included."""
+ 265     if num_inference_steps is None or num_inference_steps < 2:
+ 266         raise ValueError(f"num_inference_steps must be >= 2, got {num_inference_steps}")
+ 267     if shift <= 0:
+ 268         raise ValueError(f"shift must be positive, got {shift}")
+ 269     base = torch_linspace_f32(1.0, 0.0, num_inference_steps)
+ 270     shift32 = np.float32(shift)
+ 271     sig = (shift32 * base / (np.float32(1) + (shift32 - np.float32(1)) * base)).astype(np.float32)
+ 272     keep = np.concatenate([[True], sig[1:] != sig[:-1]])
+ 273     return sig[keep]
 ```
 
 On arm64, `torch.linspace` fills each half of the grid from its own end, with a fused multiply-add. So `np.linspace`
 differs in the last bit at nine positions for N = 50. The port reproduces torch's fill; `tests/test_ops.py` checks it
 bit-exact for every N from 2 to 1999.
 
-📍 `src/h3mlx/ops.py:216-230`
+📍 `src/h3mlx/ops.py:246-260`
 ```python
- 216 def torch_linspace_f32(start: float, end: float, steps: int) -> np.ndarray:
- 217     """torch.linspace(start, end, steps, dtype=float32) bit for bit (CPU, arm64): float32 step, the first half filled
- 218     from `start` and the second from `end`, each as one fused multiply-add (exact product, single rounding).
- 219     np.linspace differs by 1 ulp at e.g. steps=50."""
- 220     if steps < 2:
- 221         raise ValueError(f"steps must be >= 2, got {steps}")
- 222     start32, end32 = np.float32(start), np.float32(end)
- 223     step = np.float32((end32 - start32) / np.float32(steps - 1))
- 224     i = np.arange(steps, dtype=np.float64)
- 225     out = np.where(
- 226         i < steps // 2,
- 227         np.float64(start32) + np.float64(step) * i,
- 228         np.float64(end32) - np.float64(step) * (steps - 1 - i),
- 229     )
- 230     return out.astype(np.float32)
+ 246 def torch_linspace_f32(start: float, end: float, steps: int) -> np.ndarray:
+ 247     """torch.linspace(start, end, steps, dtype=float32) bit for bit (CPU, arm64): float32 step, the first half filled
+ 248     from `start` and the second from `end`, each as one fused multiply-add (exact product, single rounding).
+ 249     np.linspace differs by 1 ulp at e.g. steps=50."""
+ 250     if steps < 2:
+ 251         raise ValueError(f"steps must be >= 2, got {steps}")
+ 252     start32, end32 = np.float32(start), np.float32(end)
+ 253     step = np.float32((end32 - start32) / np.float32(steps - 1))
+ 254     i = np.arange(steps, dtype=np.float64)
+ 255     out = np.where(
+ 256         i < steps // 2,
+ 257         np.float64(start32) + np.float64(step) * i,
+ 258         np.float64(end32) - np.float64(step) * (steps - 1 - i),
+ 259     )
+ 260     return out.astype(np.float32)
 ```
 
 📍 [`diffusers:src/diffusers/schedulers/scheduling_minimax_h3.py:223-283`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/schedulers/scheduling_minimax_h3.py#L223-L283)
@@ -1076,17 +1082,17 @@ bit-exact for every N from 2 to 1999.
  282             return (prev_sample,)
  283         return MiniMaxH3SchedulerOutput(prev_sample=prev_sample)
 ```
-📍 `src/h3mlx/ops.py:246-254`
+📍 `src/h3mlx/ops.py:276-284`
 ```python
- 246 def flow_step(v: mx.array, t: float, x: mx.array, sigma: float, sigma_next: float) -> mx.array:
- 247     """x0 = x + (1 - t) * v (sigma from the timestep, in x's dtype); x_next = r*x + (1 - r)*x0, r = s_next / s, f32."""
- 248     st = (mx.array(1.0, dtype=x.dtype) - mx.array(t, dtype=x.dtype)).astype(x.dtype)
- 249     x0 = x + st * v
- 250     cdt = mx.float32 if x.dtype in (mx.float16, mx.bfloat16) else x.dtype
- 251     s = mx.array(sigma, dtype=cdt)
- 252     sn = mx.array(sigma_next, dtype=cdt)
- 253     r = sn / s
- 254     return (r * x.astype(cdt) + (1.0 - r) * x0.astype(cdt)).astype(x.dtype)
+ 276 def flow_step(v: mx.array, t: float, x: mx.array, sigma: float, sigma_next: float) -> mx.array:
+ 277     """x0 = x + (1 - t) * v (sigma from the timestep, in x's dtype); x_next = r*x + (1 - r)*x0, r = s_next / s, f32."""
+ 278     st = (mx.array(1.0, dtype=x.dtype) - mx.array(t, dtype=x.dtype)).astype(x.dtype)
+ 279     x0 = x + st * v
+ 280     cdt = mx.float32 if x.dtype in (mx.float16, mx.bfloat16) else x.dtype
+ 281     s = mx.array(sigma, dtype=cdt)
+ 282     sn = mx.array(sigma_next, dtype=cdt)
+ 283     r = sn / s
+ 284     return (r * x.astype(cdt) + (1.0 - r) * x0.astype(cdt)).astype(x.dtype)
 ```
 
 The original's scheduler also accepts custom sigma arrays and keeps a step index; the port's `flow_step` takes the two
@@ -1238,59 +1244,70 @@ diffusers builds the per-row plan once, then each loop step runs the transformer
 
 The port does all three in one loop:
 
-📍 `src/h3mlx/denoise.py:38-46`
+📍 `src/h3mlx/denoise.py:69-77`
 ```python
-  38 def row_timesteps(layout: Layout, video_t: float, audio_t: float, cond_video_t: float, cond_audio_t: float):
-  39     """Per-row timesteps reduced to (sorted distinct values, inverse index), like `build_row_timesteps`."""
-  40     seq = len(layout.video_indices) + len(layout.audio_indices) + len(layout.text_indices)
-  41     rt = np.full(seq, np.float32(video_t), dtype=np.float32)
-  42     rt[layout.video_indices[: layout.num_condition_video_rows]] = cond_video_t
-  43     rt[layout.audio_indices[layout.num_condition_audio_rows :]] = audio_t
-  44     rt[layout.audio_indices[: layout.num_condition_audio_rows]] = cond_audio_t
-  45     uniq, inv = np.unique(rt, return_inverse=True)
-  46     return uniq, inv
+  69 def row_timesteps(layout: Layout, video_t: float, audio_t: float, cond_video_t: float, cond_audio_t: float):
+  70     """Per-row timesteps reduced to (sorted distinct values, inverse index), like `build_row_timesteps`."""
+  71     seq = len(layout.video_indices) + len(layout.audio_indices) + len(layout.text_indices)
+  72     rt = np.full(seq, np.float32(video_t), dtype=np.float32)
+  73     rt[layout.video_indices[: layout.num_condition_video_rows]] = cond_video_t
+  74     rt[layout.audio_indices[layout.num_condition_audio_rows :]] = audio_t
+  75     rt[layout.audio_indices[: layout.num_condition_audio_rows]] = cond_audio_t
+  76     uniq, inv = np.unique(rt, return_inverse=True)
+  77     return uniq, inv
 ```
-📍 `src/h3mlx/denoise.py:49-87`
+📍 `src/h3mlx/denoise.py:97-146`
 ```python
-  49 def denoise(
-  50     params: dict,
-  51     cfg: dict,
-  52     layout: Layout,
-  53     prompt_embeds: mx.array,
-  54     video_rows: mx.array,
-  55     audio_rows: mx.array,
-  56     schedules: Schedules,
-  57     on_step=None,
-  58     cache: "ops.ModulationCache | None" = None,
-  59 ):
-  60     """video_rows (n_video, patch_dim) with conditioning rows first; audio_rows (n_audio, audio_ch) with reference rows
-  61     first; prompt_embeds (1, n_text, text_dim). Returns the final (video_rows, audio_rows). With `cache`
-  62     (`ops.ModulationCache` built from `schedule_timesteps`), the AdaLN projections are not evaluated per step."""
-  63     lay = {
-  64         "token_tags": mx.array(layout.token_tags),
-  65         "position_ids": mx.array(layout.position_ids.astype(np.float32)),
-  66         "video_indices": mx.array(layout.video_indices),
-  67         "audio_indices": mx.array(layout.audio_indices),
-  68         "text_indices": mx.array(layout.text_indices),
-  69     }
-  70     ncv, nca = layout.num_condition_video_rows, layout.num_condition_audio_rows
-  71     vts, ats = schedules.video_timesteps, schedules.audio_timesteps
-  72     for i, (t, ta) in enumerate(zip(vts, ats)):
-  73         uniq, inv = row_timesteps(layout, float(t), float(ta), max(float(t), KEYFRAME_NOISE_AUG), 1.0)
-  74         v_pred, a_pred = ops.dit_forward(
-  75             params, cfg, video_rows[None], audio_rows[None], prompt_embeds, mx.array(uniq), mx.array(inv), **lay,
-  76             cache=cache,
-  77         )
-  78         new_v = ops.flow_step(v_pred[0, ncv:].astype(mx.float32), float(t), video_rows[ncv:],
-  79                               float(schedules.video_sigmas[i]), float(schedules.video_sigmas[i + 1]))
-  80         new_a = ops.flow_step(a_pred[0, nca:].astype(mx.float32), float(ta), audio_rows[nca:],
-  81                               float(schedules.audio_sigmas[i]), float(schedules.audio_sigmas[i + 1]))
-  82         video_rows = mx.concatenate([video_rows[:ncv], new_v]) if ncv else new_v
-  83         audio_rows = mx.concatenate([audio_rows[:nca], new_a]) if nca else new_a
-  84         mx.eval(video_rows, audio_rows)
-  85         if on_step:
-  86             on_step(i, t)
-  87     return video_rows, audio_rows
+  97 def denoise(
+  98     params: dict,
+  99     cfg: dict,
+ 100     layout: Layout,
+ 101     prompt_embeds: mx.array,
+ 102     video_rows: mx.array,
+ 103     audio_rows: mx.array,
+ 104     schedules: Schedules,
+ 105     on_step=None,
+ 106     cache: "ops.ModulationCache | None" = None,
+ 107     check_finite: bool = False,
+ 108 ):
+ 109     """video_rows (n_video, patch_dim) with conditioning rows first; audio_rows (n_audio, audio_ch) with reference rows
+ 110     first; prompt_embeds (1, n_text, text_dim). Returns the final (video_rows, audio_rows). With `cache`
+ 111     (`ops.ModulationCache` built from `schedule_timesteps`), the AdaLN projections are not evaluated per step."""
+ 112     lay = {
+ 113         "token_tags": mx.array(layout.token_tags),
+ 114         "position_ids": mx.array(layout.position_ids.astype(np.float32)),
+ 115         "video_indices": mx.array(layout.video_indices),
+ 116         "audio_indices": mx.array(layout.audio_indices),
+ 117         "text_indices": mx.array(layout.text_indices),
+ 118     }
+ 119     ncv, nca = layout.num_condition_video_rows, layout.num_condition_audio_rows
+ 120     vts, ats = schedules.video_timesteps, schedules.audio_timesteps
+ 121     for i, (t, ta) in enumerate(zip(vts, ats)):
+ 122         cond_t = max(float(t), KEYFRAME_NOISE_AUG)
+ 123         if schedules.two_time:
+ 124             uniq, ends, inv = row_time_pairs(layout, float(t), float(schedules.video_endpoints[i]), float(ta),
+ 125                                              float(schedules.audio_endpoints[i]), cond_t, 1.0)
+ 126             endpoint = mx.array(ends)
+ 127         else:
+ 128             uniq, inv = row_timesteps(layout, float(t), float(ta), cond_t, 1.0)
+ 129             endpoint = None
+ 130         v_pred, a_pred = ops.dit_forward(
+ 131             params, cfg, video_rows[None], audio_rows[None], prompt_embeds, mx.array(uniq), mx.array(inv), **lay,
+ 132             cache=cache, endpoint=endpoint,
+ 133         )
+ 134         new_v = ops.flow_step(v_pred[0, ncv:].astype(mx.float32), float(t), video_rows[ncv:],
+ 135                               float(schedules.video_sigmas[i]), float(schedules.video_sigmas[i + 1]))
+ 136         new_a = ops.flow_step(a_pred[0, nca:].astype(mx.float32), float(ta), audio_rows[nca:],
+ 137                               float(schedules.audio_sigmas[i]), float(schedules.audio_sigmas[i + 1]))
+ 138         video_rows = mx.concatenate([video_rows[:ncv], new_v]) if ncv else new_v
+ 139         audio_rows = mx.concatenate([audio_rows[:nca], new_a]) if nca else new_a
+ 140         mx.eval(video_rows, audio_rows)
+ 141         if check_finite:
+ 142             assert_finite(f"step {i} video rows", video_rows)
+ 143             assert_finite(f"step {i} audio rows", audio_rows)
+ 144         if on_step:
+ 145             on_step(i, t)
+ 146     return video_rows, audio_rows
 ```
 
 `tests/test_denoise.py` runs the port against a torch loop assembled from diffusers' own scheduler, row plan and
@@ -1685,47 +1702,48 @@ mlx-vlm's model to stop after layer 50 without the final norm, through the `enco
  184             apply_final_norm=False,
  185         )
 ```
-📍 `src/h3mlx/load.py:85-123`
+📍 `src/h3mlx/load.py:107-146`
 ```python
-  85 def load_text_encoder(d, keep_layers: int = 50, dtype=None):
-  86     """mlx-vlm Qwen3-VL from the release's `text_encoder/`, with only decoder layers [0, keep_layers) and no lm_head.
-  87     Returns (model, encode(token_ids, vision_inputs) -> (1, n, hidden) after `keep_layers` layers, pre-norm)."""
-  88     from mlx.utils import tree_flatten
-  89     from mlx_vlm.models.qwen3_vl import Model, ModelConfig
-  90     from mlx_vlm.models.qwen3_vl.vision import VisionModel
-  91     from mlx_vlm.utils import sanitize_weights
-  92
-  93     config = ModelConfig.from_dict(qwen_params(_config(d)))
-  94     n_layers = config.text_config.num_hidden_layers
-  95     if not 0 < keep_layers <= n_layers:
-  96         raise ValueError(f"keep_layers must be in (0, {n_layers}], got {keep_layers}")
-  97
-  98     config.text_config.num_hidden_layers = keep_layers  # never build the layers past the cut
-  99     model = Model(config)
- 100     model.language_model.pop("lm_head", None)  # unused; would be a random 5120 x 151936 matrix
- 101     layer_re = re.compile(r"language_model\.layers\.(\d+)\.")
- 102
- 103     def keep(k):
- 104         if "lm_head" in k:
- 105             return False
- 106         m = layer_re.search(k)
- 107         return m is None or int(m.group(1)) < keep_layers
- 108
- 109     w = load_safetensors(d, keep)
- 110     w = sanitize_weights(VisionModel, sanitize_weights(model, w), config.vision_config)
- 111     if dtype is not None:
- 112         w = {k: v.astype(dtype) if mx.issubdtype(v.dtype, mx.floating) else v for k, v in w.items()}
- 113     model.load_weights(list(w.items()), strict=False)
- 114     want = {k for k, _ in tree_flatten(model.parameters()) if "lm_head" not in k}
- 115     missing = want - set(w)
- 116     if missing:
- 117         raise ValueError(f"text encoder weights missing: {sorted(missing)[:6]} (+{max(0, len(missing) - 6)})")
- 118
- 119     def encode(token_ids, vision_inputs):
- 120         kw = {k: mx.array(np.asarray(v)) for k, v in (vision_inputs or {}).items()}
- 121         return model.hidden_state_at_layer(mx.array([token_ids]), keep_layers, **kw)
- 122
- 123     return model, encode
+ 107 def load_text_encoder(d, keep_layers: int = 50, dtype=None):
+ 108     """mlx-vlm Qwen3-VL from the release's `text_encoder/`, with only decoder layers [0, keep_layers) and no lm_head.
+ 109     Returns (model, encode(token_ids, vision_inputs) -> (1, n, hidden) after `keep_layers` layers, pre-norm)."""
+ 110     from mlx.utils import tree_flatten
+ 111     from mlx_vlm.models.qwen3_vl import Model, ModelConfig
+ 112     from mlx_vlm.models.qwen3_vl.vision import VisionModel
+ 113     from mlx_vlm.utils import sanitize_weights
+ 114
+ 115     config = ModelConfig.from_dict(qwen_params(_config(d)))
+ 116     n_layers = config.text_config.num_hidden_layers
+ 117     if not 0 < keep_layers <= n_layers:
+ 118         raise ValueError(f"keep_layers must be in (0, {n_layers}], got {keep_layers}")
+ 119
+ 120     config.text_config.num_hidden_layers = keep_layers  # never build the layers past the cut
+ 121     model = Model(config)
+ 122     model.language_model.pop("lm_head", None)  # unused; would be a random 5120 x 151936 matrix
+ 123     layer_re = re.compile(r"language_model\.layers\.(\d+)\.")
+ 124
+ 125     def keep(k):
+ 126         if "lm_head" in k:
+ 127             return False
+ 128         m = layer_re.search(k)
+ 129         return m is None or int(m.group(1)) < keep_layers
+ 130
+ 131     w = load_safetensors(d, keep)
+ 132     w = sanitize_weights(VisionModel, sanitize_weights(model, w), config.vision_config)
+ 133     if dtype is not None:
+ 134         w = {k: v.astype(dtype) if mx.issubdtype(v.dtype, mx.floating) else v for k, v in w.items()}
+ 135     model.load_weights(list(w.items()), strict=False)
+ 136     want = {k for k, _ in tree_flatten(model.parameters()) if "lm_head" not in k}
+ 137     missing = want - set(w)
+ 138     if missing:
+ 139         raise ValueError(f"text encoder weights missing: {sorted(missing)[:6]} (+{max(0, len(missing) - 6)})")
+ 140     eval_each_layer(model.language_model.model.layers)
+ 141
+ 142     def encode(token_ids, vision_inputs):
+ 143         kw = {k: mx.array(np.asarray(v)) for k, v in (vision_inputs or {}).items()}
+ 144         return model.hidden_state_at_layer(mx.array([token_ids]), keep_layers, **kw)
+ 145
+ 146     return model, encode
 ```
 
 The loader builds only 50 decoder layers and no LM head. It opens every shard with `mx.load`, which is lazy: it reads
@@ -1736,22 +1754,23 @@ for every shard.
 `staged_text_encoder` loads, encodes and drops its own references. It does not unload anything else. To keep the text
 encoder and the transformer from being resident together, leave the transformer unevaluated until the text is done:
 
-📍 `src/h3mlx/load.py:126-139`
+📍 `src/h3mlx/load.py:149-163`
 ```python
- 126 def staged_text_encoder(d, keep_layers: int = 50, dtype=None):
- 127     """An `encode(token_ids, vision_inputs)` that loads the text encoder, runs it, and drops its own references before
- 128     returning (~51 GB bf16 for 50 layers of the release). It does not unload anything else: keep the transformer
- 129     unevaluated (lazy `mx.load`) until text encoding is done if the two must not be resident together."""
- 130
- 131     def encode(token_ids, vision_inputs):
- 132         model, run = load_text_encoder(d, keep_layers, dtype)
- 133         out = run(token_ids, vision_inputs)
- 134         mx.eval(out)
- 135         del model, run
- 136         mx.clear_cache()
- 137         return out
- 138
- 139     return encode
+ 149 def staged_text_encoder(d, keep_layers: int = 50, dtype=None):
+ 150     """An `encode(token_ids, vision_inputs)` that loads the text encoder, runs it, and drops its own references before
+ 151     returning (~51 GB bf16 for 50 layers of the release). It does not unload anything else: keep the transformer
+ 152     unevaluated (lazy `mx.load`) until text encoding is done if the two must not be resident together."""
+ 153
+ 154     def encode(token_ids, vision_inputs):
+ 155         model, run = load_text_encoder(d, keep_layers, dtype)
+ 156         out = run(token_ids, vision_inputs)
+ 157         mx.eval(out)
+ 158         del model, run
+ 159         gc.collect()  # a reference cycle would otherwise keep ~51 GB alive into the denoise
+ 160         mx.clear_cache()
+ 161         return out
+ 162
+ 163     return encode
 ```
 
 **Tests.**
@@ -2231,7 +2250,7 @@ by learned layer scales:
  501             width * patch_size,
  502         )
 ```
-📍 `src/h3mlx/vae_ops.py:183-201`
+📍 `src/h3mlx/vae_ops.py:183-202`
 ```python
  183 def vit_decoder(
  184     z: mx.array, p: dict, num_layers: int, heads: int, patch_size: int, patch_size_t: int, out_channels: int,
@@ -2246,12 +2265,13 @@ by learned layer scales:
  193     rotary = vit_rope(vit_positions(f, h, w, regs.shape[1] + 1), vit_rope_inv_freq(rope_dim, rope_theta))
  194     for i in range(num_layers):
  195         x = vit_block(x, _sub(p, f"transformer_blocks.{i}."), heads, eps, rotary)
- 196     x = mx.fast.layer_norm(x.astype(mx.float32), p["norm_out.weight"].astype(mx.float32),
- 197                            p["norm_out.bias"].astype(mx.float32), eps)
- 198     x = _lin(x.astype(p["proj_out.weight"].dtype), p, "proj_out")[:, :n]
- 199     x = x.reshape(b, f, h, w, out_channels, patch_size_t, patch_size, patch_size)
- 200     x = x.transpose(0, 1, 5, 2, 6, 3, 7, 4)  # (b, f, pt, h, p, w, p, c)
- 201     return x.reshape(b, f * patch_size_t, h * patch_size, w * patch_size, out_channels)
+ 196         mx.eval(x)  # 36 f32 blocks per tile: keep each one its own GPU graph
+ 197     x = mx.fast.layer_norm(x.astype(mx.float32), p["norm_out.weight"].astype(mx.float32),
+ 198                            p["norm_out.bias"].astype(mx.float32), eps)
+ 199     x = _lin(x.astype(p["proj_out.weight"].dtype), p, "proj_out")[:, :n]
+ 200     x = x.reshape(b, f, h, w, out_channels, patch_size_t, patch_size, patch_size)
+ 201     x = x.transpose(0, 1, 5, 2, 6, 3, 7, 4)  # (b, f, pt, h, p, w, p, c)
+ 202     return x.reshape(b, f * patch_size_t, h * patch_size, w * patch_size, out_channels)
 ```
 
 **The conditioning recipe for visual references:**
@@ -2836,23 +2856,23 @@ target audio rows. That order is part of what a seed reproduces:
  897         self.set_block_state(state, block_state)
  898         return components, state
 ```
-📍 `src/h3mlx/pipeline.py:234-248`
+📍 `src/h3mlx/pipeline.py:268-282`
 ```python
- 234     gen = Noise(seed)
- 235     patch = tuple(c.dit_cfg["patch_size"])
- 236     rows = []
- 237     for x in cond:  # one draw per condition, packed order, then held at t = 0.999
- 238         b, f, h, w, ch = x.shape
- 239         nz = mx.array(gen((b, ch, f, h, w)).transpose(0, 2, 3, 4, 1))
- 240         t32 = np.float32(NOISE_AUG)  # scale_noise: t * x + (1 - t) * noise, both factors in float32
- 241         noised = mx.array(t32) * x + mx.array(np.float32(1) - t32) * nz
- 242         rows.append(ops.patchify(noised.transpose(0, 4, 1, 2, 3), patch))
- 243     lat_ch = c.dit_cfg["in_channels"]
- 244     target = mx.array(gen((1, lat_ch, lf, lh, lw)))
- 245     rows.append(ops.patchify(target, patch))
- 246     video_rows = mx.concatenate(rows)
- 247     audio_ch = c.dit_cfg["audio_in_channels"]
- 248     audio_rows = mx.concatenate(ref_audio + [mx.array(gen((na * AUDIO_CHANNELS, audio_ch)))])
+ 268     gen = Noise(seed)
+ 269     patch = tuple(c.dit_cfg["patch_size"])
+ 270     rows = []
+ 271     for x in cond:  # one draw per condition, packed order, then held at t = 0.999
+ 272         b, f, h, w, ch = x.shape
+ 273         nz = mx.array(gen((b, ch, f, h, w)).transpose(0, 2, 3, 4, 1))
+ 274         t32 = np.float32(NOISE_AUG)  # scale_noise: t * x + (1 - t) * noise, both factors in float32
+ 275         noised = mx.array(t32) * x + mx.array(np.float32(1) - t32) * nz
+ 276         rows.append(ops.patchify(noised.transpose(0, 4, 1, 2, 3), patch))
+ 277     lat_ch = c.dit_cfg["in_channels"]
+ 278     target = mx.array(gen((1, lat_ch, lf, lh, lw)))
+ 279     rows.append(ops.patchify(target, patch))
+ 280     video_rows = mx.concatenate(rows)
+ 281     audio_ch = c.dit_cfg["audio_in_channels"]
+ 282     audio_rows = mx.concatenate(ref_audio + [mx.array(gen((na * AUDIO_CHANNELS, audio_ch)))])
 ```
 
 **After denoising**, diffusers splits it into three steps:
@@ -2946,16 +2966,16 @@ The port does all three in one block:
  255         self.set_block_state(state, block_state)
  256         return components, state
 ```
-📍 `src/h3mlx/pipeline.py:257-264`
+📍 `src/h3mlx/pipeline.py:216-223`
 ```python
- 257     v_lat = ops.unpatchify(v[layout.num_condition_video_rows :], lat_ch, lf, lh, lw, patch)  # (1, C, F, H, W)
- 258     v_lat = v_lat.transpose(0, 2, 3, 4, 1) * mx.array(c.vae_latents_std) + mx.array(c.vae_latents_mean)
- 259     px = c.vae.decode(v_lat)[0]  # (frames, H, W, 3)
- 260     video = mx.clip(px * mx.array(PIXEL_STD) + mx.array(PIXEL_MEAN), 0.0, 1.0)
- 261
- 262     a_lat = a[layout.num_condition_audio_rows :].reshape(AUDIO_CHANNELS, na, audio_ch)
- 263     a_lat = a_lat * mx.array(c.audio_latents_std) + mx.array(c.audio_latents_mean)
- 264     audio = c.audio_vae.decode(a_lat)[:, :, 0]  # (2, samples)
+ 216     v_lat = ops.unpatchify(video_rows[ncv:], lat_ch, lf, lh, lw, patch)  # (1, C, F, H, W)
+ 217     v_lat = v_lat.transpose(0, 2, 3, 4, 1) * mx.array(c.vae_latents_std) + mx.array(c.vae_latents_mean)
+ 218     px = c.vae.decode(v_lat)[0]  # (frames, H, W, 3)
+ 219     video = mx.clip(px * mx.array(PIXEL_STD) + mx.array(PIXEL_MEAN), 0.0, 1.0)
+ 220
+ 221     a_lat = audio_rows[nca:].reshape(AUDIO_CHANNELS, na, audio_ch)
+ 222     a_lat = a_lat * mx.array(c.audio_latents_std) + mx.array(c.audio_latents_mean)
+ 223     audio = c.audio_vae.decode(a_lat)[:, :, 0]  # (2, samples)
 ```
 
 **End-to-end test.** `tests/test_pipeline_e2e.py` runs one whole ref2va request through diffusers' own
@@ -2972,13 +2992,17 @@ for audio. This is one tiny f32 configuration, not the bf16 release.
 
 ## 9. What is not ported, or not yet
 
-- **LoRA.** diffusers has a MiniMax H3 LoRA loader that routes each LoRA to `transformer` or `transformer_ref`; the
-  port has none yet.
+- **LoRA.** diffusers' generic MiniMax H3 LoRA loader (which routes each LoRA to `transformer` or `transformer_ref`)
+  is not ported. One specific LoRA is: HyperFlow, Video Rebirth's 8-step LoRA, with its two-time embedder and fixed
+  grid; see `docs/porting-hyperflow.md`. Its hook is `ops.plinear`: every targeted linear adds a LoRA when the weight
+  dict carries `<name>.lora_A.weight` / `.lora_B.weight`, and without them it is exactly `linear(x, p[name + ".weight"])`, the call §2's attention and
+  feed-forward extracts made before HyperFlow.
 - **Speedups.** Sparse attention and quantisation: a dense bf16 baseline comes first.
 - **Caller-supplied inputs.** diffusers accepts caller-supplied latents and tensor inputs; the port takes the input
   types listed in §8 only.
 - **t2va and fl2va pipelines.** Their packers and ops are here and tested (`build_packed_sequence`); only ref2va is
   assembled end to end.
 - **Real weights.** Everything above was checked with tiny random weights and the release's configs, index, tokenizer
-  and processor. The first run with the released 66 GB `transformer_ref` and 67 GB `text_encoder` is still ahead, and
-  with it every real number for memory, speed and quality.
+  and processor. The released weights have run once end to end on an M3 Ultra (256 GB): run-001, 512×288, 124 frames, 49 calls,
+  1,014 s, a coherent clip. Quality against diffusers' own output on the same
+  inputs is not measured.

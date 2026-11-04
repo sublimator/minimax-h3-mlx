@@ -114,6 +114,9 @@ def check_plan(plan: dict, shapes: dict, base_shapes: dict, meta: HyperFlowMeta)
     no_base = [m for m in plan if _base_name(m) + ".weight" not in base_shapes]
     if no_base:
         raise KeyError(f"{len(no_base)} LoRA target(s) have no Linear weight in this transformer, e.g. {no_base[:5]}")
+    not_linear = [m for m in plan if len(base_shapes[_base_name(m) + ".weight"]) != 2]
+    if not_linear:
+        raise ValueError(f"LoRA target(s) whose weight is not a 2-D Linear weight: {not_linear[:5]}")
     ranks = set()
     for module, keys in plan.items():
         a, b = tuple(shapes[keys["A"]]), tuple(shapes[keys["B"]])
@@ -148,6 +151,11 @@ def attach(params: dict, cfg: dict, tensors: dict, meta: HyperFlowMeta, subfolde
         out[module + ".lora_A.weight"] = tensors[keys["A"]].astype(dtype)
         out[module + ".lora_B.weight"] = tensors[keys["B"]].astype(dtype)
     return out, {**cfg, "hyperflow_gate": float(meta.gate)}
+
+
+def rank_from_shapes(shapes: dict) -> int:
+    """The LoRA rank from the header's shapes (first lora_A's rows), for files whose header omits `lora_rank`."""
+    return int(next(s[0] for k, s in shapes.items() if k.endswith(".lora_A.weight")))
 
 
 def read_header(path) -> tuple[HyperFlowMeta, dict]:

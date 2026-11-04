@@ -197,14 +197,14 @@ def plan(c: Components, prompt: str, image: Image.Image, args) -> dict:
     layout = build_ref2va_packed_sequence(np.asarray(tags), [Ref(r.kind, r.has_audio) for r in refs], ref_shapes, [],
                                           lf, lh, lw, na, tuple(c.dit_cfg["patch_size"]), 2)
     if args.hyperflow:
-        meta, _ = hyperflow.read_header(args.hyperflow)
+        meta, shapes = hyperflow.read_header(args.hyperflow)
         sch = meta.schedules()
     else:
         sch = Schedules.make(args.steps)
     extra = {}
     if args.hyperflow:
         extra["hyperflow"] = {"file": str(args.hyperflow), "version": meta.version, "gate": meta.gate,
-                              "rank": meta.lora_rank, "sigmas": list(meta.sigmas),
+                              "rank": meta.lora_rank or hyperflow.rank_from_shapes(shapes), "sigmas": list(meta.sigmas),
                               "base_model_revision": meta.base_model_revision}
     return {**extra, "height": h, "width": w, "frames": n, "seconds": round(n / R.FPS, 3), "latent_frames": lf,
             "reference_size": list(refs[0].image.size), "text_rows": len(ids), "vision_tokens": int(sum(ic)),
