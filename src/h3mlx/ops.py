@@ -267,11 +267,13 @@ def dit_block(
     hidden_size: int,
     norm_eps: float = 1e-5,
     qk_eps: float = 1e-5,
+    modulation: list[mx.array] | None = None,
 ) -> mx.array:
-    """Pre-norm attention and SwiGLU FF, each shift/scale-modulated and gated per row from the (t, modality) table."""
-    shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = adaln_modulation(
-        temb, p["adaln_proj.linear.weight"], p["adaln_proj.linear.bias"], hidden_size
-    )
+    """Pre-norm attention and SwiGLU FF, each shift/scale-modulated and gated per row from the (t, modality) table.
+    `modulation`: the six precomputed tables (from `ModulationCache`) instead of projecting `temb` here."""
+    if modulation is None:
+        modulation = adaln_modulation(temb, p["adaln_proj.linear.weight"], p["adaln_proj.linear.bias"], hidden_size)
+    shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation
     sub = lambda prefix: {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}  # noqa: E731
     h = modulate(rms_norm(x, p["norm1.weight"], norm_eps), shift_msa, scale_msa, adaln_indices)
     x = x + mx.take(gate_msa, adaln_indices, axis=0) * attn_block(h, sub("attn."), heads, qk_eps, rotary)
@@ -308,9 +310,11 @@ def dit_forward(
     video_indices: mx.array,
     audio_indices: mx.array,
     text_indices: mx.array,
+    cache: "ModulationCache | None" = None,
 ) -> tuple[mx.array, mx.array]:
     """MiniMaxH3Transformer3DModel.forward over one packed sequence. `p` is the state dict (diffusers names), `cfg`
-    its config. Returns (video velocity rows, audio velocity rows) in the order of video_indices / audio_indices."""
+    its config. Returns (video velocity rows, audio velocity rows) in the order of video_indices / audio_indices.
+    With `cache`, the AdaLN tables come from it (the `adaln_proj` / `norm_out.linear` weights may then be absent)."""
     hidden, heads = cfg["hidden_size"], cfg["num_attention_heads"]
     eps, qk_eps, final_eps = cfg["norm_eps"], cfg["qk_norm_eps"], cfg["final_norm_eps"]
     seq = position_ids.shape[0]
@@ -326,16 +330,69 @@ def dit_forward(
     x[:, video_indices] = v.astype(t.dtype)
     x[:, audio_indices] = a.astype(t.dtype)
 
-    tp = _sub(p, "time_embedder.")
-    temb = timestep_embedding(timestep, {k: v for k, v in tp.items()}, cfg["freq_dim"])
-    adaln_indices = timestep_indices * MODALITY_NUM + token_tags
+    if cache is None:
+        temb = timestep_embedding(timestep, _sub(p, "time_embedder."), cfg["freq_dim"])
+        t_rows = timestep_indices
+    else:
+        temb = None
+        t_rows = cache.rows(timestep, timestep_indices)  # step-local timestep index -> row of the cached table
+    adaln_indices = t_rows * MODALITY_NUM + token_tags
     for i in range(cfg["num_layers"]):
-        x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps)
+        x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps,
+                      modulation=None if cache is None else cache.blocks[i])
 
-    x = norm_out(
-        x, temb, p["norm_out.norm.weight"], p["norm_out.linear.weight"], p["norm_out.linear.bias"], timestep_indices,
-        final_eps,
-    ).astype(p["proj_out.weight"].dtype)
+    if cache is None:
+        x = norm_out(x, temb, p["norm_out.norm.weight"], p["norm_out.linear.weight"], p["norm_out.linear.bias"],
+                     timestep_indices, final_eps)
+    else:
+        shift, scale = cache.out
+        h = rms_norm(x, p["norm_out.norm.weight"], final_eps)
+        x = h * (1.0 + mx.take(scale, t_rows, axis=0)) + mx.take(shift, t_rows, axis=0)
+    x = x.astype(p["proj_out.weight"].dtype)
     vid = linear(x, p["proj_out.weight"], p["proj_out.bias"])[:, video_indices]
     aud = linear(x, p["audio_proj_out.weight"], p["audio_proj_out.bias"])[:, audio_indices]
     return vid, aud
+
+
+# --- AdaLN modulation cache ---------------------------------------------------------------------------------------
+
+
+class ModulationCache:
+    """Every block's six AdaLN tables (and norm_out's shift/scale) for a fixed set of timestep values, computed once.
+
+    The modulation depends only on t and the weights, never on the latents, so a sampling run can precompute it for
+    the union of its timesteps and drop the `adaln_proj` weights (~26 GB of transformer_ref's ~66 GB in bf16). The
+    rows of each table are [t0m0, t0m1, t0m2, t1m0, ...] over `self.t`, exactly what `adaln_modulation` returns.
+    """
+
+    def __init__(self, p: dict, cfg: dict, timesteps):
+        t = np.unique(np.asarray(timesteps, dtype=np.float32))
+        self.t = t
+        self._index = {float(v): i for i, v in enumerate(t)}
+        temb = timestep_embedding(mx.array(t), _sub(p, "time_embedder."), cfg["freq_dim"])
+        hidden = cfg["hidden_size"]
+        self.blocks = []
+        for i in range(cfg["num_layers"]):
+            b = f"transformer_blocks.{i}.adaln_proj.linear."
+            tables = adaln_modulation(temb, p[b + "weight"], p[b + "bias"], hidden)
+            mx.eval(tables)
+            self.blocks.append(tables)
+        w, bias = p["norm_out.linear.weight"], p["norm_out.linear.bias"]
+        self.out = mx.split(linear(silu(temb).astype(w.dtype), w, bias), 2, axis=-1)
+        mx.eval(self.out)
+
+    def rows(self, timestep: mx.array, timestep_indices: mx.array) -> mx.array:
+        """Map a step's (distinct timesteps, per-row index into them) onto rows of the cached tables."""
+        local = np.array(timestep.astype(mx.float32))
+        try:
+            glob = np.array([self._index[float(v)] for v in local], dtype=np.int64)
+        except KeyError as e:
+            raise KeyError(f"timestep {e} not in the cache (built for {len(self.t)} values)") from None
+        return mx.take(mx.array(glob), timestep_indices)
+
+    @staticmethod
+    def drop_weights(p: dict, cfg: dict) -> dict:
+        """The params without the projections the cache replaces."""
+        gone = {f"transformer_blocks.{i}.adaln_proj.linear.{n}" for i in range(cfg["num_layers"]) for n in ("weight", "bias")}
+        gone |= {"norm_out.linear.weight", "norm_out.linear.bias"}
+        return {k: v for k, v in p.items() if k not in gone}
