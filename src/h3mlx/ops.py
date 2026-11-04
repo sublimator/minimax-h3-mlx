@@ -399,7 +399,8 @@ class ModulationCache:
 
     @staticmethod
     def drop_weights(p: dict, cfg: dict) -> dict:
-        """The params without the projections the cache replaces."""
+        """A new dict without the projections the cache replaces. The memory is freed only when nothing else (e.g. the
+        caller's original dict) still references those arrays."""
         gone = {f"transformer_blocks.{i}.adaln_proj.linear.{n}" for i in range(cfg["num_layers"]) for n in ("weight", "bias")}
         gone |= {"norm_out.linear.weight", "norm_out.linear.bias"}
         return {k: v for k, v in p.items() if k not in gone}

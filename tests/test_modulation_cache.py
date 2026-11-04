@@ -1,4 +1,5 @@
-"""The AdaLN modulation cache gives the same forward and the same denoise run, with the adaln weights dropped."""
+"""The AdaLN modulation cache: exactly equal to the uncached path on the small fixtures below; in general equal in
+maths and within torch-bf16 accuracy (the error-budget test), with the adaln weights dropped."""
 
 import mlx.core as mx
 import numpy as np
@@ -54,3 +55,39 @@ def test_denoise_with_cache_equals_without():
     got = denoise(ops.ModulationCache.drop_weights(p, cfg), cfg, lay, text, v0, a0, sch, cache=cache)
     for g, w in zip(got, want):
         assert float(mx.abs(g - w).max()) == 0.0
+
+
+def test_cache_error_budget_over_a_50_point_schedule():
+    """Not bit-identical in general (review D2: the cache multiplies all timesteps at once, a step only
+    its own; bf16 rounding then differs, e.g. step 6 here). What must hold: at every step, cached and uncached MLX are as
+    close to an f32 torch run as torch's own bf16 run is (ratio <= 1.25; observed <= 1.06)."""
+    from test_dit_mixed_precision import rel_err
+
+    from h3mlx.denoise import row_timesteps
+
+    torch.manual_seed(43)
+    cfg = dict(TINY, hidden_size=96, attention_head_dim=128, ffn_dim=256, freq_dim=64, time_embed_hidden_dim=384,
+               time_embed_dim=192, rope_freq_dim=16)
+    f32 = MiniMaxH3Transformer3DModel(**cfg).eval()
+    mixed = to_mixed(f32)
+    p, c = state_mx(mixed), dict(mixed.config)
+    lay, sch = tiny_layout(), Schedules.make(50)
+    cache = ops.ModulationCache(p, c, schedule_timesteps(lay, sch))
+    small = ops.ModulationCache.drop_weights(p, c)
+    xt = (torch.randn(1, len(lay.video_indices), 16), torch.randn(1, len(lay.audio_indices), 6),
+          torch.randn(1, len(lay.text_indices), 20))
+    x = tuple(to_mx(t) for t in xt)
+    names = ("token_tags", "video_indices", "audio_indices", "text_indices")
+    kw = {k: mx.array(getattr(lay, k)) for k in names} | {"position_ids": mx.array(lay.position_ids.astype(np.float32))}
+    tk = {k: torch.from_numpy(getattr(lay, k)) for k in names} | {"position_ids": torch.from_numpy(lay.position_ids)}
+    for t, ta in zip(sch.video_timesteps, sch.audio_timesteps):
+        u, inv = row_timesteps(lay, float(t), float(ta), max(float(t), 0.999), 1.0)
+        with torch.no_grad():
+            truth = f32(*xt, torch.from_numpy(u), torch.from_numpy(inv), **tk, return_dict=False)
+            tb = mixed(*xt, torch.from_numpy(u), torch.from_numpy(inv), **tk, return_dict=False)
+        step = dict(kw, timestep=mx.array(u), timestep_indices=mx.array(inv))
+        unc = ops.dit_forward(p, c, *x, **step)
+        cac = ops.dit_forward(small, c, *x, **step, cache=cache)
+        for j in range(2):
+            budget = 1.25 * rel_err(tb[j], truth[j]) + 1e-4
+            assert rel_err(unc[j], truth[j]) <= budget and rel_err(cac[j], truth[j]) <= budget, (float(t), j)

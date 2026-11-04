@@ -124,8 +124,9 @@ def load_text_encoder(d, keep_layers: int = 50, dtype=None):
 
 
 def staged_text_encoder(d, keep_layers: int = 50, dtype=None):
-    """An `encode(token_ids, vision_inputs)` that loads the text encoder, runs it, and frees it before returning, so
-    it is never resident together with the transformer (~51 GB bf16 for 50 layers of the release)."""
+    """An `encode(token_ids, vision_inputs)` that loads the text encoder, runs it, and drops its own references before
+    returning (~51 GB bf16 for 50 layers of the release). It does not unload anything else: keep the transformer
+    unevaluated (lazy `mx.load`) until text encoding is done if the two must not be resident together."""
 
     def encode(token_ids, vision_inputs):
         model, run = load_text_encoder(d, keep_layers, dtype)
