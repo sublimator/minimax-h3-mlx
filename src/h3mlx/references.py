@@ -69,7 +69,8 @@ def normalize_image(image: Image.Image) -> Image.Image:
     return image if image.size == size else image.resize(size, Image.Resampling.LANCZOS)
 
 
-def normalize_video_frames(frames: np.ndarray, fps: float, num_frames: int) -> np.ndarray:
+def normalize_video_frames(frames: np.ndarray, fps: float, num_frames: int, multiple: int = CANVAS_MULTIPLE,
+                           short_edge: int = CANVAS_SHORT_EDGE, max_pixels: int = CANVAS_MAX_PIXELS) -> np.ndarray:
     """uint8 (T, H, W, 3) at `fps` -> 24 fps, truncated to num_frames, on its own aspect's canvas (LANCZOS)."""
     frames = np.asarray(frames)
     if frames.dtype != np.uint8:
@@ -83,7 +84,7 @@ def normalize_video_frames(frames: np.ndarray, fps: float, num_frames: int) -> n
         slots = np.floor(np.arange(frames.shape[0]) * scale + 0.5).astype(np.int64)
         frames = np.repeat(frames, np.diff(slots, append=math.floor(frames.shape[0] * scale + 0.5)), axis=0)
     frames = frames[:num_frames]
-    h, w = resolve_canvas_size(frames.shape[2], frames.shape[1])
+    h, w = resolve_canvas_size(frames.shape[2], frames.shape[1], multiple, short_edge, max_pixels)
     if frames.shape[1:3] == (h, w):
         return frames
     return np.stack([np.asarray(Image.fromarray(f).resize((w, h), Image.Resampling.LANCZOS)) for f in frames])
