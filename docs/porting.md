@@ -837,8 +837,8 @@ The modulations depend only on the timestep, never on the latents. A run can the
 once for every timestep it will use, and drop the `adaln_proj` weights.
 
 **What that saves.** The dropped projections hold 26.08 GB of `transformer_ref`'s 66.28 GB of bf16 parameters. The
-tables cost about 1 GB at the real size for a 50-point schedule (99 distinct timesteps). These are parameter bytes,
-not a measured peak.
+tables cost about 1 GB at the real size for a 50-point schedule: 98 distinct timesteps with image references only, 99
+with an audio reference. These are parameter bytes, not a measured peak.
 
 **How to use it.**
 
@@ -848,15 +848,17 @@ not a measured peak.
 3. Pass `ModulationCache.drop_weights(params, cfg)` as the params. This returns a **new** dict; the memory is freed only
    when nothing else, such as the original dict, still holds those arrays.
 
-`pipeline.ref2va` does not do this yet. On a 256 GB machine it doesn't need to.
+`pipeline.ref2va` does not do this yet. The first 256 GB run is planned without it; whether it fits is what that run
+will measure.
 
 **Accuracy.** The maths is the same, but the floating-point result can differ. The cache multiplies all timesteps in
 one batch; the uncached path multiplies only that step's. A review found a larger mixed-precision model
 where they differ by 0.0028 at one step of 49. `tests/test_modulation_cache.py` checks two things:
 
 - **On small fixtures:** cached and uncached are exactly equal.
-- **On that larger model over the whole 50-point schedule:** at every step, both are within 1.25× of torch-bf16's own
-  error against an f32 run. The worst observed is 1.06×.
+- **On that larger model at each of the schedule's 49 timestep plans:** one forward per plan on fixed inputs (not an
+  accumulated trajectory). Cached and uncached must both be within 1.25× torch-bf16's own error against an f32 run,
+  plus 0.0001. The worst observed is 1.06×.
 
 📍 `src/h3mlx/ops.py:367-406`
 ```python
@@ -2856,8 +2858,8 @@ target audio rows. That order is part of what a seed reproduces:
 **After denoising**, diffusers splits it into three steps:
 
 1. drop the reference rows and unpack the video rows;
-2. decode the video, then undo the latent and ImageNet normalisations;
-3. undo the audio latent normalisation and decode.
+2. undo the video latent normalisation, decode, then undo ImageNet's normalisation on the pixels;
+3. undo the audio latent normalisation, then decode.
 
 The port does all three in one block:
 
