@@ -116,3 +116,19 @@ def test_nan_stops_the_denoise_at_step_0():
     denoise(*args)  # silently produces NaNs without the check
     with pytest.raises(FloatingPointError, match="step 0 video rows"):
         denoise(*args, check_finite=True)
+
+
+def test_exif_rotated_photo_is_upright_like_diffusers(release, tmp_path):
+    """A JPEG with EXIF Orientation=6 (rotate 90): diffusers' load_image applies exif_transpose; so must we."""
+    from diffusers.utils import load_image
+
+    img = Image.fromarray(np.random.default_rng(2).integers(0, 256, (48, 64, 3), dtype=np.uint8))  # 64 wide, 48 tall
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    img.save(tmp_path / "phone.jpg", exif=exif.tobytes())
+    want = load_image(str(tmp_path / "phone.jpg"))
+    args = _args(release, tmp_path, tmp_path / "plan")
+    args[args.index("--image") + 1] = str(tmp_path / "phone.jpg")
+    assert _script().main(args + ["--plan-only"]) == 0
+    log = json.loads((tmp_path / "plan" / "run.json").read_text())
+    assert want.size == (48, 64) and log["image_size"] == [48, 64]

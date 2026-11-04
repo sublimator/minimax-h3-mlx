@@ -30,7 +30,7 @@ from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -186,7 +186,7 @@ def main(argv=None) -> int:
     weights = args.weights.expanduser()
     prompt_path, image_path = args.prompt_file.expanduser(), args.image.expanduser()
     prompt = prompt_path.read_text().strip()
-    image = Image.open(image_path).convert("RGB")
+    image = ImageOps.exif_transpose(Image.open(image_path)).convert("RGB")  # as diffusers' load_image: phone photos
     out = args.out.expanduser()
     out.mkdir(parents=True, exist_ok=True)
     log = {"argv": sys.argv if argv is None else list(argv), "pid": os.getpid(), "weights": str(weights),
