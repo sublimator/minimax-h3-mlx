@@ -211,13 +211,16 @@ def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, 
     collects the intermediates under diffusers' state names."""
     dbg = debug if debug is not None else {}
     height, width, num_frames, refs = setup(c, references, height, width, num_frames)
+    #@@start text
     vision, ic, vc, vts = vision_features(c, refs)
     ids, tags = build_presentation(c.tokenizer, prompt, [Ref(r.kind, r.has_audio) for r in refs], ic, vc, vts)
     text = c.encode_text(ids, vision)
+    #@@end text
     dbg.update(prompt_embeds=text, text_token_tags=np.asarray(tags), token_ids=ids)
 
     cond, ref_audio = encode_references(c, refs)
     dbg.update(condition_latents=cond, audio_condition_latents=ref_audio)
+    #@@start layout
     ratio = c.vae.cfg.spatial_ratio
     lf, lh, lw = R.video_latent_num_frames(num_frames), height // ratio, width // ratio
     na = R.audio_latent_num_frames(num_frames)
@@ -225,7 +228,9 @@ def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, 
         np.asarray(tags), [Ref(r.kind, r.has_audio) for r in refs], [tuple(x.shape[1:4]) for x in cond],
         [int(a.shape[0]) for a in ref_audio], lf, lh, lw, na, tuple(c.dit_cfg["patch_size"]), AUDIO_CHANNELS,
     )
+    #@@end layout
 
+    #@@start noise-draws
     gen = Noise(seed)
     patch = tuple(c.dit_cfg["patch_size"])
     rows = []
@@ -241,12 +246,14 @@ def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, 
     video_rows = mx.concatenate(rows)
     audio_ch = c.dit_cfg["audio_in_channels"]
     audio_rows = mx.concatenate(ref_audio + [mx.array(gen((na * AUDIO_CHANNELS, audio_ch)))])
+    #@@end noise-draws
 
     dbg.update(layout=layout, initial_video_rows=video_rows, initial_audio_rows=audio_rows)
     v, a = denoise(c.dit_params, c.dit_cfg, layout, text, video_rows, audio_rows, Schedules.make(num_inference_steps),
                    on_step=on_step)
 
     dbg.update(final_video_rows=v, final_audio_rows=a)
+    #@@start decode
     v_lat = ops.unpatchify(v[layout.num_condition_video_rows :], lat_ch, lf, lh, lw, patch)  # (1, C, F, H, W)
     v_lat = v_lat.transpose(0, 2, 3, 4, 1) * mx.array(c.vae_latents_std) + mx.array(c.vae_latents_mean)
     px = c.vae.decode(v_lat)[0]  # (frames, H, W, 3)
@@ -255,5 +262,6 @@ def ref2va(c: Components, prompt: str, references, num_frames=124, height=None, 
     a_lat = a[layout.num_condition_audio_rows :].reshape(AUDIO_CHANNELS, na, audio_ch)
     a_lat = a_lat * mx.array(c.audio_latents_std) + mx.array(c.audio_latents_mean)
     audio = c.audio_vae.decode(a_lat)[:, :, 0]  # (2, samples)
+    #@@end decode
     mx.eval(video, audio)
     return np.array(video), np.array(audio), c.audio_sampling_rate

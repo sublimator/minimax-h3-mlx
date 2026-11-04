@@ -320,6 +320,7 @@ def dit_forward(
     seq = position_ids.shape[0]
     rotary = rope_cos_sin(position_ids, rope_inv_freq(cfg["rope_freq_dim"], cfg["rope_theta"]))
 
+    #@@start project-and-scatter
     v = linear(video.astype(p["proj_in.weight"].dtype), p["proj_in.weight"], p["proj_in.bias"])
     a = linear(audio.astype(p["audio_proj_in.weight"].dtype), p["audio_proj_in.weight"], p["audio_proj_in.bias"])
     t = linear(text.astype(p["context_embedder.weight"].dtype), p["context_embedder.weight"], p["context_embedder.bias"])
@@ -329,7 +330,9 @@ def dit_forward(
     x[:, text_indices] = t
     x[:, video_indices] = v.astype(t.dtype)
     x[:, audio_indices] = a.astype(t.dtype)
+    #@@end project-and-scatter
 
+    #@@start adaln-rows-and-blocks
     if cache is None:
         temb = timestep_embedding(timestep, _sub(p, "time_embedder."), cfg["freq_dim"])
         t_rows = timestep_indices
@@ -341,7 +344,9 @@ def dit_forward(
         x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps,
                       modulation=None if cache is None else cache.blocks[i])
         mx.eval(x)  # one block's graph at a time: bounds activation memory at 20-50k rows
+    #@@end adaln-rows-and-blocks
 
+    #@@start norm-out-and-heads
     if cache is None:
         x = norm_out(x, temb, p["norm_out.norm.weight"], p["norm_out.linear.weight"], p["norm_out.linear.bias"],
                      timestep_indices, final_eps)
@@ -352,6 +357,7 @@ def dit_forward(
     x = x.astype(p["proj_out.weight"].dtype)
     vid = linear(x, p["proj_out.weight"], p["proj_out.bias"])[:, video_indices]
     aud = linear(x, p["audio_proj_out.weight"], p["audio_proj_out.bias"])[:, audio_indices]
+    #@@end norm-out-and-heads
     return vid, aud
 
 
