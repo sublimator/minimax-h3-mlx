@@ -350,7 +350,8 @@ Each tensor is cast to the dtype of the parameter PEFT created.
  363             parameter.requires_grad_(False)
 ```
 
-What a PEFT-wrapped `Linear` computes, from the installed PEFT 0.21.2:
+What a PEFT-wrapped `Linear` computes, from the installed PEFT 0.21.2 (extracted from this repo's `.venv`, so
+render the guide after `uv sync`):
 
 📍 PEFT 0.21.2, `peft/tuners/lora/layer.py:1074-1115`
 ```python
@@ -1062,56 +1063,56 @@ from the schedule actually used. The TFLOP/s in each step event adds the LoRA's 
   76     per_block = 2 * rows * rank * (4 * (h + inner) + (h + 2 * ffn) + (ffn + h))
   77     return per_block * cfg["num_layers"] / 1e12
 ```
-📍 `scripts/run_ref2va.py:182-189`
+📍 `scripts/run_ref2va.py:183-190`
 ```python
- 182 def load_weights(c: Components, weights: Path, hyperflow_path: Path | None = None):
- 183     """Attach the weights lazily (mx.load reads data on first use). The audio VAE is small and loaded eagerly. With
- 184     `hyperflow_path`, the LoRA is attached to transformer_ref's params (2.8 GB more, read on first use too)."""
- 185     c.vae, _, _ = load.load_vae(weights / "vae")
- 186     c.audio_vae, _, _ = load.load_audio_vae(weights / "audio_vae")
- 187     c.dit_params, _ = load.load_transformer(weights / "transformer_ref")
- 188     if hyperflow_path is not None:
- 189         c.dit_params, c.dit_cfg, _ = hyperflow.load(hyperflow_path, c.dit_params, c.dit_cfg, "transformer_ref")
+ 183 def load_weights(c: Components, weights: Path, hyperflow_path: Path | None = None):
+ 184     """Attach the weights lazily (mx.load reads data on first use). The audio VAE is small and loaded eagerly. With
+ 185     `hyperflow_path`, the LoRA is attached to transformer_ref's params (2.8 GB more, read on first use too)."""
+ 186     c.vae, _, _ = load.load_vae(weights / "vae")
+ 187     c.audio_vae, _, _ = load.load_audio_vae(weights / "audio_vae")
+ 188     c.dit_params, _ = load.load_transformer(weights / "transformer_ref")
+ 189     if hyperflow_path is not None:
+ 190         c.dit_params, c.dit_cfg, _ = hyperflow.load(hyperflow_path, c.dit_params, c.dit_cfg, "transformer_ref")
 ```
-📍 `scripts/run_ref2va.py:192-218`
+📍 `scripts/run_ref2va.py:193-219`
 ```python
- 192 def plan(c: Components, prompt: str, image: Image.Image, args) -> dict:
- 193     """Everything up to the layout, without the models: sizes the run would use."""
- 194     h, w, n, refs = setup(c, [ImageRef(image)], args.height, args.width, args.frames)
- 195     vision, ic, vc, vts = vision_features(c, refs)
- 196     ids, tags = build_presentation(c.tokenizer, prompt, [Ref(r.kind, r.has_audio) for r in refs], ic, vc, vts)
- 197     ratio = c.vae.cfg.spatial_ratio
- 198     ref_shapes = [(1, r.image.size[1] // ratio, r.image.size[0] // ratio) for r in refs]
- 199     lf, lh, lw = R.video_latent_num_frames(n), h // ratio, w // ratio
- 200     na = R.audio_latent_num_frames(n)
- 201     layout = build_ref2va_packed_sequence(np.asarray(tags), [Ref(r.kind, r.has_audio) for r in refs], ref_shapes, [],
- 202                                           lf, lh, lw, na, tuple(c.dit_cfg["patch_size"]), 2)
- 203     if args.hyperflow:
- 204         meta, shapes = hyperflow.read_header(args.hyperflow)
- 205         sch = meta.schedules()
- 206     else:
- 207         sch = Schedules.make(args.steps)
- 208     extra = {}
- 209     if args.hyperflow:
- 210         rank = hyperflow.check_file(meta, shapes, c.dit_cfg, "transformer_ref")  # before the hash and any weights
- 211         extra["hyperflow"] = {"file": str(args.hyperflow), "version": meta.version, "gate": meta.gate,
- 212                               "rank": rank, "sigmas": list(meta.sigmas),
- 213                               "base_model_revision": meta.base_model_revision}
- 214     return {**extra, "height": h, "width": w, "frames": n, "seconds": round(n / R.FPS, 3), "latent_frames": lf,
- 215             "reference_size": list(refs[0].image.size), "text_rows": len(ids), "vision_tokens": int(sum(ic)),
- 216             "reference_video_rows": layout.num_condition_video_rows, "target_audio_rows": na * 2,
- 217             "sequence_rows": int(layout.position_ids.shape[0]), "grid_points": int(len(sch.video_sigmas)),
- 218             "model_calls": int(len(sch.video_timesteps))}
+ 193 def plan(c: Components, prompt: str, image: Image.Image, args) -> dict:
+ 194     """Everything up to the layout, without the models: sizes the run would use."""
+ 195     h, w, n, refs = setup(c, [ImageRef(image)], args.height, args.width, args.frames)
+ 196     vision, ic, vc, vts = vision_features(c, refs)
+ 197     ids, tags = build_presentation(c.tokenizer, prompt, [Ref(r.kind, r.has_audio) for r in refs], ic, vc, vts)
+ 198     ratio = c.vae.cfg.spatial_ratio
+ 199     ref_shapes = [(1, r.image.size[1] // ratio, r.image.size[0] // ratio) for r in refs]
+ 200     lf, lh, lw = R.video_latent_num_frames(n), h // ratio, w // ratio
+ 201     na = R.audio_latent_num_frames(n)
+ 202     layout = build_ref2va_packed_sequence(np.asarray(tags), [Ref(r.kind, r.has_audio) for r in refs], ref_shapes, [],
+ 203                                           lf, lh, lw, na, tuple(c.dit_cfg["patch_size"]), 2)
+ 204     if args.hyperflow:
+ 205         meta, shapes = hyperflow.read_header(args.hyperflow)
+ 206         sch = meta.schedules()
+ 207     else:
+ 208         sch = Schedules.make(args.steps)
+ 209     extra = {}
+ 210     if args.hyperflow:
+ 211         rank = hyperflow.check_file(meta, shapes, c.dit_cfg, "transformer_ref")  # before the hash and any weights
+ 212         extra["hyperflow"] = {"file": str(args.hyperflow), "version": meta.version, "gate": meta.gate,
+ 213                               "rank": rank, "sigmas": list(meta.sigmas),
+ 214                               "base_model_revision": meta.base_model_revision}
+ 215     return {**extra, "height": h, "width": w, "frames": n, "seconds": round(n / R.FPS, 3), "latent_frames": lf,
+ 216             "reference_size": list(refs[0].image.size), "text_rows": len(ids), "vision_tokens": int(sum(ic)),
+ 217             "reference_video_rows": layout.num_condition_video_rows, "target_audio_rows": na * 2,
+ 218             "sequence_rows": int(layout.position_ids.shape[0]), "grid_points": int(len(sch.video_sigmas)),
+ 219             "model_calls": int(len(sch.video_timesteps))}
 ```
-📍 `scripts/run_ref2va.py:310-316`
+📍 `scripts/run_ref2va.py:311-317`
 ```python
- 310         if args.hyperflow and not args.decode_from:  # a re-decode never reads the adapter
- 311             hf = args.hyperflow
- 312             got = sha256(hf)
- 313             want = hyperflow.KNOWN_SHA256.get(hf.name)
- 314             event("hyperflow_file", file=hf.name, bytes=hf.stat().st_size, sha256=got, known_sha256=want)
- 315             if want is not None and got != want:
- 316                 raise ValueError(f"{hf.name}: sha256 {got} is not the released {want}")
+ 311         if args.hyperflow and not args.decode_from:  # a re-decode never reads the adapter
+ 312             hf = args.hyperflow
+ 313             got = sha256(hf)
+ 314             want = hyperflow.KNOWN_SHA256.get(hf.name)
+ 315             event("hyperflow_file", file=hf.name, bytes=hf.stat().st_size, sha256=got, known_sha256=want)
+ 316             if want is not None and got != want:
+ 317                 raise ValueError(f"{hf.name}: sha256 {got} is not the released {want}")
 ```
 
 `ref2va` frees the weight dict before decoding (`free_transformer`, main guide §8). The dict holds the LoRAs and the

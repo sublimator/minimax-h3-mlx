@@ -95,7 +95,8 @@ def summarize(events: list) -> dict:
         if rest:
             out["step_s_mean"] = round(sum(rest) / len(rest), 2)
             out["step_s_min"], out["step_s_max"] = min(rest), max(rest)
-            out["tflops_mean"] = round(sum(s["tflops"] for s in steps[1:]) / len(rest), 1)
+            out["tflops_mean"] = float(f"{sum(s['tflops'] for s in steps[1:]) / len(rest):.3g}")  # 3 significant figures:
+            # one decimal rounded a tiny test run's real throughput to 0.0
     out["stage_peak_gb"] = {e["event"]: e["stage_peak_gb"] for e in events if e.get("closes_stage")}
     out["process_peak_rss_gb"] = max((e["max_rss_gb"] for e in events), default=None)
     out["worst_pressure"] = max((e["pressure"] or 0 for e in events), default=None)
@@ -336,7 +337,7 @@ def main(argv=None) -> int:
                 clock["prev"] = now
                 done = [e["step_s"] for e in log["events"] if e["event"] == "step"][1:] + ([step_s] if i else [])
                 eta = (sum(done) / len(done)) * (n_calls - 1 - i) if done else None
-                event("step", i=i, timestep=float(t), step_s=step_s, tflops=round(per_call / step_s, 1),
+                event("step", i=i, timestep=float(t), step_s=step_s, tflops=float(f"{per_call / step_s:.3g}"),
                       eta_min=None if eta is None else round(eta / 60, 1))
 
             def stage(name):
