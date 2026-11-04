@@ -1660,7 +1660,7 @@ mlx-vlm's model to stop after layer 50 without the final norm, through the `enco
   98     )
   99     return outputs.hidden_states[text_encoder_layer].to(device=device, dtype=dtype)
 ```
-📍 mlx-vlm 0.7.11, `mlx_vlm/models/qwen3_vl/qwen3_vl.py:164-185`
+📍 [`mlx-vlm:mlx_vlm/models/qwen3_vl/qwen3_vl.py:164-185`](https://github.com/Blaizzy/mlx-vlm/blob/527c513a0768245644a70266a22126d880767b18/mlx_vlm/models/qwen3_vl/qwen3_vl.py#L164-L185)
 ```python
  164     def hidden_state_at_layer(
  165         self,
