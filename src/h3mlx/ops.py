@@ -409,6 +409,8 @@ class ModulationCache:
     """
 
     def __init__(self, p: dict, cfg: dict, timesteps):
+        if "endpoint_time_embedder.linear_1.weight" in p:
+            raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
         t = np.unique(np.asarray(timesteps, dtype=np.float32))
         self.t = t
         self._index = {float(v): i for i, v in enumerate(t)}

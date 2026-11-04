@@ -203,8 +203,9 @@ def plan(c: Components, prompt: str, image: Image.Image, args) -> dict:
         sch = Schedules.make(args.steps)
     extra = {}
     if args.hyperflow:
+        rank = hyperflow.check_file(meta, shapes, c.dit_cfg, "transformer_ref")  # before the hash and any weights
         extra["hyperflow"] = {"file": str(args.hyperflow), "version": meta.version, "gate": meta.gate,
-                              "rank": meta.lora_rank or hyperflow.rank_from_shapes(shapes), "sigmas": list(meta.sigmas),
+                              "rank": rank, "sigmas": list(meta.sigmas),
                               "base_model_revision": meta.base_model_revision}
     return {**extra, "height": h, "width": w, "frames": n, "seconds": round(n / R.FPS, 3), "latent_frames": lf,
             "reference_size": list(refs[0].image.size), "text_rows": len(ids), "vision_tokens": int(sum(ic)),

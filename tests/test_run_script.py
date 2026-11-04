@@ -202,3 +202,26 @@ def test_run_script_refuses_a_released_name_with_other_bytes(release, tmp_path):
     with pytest.raises(ValueError, match="not the released"):
         run.main(args + ["--hyperflow", str(hf)])
     assert json.loads((tmp_path / "out" / "run.json").read_text())["status"] == "error"
+
+
+def test_plan_only_checks_the_hyperflow_file(release, tmp_path):
+    """A file the port can't run fails in the plan step (headers only), before the hash or any weights."""
+    import json as _json
+
+    from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
+    from safetensors.torch import save_file
+    from test_hyperflow import make_file
+
+    model = MiniMaxH3Transformer3DModel.from_pretrained(release / "transformer_ref")
+    tensors, md = make_file(model, dict(model.config), scale=0.05)
+    tensors["transformer.proj_in.lora_A.weight"] = torch.zeros(4, model.proj_in.in_features)
+    tensors["transformer.proj_in.lora_B.weight"] = torch.zeros(model.proj_in.out_features, 4)
+    bad = tmp_path / "bad.safetensors"
+    save_file(tensors, str(bad), metadata=md)
+    args = _args(release, tmp_path, tmp_path / "plan")
+    i = args.index("--steps")
+    del args[i : i + 2]
+    with pytest.raises(ValueError, match="not run through ops.plinear"):
+        _script().main(args + ["--hyperflow", str(bad), "--plan-only"])
+    log = _json.loads((tmp_path / "plan" / "run.json").read_text())
+    assert log["status"] == "error" and not any(e["event"] == "hyperflow_file" for e in log["events"])

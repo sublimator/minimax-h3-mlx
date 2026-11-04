@@ -303,7 +303,12 @@ def test_real_header_fits_transformer_ref():
     plan = hyperflow.plan_from_keys(shapes)
     assert len(plan) == 316
     assert {hyperflow._base_name(m) + ".weight" for m in plan} <= released, "every target is a released tensor"
-    assert hyperflow.check_plan(plan, shapes, base, meta) == 256
+    wired = hyperflow.wired_shapes(cfg)
+    assert hyperflow.check_plan(plan, shapes, base, meta, wired=wired) == 256
+    assert set(plan) == set(wired), "the released file covers exactly the linears ops.plinear serves"
+    for m, shape in wired.items():  # the config-derived shapes check_file uses = the real model's
+        assert base[hyperflow._base_name(m) + ".weight"] == shape, m
+    assert hyperflow.check_file(meta, shapes, cfg) == 256
     assert not any("adaln_proj" in m for m in plan), "the adapter leaves the AdaLN projections alone"
 
 
@@ -338,13 +343,35 @@ def test_refusals():
         ops.dit_forward(params, cfg, *args, **lay, endpoint=mx.zeros(2))  # 3 distinct timesteps, 2 endpoints
     with pytest.raises(NotImplementedError):
         schedule_timesteps(tiny_layout(), meta.schedules())
-    with pytest.raises(ValueError, match="2-D"):
-        hyperflow.attach(base, dict(model.config), {**t_mx, "transformer.transformer_blocks.0.norm1.lora_A.weight":
-                                                    mx.zeros((4, 48)), "transformer.transformer_blocks.0.norm1.lora_B.weight":
-                                                    mx.zeros((48, 4))}, meta)
-    no_rank = {k: v for k, v in md.items() if k != "lora_rank"}
-    assert hyperflow.rank_from_shapes({k: v.shape for k, v in tensors.items()}) == RANK
-    assert hyperflow.HyperFlowMeta.from_header(no_rank).lora_rank is None
+    norm_lora = {**t_mx, "transformer.transformer_blocks.0.norm1.lora_A.weight": mx.zeros((4, 48)),
+                 "transformer.transformer_blocks.0.norm1.lora_B.weight": mx.zeros((48, 4))}
+    with pytest.raises(ValueError, match="not run through ops.plinear"):
+        hyperflow.attach(base, dict(model.config), norm_lora, meta)
+    with pytest.raises(ValueError, match="2-D"):  # without a wiring list, the 2-D check still stands
+        hyperflow.check_plan(hyperflow.plan_from_keys(norm_lora), {k: v.shape for k, v in norm_lora.items()},
+                             {k: v.shape for k, v in base.items()}, meta)
+    shapes = {k: tuple(v.shape) for k, v in tensors.items()}
+    no_rank = hyperflow.HyperFlowMeta.from_header({k: v for k, v in md.items() if k != "lora_rank"})
+    assert no_rank.lora_rank is None and hyperflow.check_file(no_rank, shapes, dict(model.config)) == RANK
+    with pytest.raises(ValueError, match="not run through ops.plinear"):  # a LoRA the port would silently skip
+        hyperflow.attach(base, dict(model.config), {**t_mx, "transformer.proj_in.lora_A.weight": mx.zeros((4, 16)),
+                                                    "transformer.proj_in.lora_B.weight": mx.zeros((48, 4))}, meta)
+    with pytest.raises(ValueError, match="not run through ops.plinear"):
+        hyperflow.check_file(meta, {**shapes, "transformer.transformer_blocks.0.adaln_proj.linear.lora_A.weight": (4, 24),
+                                    "transformer.transformer_blocks.0.adaln_proj.linear.lora_B.weight": (864, 4)},
+                             dict(model.config))
+    with pytest.raises(ValueError, match="sigma grid"):  # an explicit empty grid is refused, not replaced by the default
+        hyperflow.check_file(hyperflow.HyperFlowMeta.from_header({**md, "hyperflow_sigmas": "[]"}), shapes,
+                             dict(model.config))
+    no_grid = {k: v for k, v in md.items() if k != "hyperflow_sigmas"}
+    assert hyperflow.HyperFlowMeta.from_header(no_grid).sigmas == RAW
+    zero = {k: ((0, v[1]) if k.endswith("lora_A.weight") else (v[0], 0)) for k, v in shapes.items()}
+    with pytest.raises(ValueError, match="rank must be positive"):
+        hyperflow.check_file(no_rank, zero, dict(model.config))
+    with pytest.raises(ValueError, match="no LoRA tensors"):
+        hyperflow.check_file(meta, {}, dict(model.config))
+    with pytest.raises(NotImplementedError):
+        ops.ModulationCache(params, cfg, [0.0, 0.5])
     with pytest.raises(ValueError, match="already attached"):
         hyperflow.attach(params, cfg, t_mx, meta)
     with pytest.raises(ValueError, match="not a HyperFlow"):
@@ -353,9 +380,13 @@ def test_refusals():
         hyperflow.attach(base, dict(model.config), t_mx, hyperflow.HyperFlowMeta.from_header({**md, "lora_alpha": "8"}))
     with pytest.raises(ValueError, match="lists"):
         hyperflow.attach(base, dict(model.config), t_mx, meta, subfolder="something_else")
-    with pytest.raises(KeyError, match="no Linear"):
-        hyperflow.attach(base, dict(model.config), {**t_mx, "transformer.nowhere.lora_A.weight": mx.zeros((4, 4)),
-                                                    "transformer.nowhere.lora_B.weight": mx.zeros((4, 4))}, meta)
+    nowhere = {**t_mx, "transformer.nowhere.lora_A.weight": mx.zeros((4, 4)),
+               "transformer.nowhere.lora_B.weight": mx.zeros((4, 4))}
+    with pytest.raises(ValueError, match="not run through ops.plinear"):
+        hyperflow.attach(base, dict(model.config), nowhere, meta)
+    with pytest.raises(KeyError, match="no Linear"):  # without a wiring list
+        hyperflow.check_plan(hyperflow.plan_from_keys(nowhere), {k: v.shape for k, v in nowhere.items()},
+                             {k: v.shape for k, v in base.items()}, meta)
     with pytest.raises(ValueError, match="do not fit"):
         bad = dict(t_mx)
         bad["transformer.transformer_blocks.0.attn.to_q.lora_A.weight"] = mx.zeros((RANK, 7))

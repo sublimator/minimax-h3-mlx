@@ -70,7 +70,8 @@ class HyperFlowMeta:
             version=md["hyperflow_version"], gate=float(md["hyperflow_gate"]), lora_alpha=float(md["lora_alpha"]),
             base_model=md["base_model"], base_model_revision=md.get("base_model_revision"),
             lora_rank=int(md["lora_rank"]) if "lora_rank" in md else None,
-            sigmas=lst("hyperflow_sigmas", float) or DEFAULT_SIGMAS_8STEP,
+            # absent -> the package default; present but empty or invalid -> refused later by shift_grid, as theirs
+            sigmas=lst("hyperflow_sigmas", float) if "hyperflow_sigmas" in md else DEFAULT_SIGMAS_8STEP,
             video_shift=float(md["hyperflow_video_shift"]) if "hyperflow_video_shift" in md else None,
             audio_shift=float(md["hyperflow_audio_shift"]) if "hyperflow_audio_shift" in md else None,
             compatible_subfolders=lst("compatible_subfolders", str) or (), raw=md,
@@ -103,14 +104,42 @@ def plan_from_keys(keys) -> dict:
     return plan
 
 
+BLOCK_TARGETS = ("attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0", "ff.net.0.proj", "ff.net.2")
+
+
+def wired_shapes(cfg: dict) -> dict:
+    """{module: (out, in)} for every Linear our forward runs through `ops.plinear`, so the only places a LoRA can act.
+    A LoRA anywhere else (proj_in, adaln_proj, norm_out, the heads...) would be ignored by the port, so it is refused."""
+    h, inner, ffn = cfg["hidden_size"], cfg["num_attention_heads"] * cfg["attention_head_dim"], cfg["ffn_dim"]
+    per_block = {"attn.to_q": (inner, h), "attn.to_k": (inner, h), "attn.to_v": (inner, h),
+                 "attn.to_out.0": (h, inner), "ff.net.0.proj": (2 * ffn, h), "ff.net.2": (h, ffn)}
+    out = {}
+    for prefix, n in (("transformer_blocks", cfg["num_layers"]), ("token_refiner.refiner_blocks", cfg["num_refiner_layers"])):
+        for i in range(n):
+            out.update({f"{prefix}.{i}.{k}": v for k, v in per_block.items()})
+    te = {"linear_1": (cfg["time_embed_hidden_dim"], cfg["freq_dim"]),
+          "linear_2": (cfg["time_embed_dim"], cfg["time_embed_hidden_dim"])}
+    for prefix in (BASE_TIME, ENDPOINT):
+        out.update({prefix + k: v for k, v in te.items()})
+    return out
+
+
 def _base_name(module: str) -> str:
     """The transformer Linear a module's LoRA sits on: the endpoint embedder is a copy of `time_embedder`."""
     return BASE_TIME + module[len(ENDPOINT):] if module.startswith(ENDPOINT) else module
 
 
-def check_plan(plan: dict, shapes: dict, base_shapes: dict, meta: HyperFlowMeta) -> int:
+def check_plan(plan: dict, shapes: dict, base_shapes: dict, meta: HyperFlowMeta, wired=None) -> int:
     """Every LoRA lands on a Linear weight of the right shape, one rank throughout, scaling 1. `shapes` maps the file's
-    keys to their shapes, `base_shapes` our parameter names to theirs. Returns the rank."""
+    keys to their shapes, `base_shapes` our parameter names to theirs, `wired` the modules `ops.plinear` serves (any
+    other target is refused: the port would silently skip it). Returns the rank."""
+    if not plan:
+        raise ValueError("no LoRA tensors in this file")
+    if wired is not None:
+        unwired = sorted(m for m in plan if m not in wired)
+        if unwired:
+            raise ValueError(f"{len(unwired)} LoRA target(s) are not run through ops.plinear here (the port would ignore "
+                             f"them), e.g. {unwired[:5]}")
     no_base = [m for m in plan if _base_name(m) + ".weight" not in base_shapes]
     if no_base:
         raise KeyError(f"{len(no_base)} LoRA target(s) have no Linear weight in this transformer, e.g. {no_base[:5]}")
@@ -127,6 +156,8 @@ def check_plan(plan: dict, shapes: dict, base_shapes: dict, meta: HyperFlowMeta)
     if len(ranks) != 1:
         raise ValueError(f"all LoRA targets must share one rank, found {sorted(ranks)}")
     rank = ranks.pop()
+    if rank <= 0:
+        raise ValueError(f"LoRA rank must be positive, got {rank}")
     if meta.lora_rank is not None and meta.lora_rank != rank:
         raise ValueError(f"header says lora_rank={meta.lora_rank} but the tensors have rank {rank}")
     if meta.lora_alpha / rank != 1.0:
@@ -137,12 +168,12 @@ def check_plan(plan: dict, shapes: dict, base_shapes: dict, meta: HyperFlowMeta)
 def attach(params: dict, cfg: dict, tensors: dict, meta: HyperFlowMeta, subfolder: str = "transformer_ref"):
     """Return (params, cfg) with HyperFlow attached; the inputs are not modified. Adapter tensors are cast to their
     base weight's dtype, as PEFT's injection does (bf16 on the blocks, f32 on the time embedder)."""
-    if meta.compatible_subfolders and subfolder not in meta.compatible_subfolders:
-        raise ValueError(f"this HyperFlow file lists {meta.compatible_subfolders}, not {subfolder}")
+    _check_subfolder(meta, subfolder)
     if ENDPOINT + "linear_1.weight" in params:
         raise ValueError("HyperFlow is already attached to these parameters")
     plan = plan_from_keys(tensors)
-    check_plan(plan, {k: v.shape for k, v in tensors.items()}, {k: v.shape for k, v in params.items()}, meta)
+    check_plan(plan, {k: v.shape for k, v in tensors.items()}, {k: v.shape for k, v in params.items()}, meta,
+               wired=wired_shapes(cfg))
     out = dict(params)
     for name in ("linear_1.weight", "linear_1.bias", "linear_2.weight", "linear_2.bias"):
         out[ENDPOINT + name] = params[BASE_TIME + name]  # a copy of the base embedder (shared arrays, no new memory)
@@ -153,9 +184,20 @@ def attach(params: dict, cfg: dict, tensors: dict, meta: HyperFlowMeta, subfolde
     return out, {**cfg, "hyperflow_gate": float(meta.gate)}
 
 
-def rank_from_shapes(shapes: dict) -> int:
-    """The LoRA rank from the header's shapes (first lora_A's rows), for files whose header omits `lora_rank`."""
-    return int(next(s[0] for k, s in shapes.items() if k.endswith(".lora_A.weight")))
+def _check_subfolder(meta: HyperFlowMeta, subfolder: str) -> None:
+    """Stricter than theirs (their loader never reads `compatible_subfolders`): refuse a file that lists other ones."""
+    if meta.compatible_subfolders and subfolder not in meta.compatible_subfolders:
+        raise ValueError(f"this HyperFlow file lists {meta.compatible_subfolders}, not {subfolder}")
+
+
+def check_file(meta: HyperFlowMeta, shapes: dict, cfg: dict, subfolder: str = "transformer_ref") -> int:
+    """Everything `attach` checks, from the header alone against the transformer's config (no tensor data, no base
+    weights): subfolder, keys, wiring, shapes, rank, scaling, and the grid. Returns the rank."""
+    _check_subfolder(meta, subfolder)
+    base = {m + ".weight": s for m, s in wired_shapes(cfg).items()}
+    rank = check_plan(plan_from_keys(shapes), shapes, base, meta, wired=wired_shapes(cfg))
+    meta.schedules()  # raises on an invalid grid
+    return rank
 
 
 def read_header(path) -> tuple[HyperFlowMeta, dict]:

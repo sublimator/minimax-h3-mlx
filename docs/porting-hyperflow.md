@@ -1,5 +1,9 @@
 # Porting HyperFlow to MLX: Video Rebirth's loader → `h3mlx`
 
+<sub>Revision 2: a review found the plan step skipped
+the key and shape checks, LoRAs on unwired linears were accepted, and an explicit empty grid fell back to the
+default. All fixed; §1, §3, §7 and §8 updated.</sub>
+
 HyperFlow is Video Rebirth's LoRA for MiniMax H3. It brings the base model's 49 transformer calls per clip down to
 **8**. Video Rebirth describe it as data-free flow self-distillation: the base model was the teacher. This guide maps
 their loader onto our MLX port, side by side. In each section the original comes first, then the port, then what
@@ -98,11 +102,28 @@ not a module of the official transformer: it names the copy of `time_embedder` t
 
 Ours parses the same header with the same required fields, and keeps the file's public module names. The endpoint
 embedder is not a sub-module in MLX. It is a second name prefix in the flat weight dict (§2), and `_base_name` says
-which base `Linear` each LoRA sits on. `check_plan` adds the shape checks their PEFT injection performs implicitly.
-Every target must be a 2-D `Linear` weight that its LoRA fits, all LoRAs must share one rank, and the scaling must be
-1 (§2).
+which base `Linear` each LoRA sits on.
 
-📍 `src/h3mlx/hyperflow.py:53-77`
+`check_plan` adds the checks their PEFT injection performs implicitly, and one theirs doesn't need:
+
+- **Shapes:** every LoRA must fit its base 2-D `Linear` weight.
+- **Rank and scaling:** all LoRAs share one positive rank, and the scaling must be 1 (§2).
+- **Wiring:** every target must be a linear that our forward actually runs through `plinear` (`wired_shapes`). PEFT
+  would wrap *any* `nn.Linear` a file names, `proj_in` or `adaln_proj` included. Our forward calls plain `linear` for
+  those, so a LoRA there would be silently ignored; it is refused instead. The released file targets exactly the wired
+  set.
+
+`check_file` runs all of this from the header alone, against shapes derived from the transformer's config, and also
+checks the grid. The run script calls it in the plan step (§7).
+
+Two header details:
+
+- **An empty grid.** A header that holds `"hyperflow_sigmas": "[]"` is refused, as theirs refuses it in
+  `validate_sigmas`. Only a missing key falls back to the default grid.
+- **`compatible_subfolders`.** Stricter than theirs, on purpose: ours refuses a file that lists subfolders not
+  including `transformer_ref`. Their loader parses the field but never reads it.
+
+📍 `src/h3mlx/hyperflow.py:53-78`
 ```python
   53     @classmethod
   54     def from_header(cls, md: dict | None) -> "HyperFlowMeta":
@@ -124,59 +145,99 @@ Every target must be a 2-D `Linear` weight that its LoRA fits, all LoRAs must sh
   70             version=md["hyperflow_version"], gate=float(md["hyperflow_gate"]), lora_alpha=float(md["lora_alpha"]),
   71             base_model=md["base_model"], base_model_revision=md.get("base_model_revision"),
   72             lora_rank=int(md["lora_rank"]) if "lora_rank" in md else None,
-  73             sigmas=lst("hyperflow_sigmas", float) or DEFAULT_SIGMAS_8STEP,
-  74             video_shift=float(md["hyperflow_video_shift"]) if "hyperflow_video_shift" in md else None,
-  75             audio_shift=float(md["hyperflow_audio_shift"]) if "hyperflow_audio_shift" in md else None,
-  76             compatible_subfolders=lst("compatible_subfolders", str) or (), raw=md,
-  77         )
+  73             # absent -> the package default; present but empty or invalid -> refused later by shift_grid, as theirs
+  74             sigmas=lst("hyperflow_sigmas", float) if "hyperflow_sigmas" in md else DEFAULT_SIGMAS_8STEP,
+  75             video_shift=float(md["hyperflow_video_shift"]) if "hyperflow_video_shift" in md else None,
+  76             audio_shift=float(md["hyperflow_audio_shift"]) if "hyperflow_audio_shift" in md else None,
+  77             compatible_subfolders=lst("compatible_subfolders", str) or (), raw=md,
+  78         )
 ```
-📍 `src/h3mlx/hyperflow.py:92-103`
+📍 `src/h3mlx/hyperflow.py:93-104`
 ```python
-  92 def plan_from_keys(keys) -> dict:
-  93     """{module: {"A": key, "B": key}} in the file's own (public) module names; anything else is an error."""
-  94     plan = {}
-  95     for key in keys:
-  96         m = KEY_RE.match(key)
-  97         if m is None:
-  98             raise ValueError(f"unexpected key {key!r}: only transformer.<module>.lora_A/B.weight keys are allowed")
-  99         plan.setdefault(m["module"], {})[m["matrix"]] = key
- 100     incomplete = [k for k, v in plan.items() if set(v) != {"A", "B"}]
- 101     if incomplete:
- 102         raise ValueError(f"modules with only one of lora_A / lora_B: {incomplete[:8]}")
- 103     return plan
+  93 def plan_from_keys(keys) -> dict:
+  94     """{module: {"A": key, "B": key}} in the file's own (public) module names; anything else is an error."""
+  95     plan = {}
+  96     for key in keys:
+  97         m = KEY_RE.match(key)
+  98         if m is None:
+  99             raise ValueError(f"unexpected key {key!r}: only transformer.<module>.lora_A/B.weight keys are allowed")
+ 100         plan.setdefault(m["module"], {})[m["matrix"]] = key
+ 101     incomplete = [k for k, v in plan.items() if set(v) != {"A", "B"}]
+ 102     if incomplete:
+ 103         raise ValueError(f"modules with only one of lora_A / lora_B: {incomplete[:8]}")
+ 104     return plan
 ```
-📍 `src/h3mlx/hyperflow.py:106-108`
+📍 `src/h3mlx/hyperflow.py:127-129`
 ```python
- 106 def _base_name(module: str) -> str:
- 107     """The transformer Linear a module's LoRA sits on: the endpoint embedder is a copy of `time_embedder`."""
- 108     return BASE_TIME + module[len(ENDPOINT):] if module.startswith(ENDPOINT) else module
+ 127 def _base_name(module: str) -> str:
+ 128     """The transformer Linear a module's LoRA sits on: the endpoint embedder is a copy of `time_embedder`."""
+ 129     return BASE_TIME + module[len(ENDPOINT):] if module.startswith(ENDPOINT) else module
 ```
-📍 `src/h3mlx/hyperflow.py:111-134`
+📍 `src/h3mlx/hyperflow.py:110-124`
 ```python
- 111 def check_plan(plan: dict, shapes: dict, base_shapes: dict, meta: HyperFlowMeta) -> int:
- 112     """Every LoRA lands on a Linear weight of the right shape, one rank throughout, scaling 1. `shapes` maps the file's
- 113     keys to their shapes, `base_shapes` our parameter names to theirs. Returns the rank."""
- 114     no_base = [m for m in plan if _base_name(m) + ".weight" not in base_shapes]
- 115     if no_base:
- 116         raise KeyError(f"{len(no_base)} LoRA target(s) have no Linear weight in this transformer, e.g. {no_base[:5]}")
- 117     not_linear = [m for m in plan if len(base_shapes[_base_name(m) + ".weight"]) != 2]
- 118     if not_linear:
- 119         raise ValueError(f"LoRA target(s) whose weight is not a 2-D Linear weight: {not_linear[:5]}")
- 120     ranks = set()
- 121     for module, keys in plan.items():
- 122         a, b = tuple(shapes[keys["A"]]), tuple(shapes[keys["B"]])
- 123         out_f, in_f = tuple(base_shapes[_base_name(module) + ".weight"])
- 124         if len(a) != 2 or len(b) != 2 or a[1] != in_f or b[0] != out_f or a[0] != b[1]:
- 125             raise ValueError(f"{module}: lora_A {a} / lora_B {b} do not fit the Linear ({out_f}, {in_f})")
- 126         ranks.add(a[0])
- 127     if len(ranks) != 1:
- 128         raise ValueError(f"all LoRA targets must share one rank, found {sorted(ranks)}")
- 129     rank = ranks.pop()
- 130     if meta.lora_rank is not None and meta.lora_rank != rank:
- 131         raise ValueError(f"header says lora_rank={meta.lora_rank} but the tensors have rank {rank}")
- 132     if meta.lora_alpha / rank != 1.0:
- 133         raise NotImplementedError(f"LoRA scaling alpha/rank = {meta.lora_alpha}/{rank} != 1 (ops.plinear assumes 1)")
- 134     return rank
+ 110 def wired_shapes(cfg: dict) -> dict:
+ 111     """{module: (out, in)} for every Linear our forward runs through `ops.plinear`, so the only places a LoRA can act.
+ 112     A LoRA anywhere else (proj_in, adaln_proj, norm_out, the heads...) would be ignored by the port, so it is refused."""
+ 113     h, inner, ffn = cfg["hidden_size"], cfg["num_attention_heads"] * cfg["attention_head_dim"], cfg["ffn_dim"]
+ 114     per_block = {"attn.to_q": (inner, h), "attn.to_k": (inner, h), "attn.to_v": (inner, h),
+ 115                  "attn.to_out.0": (h, inner), "ff.net.0.proj": (2 * ffn, h), "ff.net.2": (h, ffn)}
+ 116     out = {}
+ 117     for prefix, n in (("transformer_blocks", cfg["num_layers"]), ("token_refiner.refiner_blocks", cfg["num_refiner_layers"])):
+ 118         for i in range(n):
+ 119             out.update({f"{prefix}.{i}.{k}": v for k, v in per_block.items()})
+ 120     te = {"linear_1": (cfg["time_embed_hidden_dim"], cfg["freq_dim"]),
+ 121           "linear_2": (cfg["time_embed_dim"], cfg["time_embed_hidden_dim"])}
+ 122     for prefix in (BASE_TIME, ENDPOINT):
+ 123         out.update({prefix + k: v for k, v in te.items()})
+ 124     return out
+```
+📍 `src/h3mlx/hyperflow.py:132-165`
+```python
+ 132 def check_plan(plan: dict, shapes: dict, base_shapes: dict, meta: HyperFlowMeta, wired=None) -> int:
+ 133     """Every LoRA lands on a Linear weight of the right shape, one rank throughout, scaling 1. `shapes` maps the file's
+ 134     keys to their shapes, `base_shapes` our parameter names to theirs, `wired` the modules `ops.plinear` serves (any
+ 135     other target is refused: the port would silently skip it). Returns the rank."""
+ 136     if not plan:
+ 137         raise ValueError("no LoRA tensors in this file")
+ 138     if wired is not None:
+ 139         unwired = sorted(m for m in plan if m not in wired)
+ 140         if unwired:
+ 141             raise ValueError(f"{len(unwired)} LoRA target(s) are not run through ops.plinear here (the port would ignore "
+ 142                              f"them), e.g. {unwired[:5]}")
+ 143     no_base = [m for m in plan if _base_name(m) + ".weight" not in base_shapes]
+ 144     if no_base:
+ 145         raise KeyError(f"{len(no_base)} LoRA target(s) have no Linear weight in this transformer, e.g. {no_base[:5]}")
+ 146     not_linear = [m for m in plan if len(base_shapes[_base_name(m) + ".weight"]) != 2]
+ 147     if not_linear:
+ 148         raise ValueError(f"LoRA target(s) whose weight is not a 2-D Linear weight: {not_linear[:5]}")
+ 149     ranks = set()
+ 150     for module, keys in plan.items():
+ 151         a, b = tuple(shapes[keys["A"]]), tuple(shapes[keys["B"]])
+ 152         out_f, in_f = tuple(base_shapes[_base_name(module) + ".weight"])
+ 153         if len(a) != 2 or len(b) != 2 or a[1] != in_f or b[0] != out_f or a[0] != b[1]:
+ 154             raise ValueError(f"{module}: lora_A {a} / lora_B {b} do not fit the Linear ({out_f}, {in_f})")
+ 155         ranks.add(a[0])
+ 156     if len(ranks) != 1:
+ 157         raise ValueError(f"all LoRA targets must share one rank, found {sorted(ranks)}")
+ 158     rank = ranks.pop()
+ 159     if rank <= 0:
+ 160         raise ValueError(f"LoRA rank must be positive, got {rank}")
+ 161     if meta.lora_rank is not None and meta.lora_rank != rank:
+ 162         raise ValueError(f"header says lora_rank={meta.lora_rank} but the tensors have rank {rank}")
+ 163     if meta.lora_alpha / rank != 1.0:
+ 164         raise NotImplementedError(f"LoRA scaling alpha/rank = {meta.lora_alpha}/{rank} != 1 (ops.plinear assumes 1)")
+ 165     return rank
+```
+📍 `src/h3mlx/hyperflow.py:193-200`
+```python
+ 193 def check_file(meta: HyperFlowMeta, shapes: dict, cfg: dict, subfolder: str = "transformer_ref") -> int:
+ 194     """Everything `attach` checks, from the header alone against the transformer's config (no tensor data, no base
+ 195     weights): subfolder, keys, wiring, shapes, rank, scaling, and the grid. Returns the rank."""
+ 196     _check_subfolder(meta, subfolder)
+ 197     base = {m + ".weight": s for m, s in wired_shapes(cfg).items()}
+ 198     rank = check_plan(plan_from_keys(shapes), shapes, base, meta, wired=wired_shapes(cfg))
+ 199     meta.schedules()  # raises on an invalid grid
+ 200     return rank
 ```
 
 **The released v1.0 header**, fetched with an HTTP range request; the full header is in
@@ -190,7 +251,12 @@ Every target must be a 2-D `Linear` weight that its LoRA fits, all LoRAs must sh
 - **Dtypes:** bf16 for the blocks, f32 for the time embedders.
 
 `test_real_header_fits_transformer_ref` checks every LoRA against the real `transformer_ref` shapes, building the
-model on torch's meta device. It also checks that every target is a released tensor and that none is an `adaln_proj`.
+model on torch's meta device. It also checks:
+
+- every target is a released tensor, and none is an `adaln_proj`;
+- the file's targets are exactly `wired_shapes`;
+- the config-derived shapes equal the real model's;
+- `check_file` passes.
 
 ## 2. Injection: PEFT on their side, `plinear` on ours
 
@@ -360,35 +426,35 @@ exactly 1, and multiplying by 1.0 is exact.
 
 `load` reads the file lazily with `mx.load`, like the transformer.
 
-📍 `src/h3mlx/hyperflow.py:137-153`
+📍 `src/h3mlx/hyperflow.py:168-184`
 ```python
- 137 def attach(params: dict, cfg: dict, tensors: dict, meta: HyperFlowMeta, subfolder: str = "transformer_ref"):
- 138     """Return (params, cfg) with HyperFlow attached; the inputs are not modified. Adapter tensors are cast to their
- 139     base weight's dtype, as PEFT's injection does (bf16 on the blocks, f32 on the time embedder)."""
- 140     if meta.compatible_subfolders and subfolder not in meta.compatible_subfolders:
- 141         raise ValueError(f"this HyperFlow file lists {meta.compatible_subfolders}, not {subfolder}")
- 142     if ENDPOINT + "linear_1.weight" in params:
- 143         raise ValueError("HyperFlow is already attached to these parameters")
- 144     plan = plan_from_keys(tensors)
- 145     check_plan(plan, {k: v.shape for k, v in tensors.items()}, {k: v.shape for k, v in params.items()}, meta)
- 146     out = dict(params)
- 147     for name in ("linear_1.weight", "linear_1.bias", "linear_2.weight", "linear_2.bias"):
- 148         out[ENDPOINT + name] = params[BASE_TIME + name]  # a copy of the base embedder (shared arrays, no new memory)
- 149     for module, keys in plan.items():
- 150         dtype = params[_base_name(module) + ".weight"].dtype
- 151         out[module + ".lora_A.weight"] = tensors[keys["A"]].astype(dtype)
- 152         out[module + ".lora_B.weight"] = tensors[keys["B"]].astype(dtype)
- 153     return out, {**cfg, "hyperflow_gate": float(meta.gate)}
+ 168 def attach(params: dict, cfg: dict, tensors: dict, meta: HyperFlowMeta, subfolder: str = "transformer_ref"):
+ 169     """Return (params, cfg) with HyperFlow attached; the inputs are not modified. Adapter tensors are cast to their
+ 170     base weight's dtype, as PEFT's injection does (bf16 on the blocks, f32 on the time embedder)."""
+ 171     _check_subfolder(meta, subfolder)
+ 172     if ENDPOINT + "linear_1.weight" in params:
+ 173         raise ValueError("HyperFlow is already attached to these parameters")
+ 174     plan = plan_from_keys(tensors)
+ 175     check_plan(plan, {k: v.shape for k, v in tensors.items()}, {k: v.shape for k, v in params.items()}, meta,
+ 176                wired=wired_shapes(cfg))
+ 177     out = dict(params)
+ 178     for name in ("linear_1.weight", "linear_1.bias", "linear_2.weight", "linear_2.bias"):
+ 179         out[ENDPOINT + name] = params[BASE_TIME + name]  # a copy of the base embedder (shared arrays, no new memory)
+ 180     for module, keys in plan.items():
+ 181         dtype = params[_base_name(module) + ".weight"].dtype
+ 182         out[module + ".lora_A.weight"] = tensors[keys["A"]].astype(dtype)
+ 183         out[module + ".lora_B.weight"] = tensors[keys["B"]].astype(dtype)
+ 184     return out, {**cfg, "hyperflow_gate": float(meta.gate)}
 ```
-📍 `src/h3mlx/hyperflow.py:170-176`
+📍 `src/h3mlx/hyperflow.py:212-218`
 ```python
- 170 def load(path, params: dict, cfg: dict, subfolder: str = "transformer_ref"):
- 171     """Load a HyperFlow .safetensors onto our transformer params: (params, cfg, meta)."""
- 172     path = Path(path)
- 173     tensors, md = mx.load(str(path), return_metadata=True)
- 174     meta = HyperFlowMeta.from_header(md)
- 175     params, cfg = attach(params, cfg, tensors, meta, subfolder)
- 176     return params, cfg, meta
+ 212 def load(path, params: dict, cfg: dict, subfolder: str = "transformer_ref"):
+ 213     """Load a HyperFlow .safetensors onto our transformer params: (params, cfg, meta)."""
+ 214     path = Path(path)
+ 215     tensors, md = mx.load(str(path), return_metadata=True)
+ 216     meta = HyperFlowMeta.from_header(md)
+ 217     params, cfg = attach(params, cfg, tensors, meta, subfolder)
+ 218     return params, cfg, meta
 ```
 
 The attention, feed-forward and timestep ops now call `plinear` by name instead of `linear`. Without LoRA keys the
@@ -499,7 +565,7 @@ timestep count (MLX would otherwise broadcast a length-1 array silently).
 ```
 
 The modulation cache (main guide, §2.6) is keyed by `t` alone. With HyperFlow the tables depend on `(t, r)`, so
-`dit_forward` and `schedule_timesteps` raise rather than hand back wrong tables. Extending the cache to pairs is
+`ModulationCache` itself, `dit_forward` and `schedule_timesteps` all raise rather than build or use wrong tables. Extending the cache to pairs is
 possible but not done.
 
 ## 4. The sigma grid
@@ -658,15 +724,15 @@ checks it against torch's formula and against the scheduler's installed `sigmas`
 The shifts come from the pipeline (the release's schedulers: 12 and 3), not from the file. Theirs warns when the file
 was trained with different ones (`_check_shifts`), and `HyperFlowMeta.schedules` warns the same way.
 
-📍 `src/h3mlx/hyperflow.py:83-89`
+📍 `src/h3mlx/hyperflow.py:84-90`
 ```python
-  83     def schedules(self, video_shift: float = 12.0, audio_shift: float = 3.0) -> Schedules:
-  84         """The file's grid through the pipeline's shifts (the release's 12 / 3); warns if the file was trained with
-  85         others, as HyperFlow does."""
-  86         trained = (self.video_shift, self.audio_shift)
-  87         if None not in trained and trained != (video_shift, audio_shift):
-  88             warnings.warn(f"HyperFlow was trained with shifts {trained}, the pipeline uses {(video_shift, audio_shift)}")
-  89         return Schedules.from_grid(self.sigmas, video_shift, audio_shift, two_time=True)
+  84     def schedules(self, video_shift: float = 12.0, audio_shift: float = 3.0) -> Schedules:
+  85         """The file's grid through the pipeline's shifts (the release's 12 / 3); warns if the file was trained with
+  86         others, as HyperFlow does."""
+  87         trained = (self.video_shift, self.audio_shift)
+  88         if None not in trained and trained != (video_shift, audio_shift):
+  89             warnings.warn(f"HyperFlow was trained with shifts {trained}, the pipeline uses {(video_shift, audio_shift)}")
+  90         return Schedules.from_grid(self.sigmas, video_shift, audio_shift, two_time=True)
 ```
 
 ## 5. Per-row `(t, r)` pairs
@@ -958,11 +1024,14 @@ Results: video and audio agree within 5e-4, the conditioning rows are untouched,
 ## 7. The run script
 
 `--hyperflow <file>` selects the file's grid and refuses `--steps`; their pipeline also raises on a different step
-count. The plan records the header's `lora_rank`, or the rank read from the tensor shapes when a header omits it. The file is checked twice:
+count. The file is checked three times:
 
-- **Header:** read before anything loads, so a wrong file fails in seconds.
-- **sha256:** hashed before the transformer loads and logged (`hyperflow_file` event). A file named like the released
-  v1.0 whose hash isn't the published one is refused.
+- **Header metadata:** parsed right after the arguments, before anything loads.
+- **The whole header (`check_file`):** keys, wiring, shapes against `transformer_ref`'s config, rank, scaling, subfolder
+  and grid, in the plan step. That step runs with `--plan-only` too, and before the hash. The plan records the rank
+  `check_file` found.
+- **sha256:** hashed after the plan and before the transformer loads, and logged (`hyperflow_file` event). A file named
+  like the released v1.0 whose hash isn't the published one is refused.
 
 `plan` records the file's version, gate, rank, grid and base revision, and counts `grid_points` and `model_calls`
 from the schedule actually used. The TFLOP/s in each step event adds the LoRA's matmuls:
@@ -985,6 +1054,36 @@ from the schedule actually used. The TFLOP/s in each step event adds the LoRA's 
  183     c.dit_params, _ = load.load_transformer(weights / "transformer_ref")
  184     if hyperflow_path is not None:
  185         c.dit_params, c.dit_cfg, _ = hyperflow.load(hyperflow_path, c.dit_params, c.dit_cfg, "transformer_ref")
+```
+📍 `scripts/run_ref2va.py:188-214`
+```python
+ 188 def plan(c: Components, prompt: str, image: Image.Image, args) -> dict:
+ 189     """Everything up to the layout, without the models: sizes the run would use."""
+ 190     h, w, n, refs = setup(c, [ImageRef(image)], args.height, args.width, args.frames)
+ 191     vision, ic, vc, vts = vision_features(c, refs)
+ 192     ids, tags = build_presentation(c.tokenizer, prompt, [Ref(r.kind, r.has_audio) for r in refs], ic, vc, vts)
+ 193     ratio = c.vae.cfg.spatial_ratio
+ 194     ref_shapes = [(1, r.image.size[1] // ratio, r.image.size[0] // ratio) for r in refs]
+ 195     lf, lh, lw = R.video_latent_num_frames(n), h // ratio, w // ratio
+ 196     na = R.audio_latent_num_frames(n)
+ 197     layout = build_ref2va_packed_sequence(np.asarray(tags), [Ref(r.kind, r.has_audio) for r in refs], ref_shapes, [],
+ 198                                           lf, lh, lw, na, tuple(c.dit_cfg["patch_size"]), 2)
+ 199     if args.hyperflow:
+ 200         meta, shapes = hyperflow.read_header(args.hyperflow)
+ 201         sch = meta.schedules()
+ 202     else:
+ 203         sch = Schedules.make(args.steps)
+ 204     extra = {}
+ 205     if args.hyperflow:
+ 206         rank = hyperflow.check_file(meta, shapes, c.dit_cfg, "transformer_ref")  # before the hash and any weights
+ 207         extra["hyperflow"] = {"file": str(args.hyperflow), "version": meta.version, "gate": meta.gate,
+ 208                               "rank": rank, "sigmas": list(meta.sigmas),
+ 209                               "base_model_revision": meta.base_model_revision}
+ 210     return {**extra, "height": h, "width": w, "frames": n, "seconds": round(n / R.FPS, 3), "latent_frames": lf,
+ 211             "reference_size": list(refs[0].image.size), "text_rows": len(ids), "vision_tokens": int(sum(ic)),
+ 212             "reference_video_rows": layout.num_condition_video_rows, "target_audio_rows": na * 2,
+ 213             "sequence_rows": int(layout.position_ids.shape[0]), "grid_points": int(len(sch.video_sigmas)),
+ 214             "model_calls": int(len(sch.video_timesteps))}
 ```
 
 **What to expect on an M3 Ultra (a projection, not a measurement).** run-002, at 1344×768 with a 2048 px image reference and
@@ -1073,8 +1172,8 @@ The transcriptions to compare against §3 and §5:
 | `test_mixed_precision_tracks_peft` | the release's dtypes: MLX error against f32 truth ≤ 1.5× torch's bf16 error + 1e-3 (video 0.0132 vs 0.0097, audio 0.0070 vs 0.0076); adapter dtypes asserted on both sides |
 | `test_denoise_two_time_matches` | 8 calls, ref2va layout, within 5e-4 |
 | `test_real_header_fits_transformer_ref` | the released header against `transformer_ref`'s real shapes |
-| `test_read_header_from_a_file`, `test_refusals` | header-only read, `load`, and each refusal (incl. an endpoint count that doesn't match the distinct timesteps, as their wrapper checks, and a LoRA on a 1-D weight) |
-| `test_run_script_with_hyperflow`, `..._refuses_a_released_name_with_other_bytes` (`tests/test_run_script.py`) | 8 step events, 9 grid points, the plan block, the hash event, a 124-frame mp4; a hash mismatch fails the run |
+| `test_read_header_from_a_file`, `test_refusals` | header-only read, `load`, and each refusal: an endpoint count that doesn't match the distinct timesteps (as their wrapper checks); a LoRA on an unwired linear (`proj_in`, `adaln_proj`) or a 1-D weight; an explicit empty grid; rank 0; no LoRA tensors; a modulation cache on HyperFlow params; a header without `lora_rank` still checks |
+| `test_run_script_with_hyperflow`, `..._refuses_a_released_name_with_other_bytes`, `test_plan_only_checks_the_hyperflow_file` (`tests/test_run_script.py`) | 8 step events, 9 grid points, the plan block, the hash event, a 124-frame mp4; a hash mismatch fails the run; a file with an unwired LoRA fails `--plan-only`, before any hash |
 
 **The bf16 bound is close to the noise.** Over 8 seeds (a scratch probe, not a test), MLX's bf16 error divided by
 torch's ranged:

@@ -491,7 +491,8 @@ its pair with `timestep_index · 3 + modality_tag`.
 The `silu` here runs on the f32 timestep embedding, and only its result is cast to the bf16 projection, as the
 original's comment explains. The place where a bf16 `silu` could round differently is the feed-forward gate. There our
 `silu` computes in f32 and rounds once, as torch's does. Before this, a review found a one-ulp difference at 304 of 1,001
-bf16 values in [−5, 5]:
+bf16 values in [−5, 5]. (`plinear(x, p, "net.0.proj")` below is exactly `linear(x, p["net.0.proj.weight"])` unless the
+weight dict also carries a LoRA for that name; only HyperFlow does, see §9.)
 
 📍 `src/h3mlx/ops.py:148-152`
 ```python
@@ -514,8 +515,8 @@ bf16 values in [−5, 5]:
 
 Separate `to_q`/`to_k`/`to_v` with no bias, a per-head RMSNorm on q and k, rope, scaled-dot-product attention, and
 `to_out`. The attention width, `heads · head_dim = 7168`, is wider than the residual stream (5376). The original also
-supports a fused QKV projection; the release uses separate ones, and so does the port. `plinear(x, p, "to_q")` is
-`linear(x, p["to_q.weight"])` unless the weight dict also carries a LoRA for that name (HyperFlow, §9).
+supports a fused QKV projection; the release uses separate ones, and so does the port. `plinear` is §2.2's
+LoRA-aware `linear`.
 
 📍 [`diffusers:src/diffusers/models/transformers/transformer_minimax_h3.py:168-209`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/transformers/transformer_minimax_h3.py#L168-L209)
 ```python
@@ -789,7 +790,9 @@ refiner, and the rows are scattered into the packed buffer:
 ```
 
 The AdaLN rows, then the 50 blocks. Each block is evaluated before the next is built, so MLX's lazy graph never spans
-more than one block. This does not cap the sequence length or the total memory:
+more than one block. This does not cap the sequence length or the total memory. Without HyperFlow, `endpoint` is
+`None` and `two_time_embedding` is exactly `timestep_embedding` (time_proj, then time_embedder); with it, it is
+HyperFlow's two-time embedder (§9 and `docs/porting-hyperflow.md` §3):
 
 📍 `src/h3mlx/ops.py:369-382`
 ```python
@@ -864,7 +867,7 @@ where they differ by 0.0028 at one step of 49. `tests/test_modulation_cache.py` 
   accumulated trajectory). Cached and uncached must both be within 1.25× torch-bf16's own error against an f32 run,
   plus 0.0001. The worst observed is 1.06×.
 
-📍 `src/h3mlx/ops.py:403-442`
+📍 `src/h3mlx/ops.py:403-444`
 ```python
  403 class ModulationCache:
  404     """Every block's six AdaLN tables (and norm_out's shift/scale) for a fixed set of timestep values, computed once.
@@ -875,37 +878,39 @@ where they differ by 0.0028 at one step of 49. `tests/test_modulation_cache.py` 
  409     """
  410
  411     def __init__(self, p: dict, cfg: dict, timesteps):
- 412         t = np.unique(np.asarray(timesteps, dtype=np.float32))
- 413         self.t = t
- 414         self._index = {float(v): i for i, v in enumerate(t)}
- 415         temb = timestep_embedding(mx.array(t), _sub(p, "time_embedder."), cfg["freq_dim"])
- 416         hidden = cfg["hidden_size"]
- 417         self.blocks = []
- 418         for i in range(cfg["num_layers"]):
- 419             b = f"transformer_blocks.{i}.adaln_proj.linear."
- 420             tables = adaln_modulation(temb, p[b + "weight"], p[b + "bias"], hidden)
- 421             mx.eval(tables)
- 422             self.blocks.append(tables)
- 423         w, bias = p["norm_out.linear.weight"], p["norm_out.linear.bias"]
- 424         self.out = mx.split(linear(silu(temb).astype(w.dtype), w, bias), 2, axis=-1)
- 425         mx.eval(self.out)
- 426
- 427     def rows(self, timestep: mx.array, timestep_indices: mx.array) -> mx.array:
- 428         """Map a step's (distinct timesteps, per-row index into them) onto rows of the cached tables."""
- 429         local = np.array(timestep.astype(mx.float32))
- 430         try:
- 431             glob = np.array([self._index[float(v)] for v in local], dtype=np.int64)
- 432         except KeyError as e:
- 433             raise KeyError(f"timestep {e} not in the cache (built for {len(self.t)} values)") from None
- 434         return mx.take(mx.array(glob), timestep_indices)
- 435
- 436     @staticmethod
- 437     def drop_weights(p: dict, cfg: dict) -> dict:
- 438         """A new dict without the projections the cache replaces. The memory is freed only when nothing else (e.g. the
- 439         caller's original dict) still references those arrays."""
- 440         gone = {f"transformer_blocks.{i}.adaln_proj.linear.{n}" for i in range(cfg["num_layers"]) for n in ("weight", "bias")}
- 441         gone |= {"norm_out.linear.weight", "norm_out.linear.bias"}
- 442         return {k: v for k, v in p.items() if k not in gone}
+ 412         if "endpoint_time_embedder.linear_1.weight" in p:
+ 413             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
+ 414         t = np.unique(np.asarray(timesteps, dtype=np.float32))
+ 415         self.t = t
+ 416         self._index = {float(v): i for i, v in enumerate(t)}
+ 417         temb = timestep_embedding(mx.array(t), _sub(p, "time_embedder."), cfg["freq_dim"])
+ 418         hidden = cfg["hidden_size"]
+ 419         self.blocks = []
+ 420         for i in range(cfg["num_layers"]):
+ 421             b = f"transformer_blocks.{i}.adaln_proj.linear."
+ 422             tables = adaln_modulation(temb, p[b + "weight"], p[b + "bias"], hidden)
+ 423             mx.eval(tables)
+ 424             self.blocks.append(tables)
+ 425         w, bias = p["norm_out.linear.weight"], p["norm_out.linear.bias"]
+ 426         self.out = mx.split(linear(silu(temb).astype(w.dtype), w, bias), 2, axis=-1)
+ 427         mx.eval(self.out)
+ 428
+ 429     def rows(self, timestep: mx.array, timestep_indices: mx.array) -> mx.array:
+ 430         """Map a step's (distinct timesteps, per-row index into them) onto rows of the cached tables."""
+ 431         local = np.array(timestep.astype(mx.float32))
+ 432         try:
+ 433             glob = np.array([self._index[float(v)] for v in local], dtype=np.int64)
+ 434         except KeyError as e:
+ 435             raise KeyError(f"timestep {e} not in the cache (built for {len(self.t)} values)") from None
+ 436         return mx.take(mx.array(glob), timestep_indices)
+ 437
+ 438     @staticmethod
+ 439     def drop_weights(p: dict, cfg: dict) -> dict:
+ 440         """A new dict without the projections the cache replaces. The memory is freed only when nothing else (e.g. the
+ 441         caller's original dict) still references those arrays."""
+ 442         gone = {f"transformer_blocks.{i}.adaln_proj.linear.{n}" for i in range(cfg["num_layers"]) for n in ("weight", "bias")}
+ 443         gone |= {"norm_out.linear.weight", "norm_out.linear.bias"}
+ 444         return {k: v for k, v in p.items() if k not in gone}
 ```
 📍 `src/h3mlx/denoise.py:149-157`
 ```python
