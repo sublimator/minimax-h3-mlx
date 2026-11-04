@@ -2323,8 +2323,10 @@ A DAC encoder and a BigVGAN decoder on mono 32 kHz audio; stereo is a batch of t
 notes that bf16 decodes come out about 20 dB quieter.
 
 **Visual and audio references differ:** visual references use a **sampled** posterior (§6), but reference audio uses
-the posterior **mean**. diffusers' reference encoder does both, and also snaps a video reference down to the nearest
-`17n + 5` frames (`max(1, (n − 5) // 17) · 17 + 5`):
+the posterior **mean**. diffusers' reference encoder does both. It also cuts a video reference to its first
+`max(1, (n − 5) // 17) · 17 + 5` frames: the longest `17k + 5` that fits for clips of 22 frames or more (31 frames
+become 22, not the nearer 39). A clip under 22 frames is kept whole, since the slice can't add frames; the VAE's
+17-frame chunking then pads it:
 
 📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/encoders.py:715-770`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/encoders.py#L715-L770)
 ```python
