@@ -137,7 +137,7 @@ def test_exif_rotated_photo_is_upright_like_diffusers(release, tmp_path):
 
 
 def test_check_headers_passes_on_a_release_layout_and_catches_a_wrong_dtype(release, tmp_path):
-    from safetensors.numpy import load_file, save_file
+    from safetensors.torch import load_file, save_file
 
     from h3mlx import load
 
@@ -148,7 +148,7 @@ def test_check_headers_passes_on_a_release_layout_and_catches_a_wrong_dtype(rele
     shard = sorted((broken / "transformer_ref").glob("*.safetensors"))[0]
     sd = load_file(str(shard))
     k = next(k for k in sd if k.startswith("transformer_blocks"))
-    sd[k] = sd[k].astype(np.float32) if sd[k].dtype != np.float32 else sd[k].astype(np.float16)
+    sd[k] = sd[k].to(torch.float32) if sd[k].dtype != torch.float32 else sd[k].to(torch.bfloat16)
     save_file(sd, str(shard))
     with pytest.raises(ValueError, match="expected"):
         load.check_headers(broken, keep_layers=50)
