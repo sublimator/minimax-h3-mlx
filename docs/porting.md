@@ -2,23 +2,70 @@
 
 This is a side-by-side tour of how MiniMax H3's reference implementation, **diffusers 0.42.1** (`huggingface/diffusers`
 tag `v0.42.1`), maps onto our MLX package `h3mlx`. Each section shows the original first, then the port, then what
-changed and which test pins the two together. The aim is the **ref2va** workflow (reference images, videos and
-audio → video with sound), which uses the same transformer class as text-to-video, with different weights
+changed and which test ties the two together. The aim is the **ref2va** workflow: reference images, videos and audio
+in, video with sound out. It uses the same transformer class as text-to-video, with different weights
 (`transformer_ref`) and a different packed layout.
 
-The third-party MLX port (`yshenaw/ComfyUI-MiniMax-H3-MLX-SolAttn`) is **not** the
-source of this code; everything here was written from diffusers.
+**Where the code comes from.** The MiniMax H3 maths follows diffusers. The audio resampler is copied verbatim from
+torchaudio 2.9.1 (§7). The text encoder is mlx-vlm 0.7.11's Qwen3-VL (§5). The third-party MLX port
+`yshenaw/ComfyUI-MiniMax-H3-MLX-SolAttn` is not a source; one idea from it, the
+modulation cache (§2.6), was re-implemented here.
 
-**Conventions of the port**
+**What runs where.** The models run in MLX. CPU code around them:
 
-- **Functional, diffusers names.** Ops take a flat `dict` of weights keyed exactly as the diffusers state dict, so the
-  released `transformer_ref/` safetensors load with no renaming (`tests/test_weight_names.py`).
-- **Channels-last for convolutions.** MLX convolutions want `(B, F, H, W, C)`; diffusers uses `(B, C, F, H, W)`.
-  Conv weights are transposed once at load (`(O, I, k…)` → `(O, k…, I)`).
-- **Precision as released.** The block stack is bf16; `proj_in`/`proj_out`, the audio heads, the time embedder and
-  rope stay f32. Activations follow torch's rounding (one rounding per op, e.g. `silu` in f32 opmath).
-- **Randomness from torch's CPU generator.** Noise is drawn with `torch.Generator` in diffusers' channels-first
-  shapes and order, so a seed reproduces diffusers' draws; everything else is MLX.
+- **torch (CPU):** the seeded noise, so a seed reproduces diffusers' draws, and the audio resampler.
+- **transformers + torchvision:** the Qwen3-VL tokenizer and image/video processor.
+- **numpy:** packed layouts, sigma schedules, weight-norm folding.
+- **PIL:** image references.
+
+All of these are runtime dependencies in `pyproject.toml`.
+
+**Weights.** Ops take a flat `dict` of weights:
+
+- **`transformer_ref`:** the released safetensors load by their diffusers names with no renaming
+  (`tests/test_weight_names.py`).
+- **Convolutions:** MLX wants channels-last, `(B, F, H, W, C)` instead of diffusers' `(B, C, F, H, W)`. Conv weights go
+  `(O, I, k…)` → `(O, k…, I)`.
+- **Audio's transposed convolutions** are stored `(I, O, K)` and become `(O, K, I)` (`to_mlx_layout`, §7).
+- **Audio weight-norm pairs** are folded into plain `.weight` tensors.
+- **Qwen keys** are renamed by mlx-vlm's own sanitiser.
+
+**Precision.** As released:
+
+- The transformer's block stack is bf16.
+- Its `proj_in`/`proj_out`, audio heads and time embedder are f32.
+- Rotary angles and their cos/sin are computed in f32; cos/sin are then cast to the query/key dtype before they are
+  applied.
+- The audio VAE is f32.
+
+Explicit casts in diffusers are kept, and pointwise activations compute in f32 and round once, as torch's do. The
+tests bound the differences; they do not promise bit-identity everywhere.
+
+**Randomness.** Noise comes from torch's CPU generator, drawn in diffusers' channels-first shapes and order.
+
+**Words used below.**
+
+- **ulp:** the gap between two neighbouring floating-point numbers, i.e. the smallest possible difference.
+- **opmath:** the precision an op computes in before casting its output.
+- **t and σ:** MiniMax's time `t = 1 − σ` runs from 0 (pure noise) to 1 (clean).
+- **mrope:** Qwen3-VL's rotary positions with separate time, height and width sections, interleaved.
+- **deepstack:** Qwen3-VL adds features from vision layers 8, 16 and 24 into its first three language layers.
+
+**Shapes at the release configuration**
+
+| what | value |
+| --- | --- |
+| video VAE | spatial ratio 16, temporal ratio 4; `17n + 5` frames → `5n + 2` latent frames; 24 latent channels |
+| transformer patch | `(1, 2, 2)`: one row per 2×2 latent pixels per latent frame |
+| audio | 32 kHz, stereo as two mono batch items, hop 800 → 40 latents/s, 32 latent channels |
+| default canvas | 1344×768 (16:9 preferred, area-capped at 768·1344, rounded to multiples of 32) |
+| image reference | its own 2048 px short edge, no area cap |
+| 5 s target (124 frames) | 37 latent frames, 207 audio latents per channel |
+
+Each visual reference adds **two** blocks of rows: its Qwen vision tokens in the text, and its VAE latent rows in the
+packed sequence. A review counted one 2048×2048 image with the prompt "A person smiles." at the default
+canvas and 124 frames: **45,914 rows**. That is 37,296 target video, 414 target audio, 4,096 image VAE rows and 4,108
+text/vision rows. A 480p (864×480) target has 14,985 video rows instead of 37,296.
 
 ---
 
@@ -199,8 +246,8 @@ The original:
  729         )
 ```
 
-The port is the same algorithm in numpy (float64 positions, int64 indices). It reads reference geometry from shapes
-rather than tensors, so it needs no torch:
+The port is the same algorithm in numpy (float64 positions, int64 indices). It reads each reference's geometry from a
+shape rather than a tensor, so it needs no torch:
 
 📍 `src/h3mlx/packing.py:112-192`
 ```python
@@ -287,11 +334,27 @@ rather than tensors, so it needs no torch:
  192     return Layout(pos, tags, video_indices, audio_indices, text_indices, n_ref_video, n_ref_audio)
 ```
 
-Two details matter for bit-exactness. The spatial grid uses `np.linspace(..., endpoint=False)`, which the original
-also calls (not `torch.linspace`). And a video reference advances the clock by a **sequential** float64 sum, while the
-fl2va "last" anchor uses numpy's **pairwise** sum; the two differ in the last ulp at 15, 21, 26… latent frames, so the
-port keeps both, like the original. `tests/test_packing.py` compares positions, tags, indices and counts bit for bit
-on 4×4 t2va/fl2va cases and 7 ref2va mixes, including a 26-latent-frame video that only passes with the right order.
+**Summation order.** Two clock advances add up the series `5/3 · (1, 4, 4, 4, 4)`:
+
+- **A video reference's span:** both sides call Python's built-in `sum()`.
+- **The fl2va "last" anchor:** both sides use numpy's pairwise `.sum()`.
+
+Since Python 3.12 the built-in `sum()` of floats is *compensated* (Neumaier), not plain left-to-right addition. Of the
+term counts tried (15, 16, 21, 26, 31, 37), on Python 3.13 it differs from a plain loop at all but 26; on 3.11 it equals
+the loop at all six.
+The port calls the same `sum()`, so it matches diffusers on the same interpreter.
+
+These are float64 positions, and the rotary embedding casts them to float32 first. In a probe of 47,200 target clocks
+(2 to 119 reference frames × 0 to 399 text rows), none differed after that cast.
+
+`tests/test_packing.py` compares positions, tags, indices and counts bit for bit:
+
+- 16 t2va/fl2va layouts: 4 anchor choices × 4 latent geometries;
+- 9 ref2va mixes;
+- two 26-frame videos whose own span decides the clock, one silent and one with a short soundtrack. Both fail if the
+  span is summed pairwise instead.
+
+A 26-frame video with a *long* soundtrack would not catch that: `max(audio, video)` picks the audio.
 
 The rotary grids themselves:
 
@@ -324,8 +387,8 @@ The rotary grids themselves:
 
 ### 2.1 Rotary embedding
 
-One `inv_freq` vector serves all three axes; the `(t, h, w)` angle blocks are concatenated and doubled, and only the
-leading `2 · 3 · 16 = 96` of each head's 128 channels rotate.
+One `inv_freq` vector serves all three axes. The `(t, h, w)` angle blocks are concatenated and doubled, so the leading
+`2 · 3 · 16 = 96` of each head's 128 channels rotate and the other 32 pass through unchanged.
 
 📍 [`diffusers:src/diffusers/models/transformers/transformer_minimax_h3.py:93-100`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/transformers/transformer_minimax_h3.py#L93-L100)
 ```python
@@ -387,12 +450,12 @@ leading `2 · 3 · 16 = 96` of each head's 128 channels rotate.
   41     return mx.concatenate([xr * c + rotated * s, xp], axis=-1)
 ```
 
-`inv_freq` is built in numpy float32: MLX's `pow` is one ulp off torch's at `rope_freq_dim = 16`, and numpy's float32
-`power` matches torch bit for bit.
+`inv_freq` is built in numpy float32, which matches torch bit for bit. MLX's `pow` is one ulp off at two of the 16
+frequencies.
 
 ### 2.2 The AdaLN table
 
-Each block projects the shared timestep embedding into six modulations **per (timestep, modality) pair**; a row picks
+Each block projects the shared timestep embedding into six modulations **per (timestep, modality) pair**. A row picks
 its pair with `timestep_index · 3 + modality_tag`.
 
 📍 [`diffusers:src/diffusers/models/transformers/transformer_minimax_h3.py:124-131`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/transformers/transformer_minimax_h3.py#L124-L131)
@@ -425,9 +488,19 @@ its pair with `timestep_index · 3 + modality_tag`.
   80     return x * (1.0 + mx.take(scale, rows, axis=0)) + mx.take(shift, rows, axis=0)
 ```
 
-The `silu` runs at `temb`'s precision (f32) and only its result is cast to the bf16 projection, as the original's
-comment explains. Our `silu` rounds once, like torch's:
+The `silu` here runs on the f32 timestep embedding, and only its result is cast to the bf16 projection, as the
+original's comment explains. The place where a bf16 `silu` could round differently is the feed-forward gate. There our
+`silu` computes in f32 and rounds once, as torch's does. Before this, a review found a one-ulp difference at 304 of 1,001
+bf16 values in [−5, 5]:
 
+📍 `src/h3mlx/ops.py:135-139`
+```python
+ 135 def swiglu_ff(x: mx.array, p: dict) -> mx.array:
+ 136     """diffusers FeedForward(activation_fn="swiglu", bias=False): proj -> (h, gate) -> h * silu(gate) -> out."""
+ 137     h = linear(x, p["net.0.proj.weight"])
+ 138     h, gate = mx.split(h, 2, axis=-1)
+ 139     return linear(h * silu(gate), p["net.2.weight"])
+```
 📍 `src/h3mlx/ops.py:54-58`
 ```python
   54 def silu(x: mx.array) -> mx.array:
@@ -440,7 +513,8 @@ comment explains. Our `silu` rounds once, like torch's:
 ### 2.3 Attention
 
 Separate `to_q`/`to_k`/`to_v` with no bias, a per-head RMSNorm on q and k, rope, scaled-dot-product attention, and
-`to_out`. Note that `heads · head_dim = 7168` is wider than the residual stream (5376).
+`to_out`. The attention width, `heads · head_dim = 7168`, is wider than the residual stream (5376). The original also
+supports a fused QKV projection; the release uses separate ones, and so does the port.
 
 📍 [`diffusers:src/diffusers/models/transformers/transformer_minimax_h3.py:168-209`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/transformers/transformer_minimax_h3.py#L168-L209)
 ```python
@@ -523,9 +597,9 @@ Separate `to_q`/`to_k`/`to_v` with no bias, a per-head RMSNorm on q and k, rope,
  103     return o.transpose(0, 2, 1, 3)
 ```
 
-The original packs one request into one unpadded document, so no mask is passed. MiniMax's own reference pads to a
-multiple of 64 and masks the tail; `tests/test_ops.py::test_attention_padded_to_64_with_mask_equals_unpadded` shows the
-two agree.
+The original packs one request into one unpadded document, so no mask is passed. diffusers' comment says MiniMax's own
+reference pads to a multiple of 64 and masks the tail. `tests/test_ops.py::test_attention_padded_to_64_with_mask_equals_unpadded`
+shows the two give the same rows in MLX, with a junk tail that does change the output when unmasked.
 
 ### 2.4 One block
 
@@ -697,8 +771,8 @@ two agree.
  666         return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
 ```
 
-The port, stage by stage. Each modality is projected at its own parameter dtype, the text goes through the 2-layer
-token refiner, and the rows are scattered into the packed buffer:
+The port, stage by stage. Each modality is projected at its own weights' dtype, the text goes through the 2-layer token
+refiner, and the rows are scattered into the packed buffer:
 
 📍 `src/h3mlx/ops.py:324-332`
 ```python
@@ -713,7 +787,8 @@ token refiner, and the rows are scattered into the packed buffer:
  332     x[:, audio_indices] = a.astype(t.dtype)
 ```
 
-The AdaLN rows, then the 50 blocks, each evaluated before the next to bound memory at 20–50k rows:
+The AdaLN rows, then the 50 blocks. Each block is evaluated before the next is built, so MLX's lazy graph never spans
+more than one block. This does not cap the sequence length or the total memory:
 
 📍 `src/h3mlx/ops.py:336-346`
 ```python
@@ -746,18 +821,44 @@ The final shift/scale norm, the cast to the f32 heads, and gathering the video a
  359     aud = linear(x, p["audio_proj_out.weight"], p["audio_proj_out.bias"])[:, audio_indices]
 ```
 
-`tests/test_dit_tiny.py` runs both forwards on a tiny random config with shuffled modalities and three noise levels.
-`tests/test_dit_mixed_precision.py` scores both bf16 runs against one f32 run: MLX's relative error is 0.59% where
-torch's own is 0.55%.
+The port leaves out the original's input shape checks, the LoRA scale hook and the output class. It is a forward
+function, not a drop-in replacement for the module.
 
-### 2.6 Ours only: the modulation cache
+**Tests.**
 
-The modulations depend only on the timestep, never on the latents. One run can therefore compute every block's
-tables once for every timestep it will use, and drop the `adaln_proj` weights: about 26 GB of `transformer_ref`'s
-66 GB in bf16. The idea comes from the third-party port; this implementation is ours and is bit-identical to the
-uncached path (`tests/test_modulation_cache.py`).
+- `tests/test_dit_tiny.py` runs both forwards on a tiny random config with shuffled modalities and three noise levels.
+- `tests/test_dit_mixed_precision.py` uses the release's precision split on a 4-layer, width-48 random model. It scores
+  each bf16 run against one f32 torch run and requires MLX's relative error to be at most 1.5 × torch's + 0.001.
+  Observed: video 0.61% (torch 0.55%), audio 0.61% (torch 0.68%).
 
-📍 `src/h3mlx/ops.py:367-405`
+### 2.6 Ours only: the modulation cache (opt-in, not used by `ref2va`)
+
+The modulations depend only on the timestep, never on the latents. A run can therefore compute every block's tables
+once for every timestep it will use, and drop the `adaln_proj` weights.
+
+**What that saves.** The dropped projections hold 26.08 GB of `transformer_ref`'s 66.28 GB of bf16 parameters. The
+tables cost about 1 GB at the real size for a 50-point schedule (99 distinct timesteps). These are parameter bytes,
+not a measured peak.
+
+**How to use it.**
+
+1. Build the cache for every timestep the run will see: `ModulationCache(params, cfg, schedule_timesteps(layout,
+   schedules))`.
+2. Pass `cache=` to `dit_forward` or `denoise`.
+3. Pass `ModulationCache.drop_weights(params, cfg)` as the params. This returns a **new** dict; the memory is freed only
+   when nothing else, such as the original dict, still holds those arrays.
+
+`pipeline.ref2va` does not do this yet. On a 256 GB machine it doesn't need to.
+
+**Accuracy.** The maths is the same, but the floating-point result can differ. The cache multiplies all timesteps in
+one batch; the uncached path multiplies only that step's. A review found a larger mixed-precision model
+where they differ by 0.0028 at one step of 49. `tests/test_modulation_cache.py` checks two things:
+
+- **On small fixtures:** cached and uncached are exactly equal.
+- **On that larger model over the whole 50-point schedule:** at every step, both are within 1.25× of torch-bf16's own
+  error against an f32 run. The worst observed is 1.06×.
+
+📍 `src/h3mlx/ops.py:367-406`
 ```python
  367 class ModulationCache:
  368     """Every block's six AdaLN tables (and norm_out's shift/scale) for a fixed set of timestep values, computed once.
@@ -794,10 +895,21 @@ uncached path (`tests/test_modulation_cache.py`).
  399
  400     @staticmethod
  401     def drop_weights(p: dict, cfg: dict) -> dict:
- 402         """The params without the projections the cache replaces."""
- 403         gone = {f"transformer_blocks.{i}.adaln_proj.linear.{n}" for i in range(cfg["num_layers"]) for n in ("weight", "bias")}
- 404         gone |= {"norm_out.linear.weight", "norm_out.linear.bias"}
- 405         return {k: v for k, v in p.items() if k not in gone}
+ 402         """A new dict without the projections the cache replaces. The memory is freed only when nothing else (e.g. the
+ 403         caller's original dict) still references those arrays."""
+ 404         gone = {f"transformer_blocks.{i}.adaln_proj.linear.{n}" for i in range(cfg["num_layers"]) for n in ("weight", "bias")}
+ 405         gone |= {"norm_out.linear.weight", "norm_out.linear.bias"}
+ 406         return {k: v for k, v in p.items() if k not in gone}
+```
+📍 `src/h3mlx/denoise.py:90-96`
+```python
+  90 def schedule_timesteps(layout: Layout, schedules: Schedules) -> np.ndarray:
+  91     """Every distinct timestep any row takes over the whole run: what a ModulationCache needs."""
+  92     vals = []
+  93     for t, ta in zip(schedules.video_timesteps, schedules.audio_timesteps):
+  94         uniq, _ = row_timesteps(layout, float(t), float(ta), max(float(t), KEYFRAME_NOISE_AUG), 1.0)
+  95         vals.append(uniq)
+  96     return np.unique(np.concatenate(vals))
 ```
 
 ---
@@ -806,6 +918,9 @@ uncached path (`tests/test_modulation_cache.py`).
 
 Rectified flow with an exponential shift: 12 for video, 3 for audio. The model predicts a **data-ward** velocity
 (`x0 = x + (1 − t)·v`, note the `+`), and the Euler update is a blend computed in f32.
+
+**Counting steps.** `num_inference_steps = N` means N sigma grid points including the final 0, so **N − 1 model
+calls**. diffusers' default of 50 runs 49 forwards. The tests' "3" and "5" run 2 and 4.
 
 📍 [`diffusers:src/diffusers/schedulers/scheduling_minimax_h3.py:124-170`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/schedulers/scheduling_minimax_h3.py#L124-L170)
 ```python
@@ -872,8 +987,9 @@ Rectified flow with an exponential shift: 12 for video, 3 for audio. The model p
  243     return sig[keep]
 ```
 
-`torch.linspace` on arm64 fills each half with a fused multiply-add from its own end, so `np.linspace` differs by
-one ulp (for example at 50 steps). The port reproduces torch's fill, and it is bit-exact for every `n` from 2 to 1999:
+On arm64, `torch.linspace` fills each half of the grid from its own end, with a fused multiply-add. So `np.linspace`
+differs in the last bit at nine positions for N = 50. The port reproduces torch's fill; `tests/test_ops.py` checks it
+bit-exact for every N from 2 to 1999.
 
 📍 `src/h3mlx/ops.py:216-230`
 ```python
@@ -971,13 +1087,23 @@ one ulp (for example at 50 steps). The port reproduces torch's fill, and it is b
  254     return (r * x.astype(cdt) + (1.0 - r) * x0.astype(cdt)).astype(x.dtype)
 ```
 
+The original's scheduler also accepts custom sigma arrays and keeps a step index; the port's `flow_step` takes the two
+sigmas explicitly.
+
 ---
 
 ## 4. The denoise loop
 
-One forward per step serves every row. Generated video and audio rows step down their own schedules; visual
-conditioning rows stay at `max(t, 0.999)`, audio references at 1.0, and text inherits the video timestep. The
-checkpoint is guidance-distilled, so there is no unconditional pass.
+One forward per step serves every row:
+
+- **generated video and audio rows** step down their own schedules;
+- **visual reference rows** stay at `max(t, 0.999)`;
+- **audio reference rows** stay at 1.0;
+- **text rows** take the video's timestep.
+
+The checkpoint is guidance-distilled, so there is no unconditional pass.
+
+diffusers builds the per-row plan once, then each loop step runs the transformer and the two scheduler updates:
 
 📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/before_denoise.py:1197-1236`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/before_denoise.py#L1197-L1236)
 ```python
@@ -1022,6 +1148,68 @@ checkpoint is guidance-distilled, so there is no unconditional pass.
 1235         row_timesteps[audio_indices[:num_condition_audio_rows]] = condition_audio_timestep
 1236         return torch.unique(row_timesteps, sorted=True, return_inverse=True)
 ```
+📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/before_denoise.py:1238-1269`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/before_denoise.py#L1238-L1269)
+```python
+1238     @torch.no_grad()
+1239     def __call__(
+1240         self, components: MiniMaxH3ModularPipeline, state: PipelineState
+1241     ) -> tuple[MiniMaxH3ModularPipeline, PipelineState]:
+1242         block_state = self.get_block_state(state)
+1243         device = components._execution_device
+1244
+1245         components.scheduler.set_timesteps(block_state.num_inference_steps, device=device)
+1246         components.audio_scheduler.set_timesteps(block_state.num_inference_steps, device=device)
+1247         block_state.timesteps = components.scheduler.timesteps
+1248         block_state.audio_timesteps = components.audio_scheduler.timesteps
+1249
+1250         block_state.row_timestep_plan = [
+1251             tuple(
+1252                 tensor.to(device)
+1253                 for tensor in self.build_row_timesteps(
+1254                     block_state.video_indices,
+1255                     block_state.audio_indices,
+1256                     block_state.num_condition_video_rows,
+1257                     block_state.num_condition_audio_rows,
+1258                     block_state.text_indices.numel(),
+1259                     float(timestep),
+1260                     float(audio_timestep),
+1261                     max(float(timestep), components.keyframe_noise_aug),
+1262                     1.0,
+1263                 )
+1264             )
+1265             for timestep, audio_timestep in zip(block_state.timesteps, block_state.audio_timesteps)
+1266         ]
+1267
+1268         self.set_block_state(state, block_state)
+1269         return components, state
+```
+📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/denoise.py:110-133`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/denoise.py#L110-L133)
+```python
+ 110     @torch.no_grad()
+ 111     def __call__(
+ 112         self, components: MiniMaxH3ModularPipeline, block_state: BlockState, i: int, t: torch.Tensor
+ 113     ) -> tuple[MiniMaxH3ModularPipeline, BlockState]:
+ 114         transformer = getattr(components, self.transformer_name)
+ 115         unique_timesteps, timestep_indices = block_state.row_timestep_plan[i]
+ 116         # The layout tags its outputs `denoiser_input_fields`, and their names are the transformer's own parameter
+ 117         # names, so the rows of the packed sequence are described to it without this block enumerating them.
+ 118         layout_kwargs = {
+ 119             name: value
+ 120             for name, value in block_state.denoiser_input_fields.items()
+ 121             if name in inspect.signature(transformer.forward).parameters
+ 122         }
+ 123         block_state.noise_pred, block_state.audio_noise_pred = transformer(
+ 124             hidden_states=block_state.latents[None],
+ 125             audio_hidden_states=block_state.audio_latents[None],
+ 126             encoder_hidden_states=block_state.prompt_embeds,
+ 127             timestep=unique_timesteps,
+ 128             timestep_indices=timestep_indices,
+ 129             attention_kwargs=block_state.attention_kwargs,
+ 130             return_dict=False,
+ 131             **layout_kwargs,
+ 132         )
+ 133         return components, block_state
+```
 📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/denoise.py:222-241`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/denoise.py#L222-L241)
 ```python
  222     @torch.no_grad()
@@ -1045,6 +1233,8 @@ checkpoint is guidance-distilled, so there is no unconditional pass.
  240         )[0]
  241         return components, block_state
 ```
+
+The port does all three in one loop:
 
 📍 `src/h3mlx/denoise.py:38-46`
 ```python
@@ -1102,16 +1292,22 @@ checkpoint is guidance-distilled, so there is no unconditional pass.
 ```
 
 `tests/test_denoise.py` runs the port against a torch loop assembled from diffusers' own scheduler, row plan and
-transformer, for 3 and 5 steps; the conditioning rows come back untouched.
+transformer, for 3 and 5 grid points. The reference rows come back untouched.
 
 ---
 
 ## 5. The text side: the Qwen3-VL presentation
 
-MiniMax conditions on hidden state **50** of a 64-layer Qwen3-VL. That state is pre-norm, and the last layer's would
-be the wrong one. Every reference gets a label in the prompt, numbered per modality: `<Picture i>: ` plus an image
-block, `<Audio j>: ` alone, `<Video k>: ` plus one timestamped block per merged frame pair. Then comes the prompt
-verbatim, with no chat template.
+MiniMax conditions on hidden state **50** of a 64-layer Qwen3-VL. That state comes before the final norm; the last
+layer's output would be the wrong one.
+
+**The prompt.** Every reference gets a label, numbered per modality:
+
+- an image: `<Picture i>: ` plus an image block;
+- audio: `<Audio j>: ` alone;
+- a video: `<Video k>: ` plus one timestamped block per merged frame pair.
+
+The prompt follows verbatim, with no chat template.
 
 📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/encoders.py:543-612`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/encoders.py#L543-L612)
 ```python
@@ -1301,8 +1497,93 @@ verbatim, with no chat template.
   27     return indices, blocks
 ```
 
-The encoder itself is mlx-vlm's Qwen3-VL. `hidden_state_at_layer` stops after layer 50 without the final norm. The
-loader builds only those 50 layers, drops the LM head, and never reads the other layers from disk:
+The image and video pixels go through the released Qwen3-VL processor, batched per modality, which also gives the
+token count per block:
+
+📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/encoders.py:491-541`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/encoders.py#L491-L541)
+```python
+ 491     def _gather_vision_features(
+ 492         self, processor, references: list[MiniMaxH3Reference], fps: float
+ 493     ) -> tuple[dict, list[int], list[int], list[list[float]]]:
+ 494         r"""
+ 495         Run the references' pixels through the conditioner's processors, batched per modality.
+ 496
+ 497         The vision tensors are batched per modality while the presentation is tokenized in request order; the two agree
+ 498         because the filtering here preserves relative order within each modality and Qwen3-VL fills the n-th pad *run*
+ 499         of a modality with the n-th entry of that modality's batch. Audio contributes nothing — a waveform never
+ 500         reaches the conditioner.
+ 501
+ 502         Returns:
+ 503             `tuple`: the vision tensors by the conditioner's parameter names, the vision token count per image
+ 504             reference, the per-block token count per video reference, and the block timestamps per video reference.
+ 505         """
+ 506         merge_size = processor.image_processor.merge_size**2
+ 507         vision_inputs = {}
+ 508
+ 509         image_token_counts = []
+ 510         images = [reference.image for reference in references if reference.kind == "image"]
+ 511         if images:
+ 512             image_features = processor.image_processor(images=images, return_tensors="pt")
+ 513             vision_inputs["pixel_values"] = image_features["pixel_values"]
+ 514             vision_inputs["image_grid_thw"] = image_features["image_grid_thw"]
+ 515             image_token_counts = [int(grid.prod()) // merge_size for grid in image_features["image_grid_thw"]]
+ 516
+ 517         video_block_token_counts, video_block_timestamps = [], []
+ 518         videos = [reference for reference in references if reference.kind == "video"]
+ 519         if videos:
+ 520             temporal_patch = processor.video_processor.temporal_patch_size
+ 521             sampled = [
+ 522                 self._sample_video_condition_frames(reference.frames, fps, self.video_sample_fps, temporal_patch)
+ 523                 for reference in videos
+ 524             ]
+ 525             video_block_timestamps = [timestamps for _, timestamps in sampled]
+ 526             video_features = processor.video_processor(
+ 527                 videos=[np.stack(frames) for frames, _ in sampled], do_sample_frames=False, return_tensors="pt"
+ 528             )
+ 529             vision_inputs["pixel_values_videos"] = video_features["pixel_values_videos"]
+ 530             vision_inputs["video_grid_thw"] = video_features["video_grid_thw"]
+ 531             video_block_token_counts = [
+ 532                 int(grid[1]) * int(grid[2]) // merge_size for grid in video_features["video_grid_thw"]
+ 533             ]
+ 534             for timestamps, grid in zip(video_block_timestamps, video_features["video_grid_thw"]):
+ 535                 if int(grid[0]) != len(timestamps):
+ 536                     raise ValueError(
+ 537                         f"The processor merged a reference video into {int(grid[0])} vision blocks, but MiniMax-H3 "
+ 538                         f"labels {len(timestamps)} of them."
+ 539                     )
+ 540
+ 541         return vision_inputs, image_token_counts, video_block_token_counts, video_block_timestamps
+```
+📍 `src/h3mlx/pipeline.py:155-178`
+```python
+ 155 def vision_features(c: Components, refs):
+ 156     proc = c.processor
+ 157     merge = proc.image_processor.merge_size**2
+ 158     vision, img_counts, vid_counts, vid_ts = {}, [], [], []
+ 159     images = [r.image for r in refs if r.kind == "image"]
+ 160     if images:
+ 161         f = proc.image_processor(images=images, return_tensors="np")
+ 162         vision["pixel_values"], vision["image_grid_thw"] = f["pixel_values"], f["image_grid_thw"]
+ 163         img_counts = [int(np.prod(g)) // merge for g in f["image_grid_thw"]]
+ 164     videos = [r for r in refs if r.kind == "video"]
+ 165     if videos:
+ 166         tp = proc.video_processor.temporal_patch_size
+ 167         sampled = []
+ 168         for r in videos:
+ 169             idx, ts = sample_video_condition_frames(r.frames.shape[0], float(R.FPS), c.video_sample_fps, tp)
+ 170             sampled.append(np.stack([r.frames[i] for i in idx]))
+ 171             vid_ts.append(ts)
+ 172         f = proc.video_processor(videos=sampled, do_sample_frames=False, return_tensors="np")
+ 173         vision["pixel_values_videos"], vision["video_grid_thw"] = f["pixel_values_videos"], f["video_grid_thw"]
+ 174         vid_counts = [int(g[1]) * int(g[2]) // merge for g in f["video_grid_thw"]]
+ 175         for ts, g in zip(vid_ts, f["video_grid_thw"]):
+ 176             if int(g[0]) != len(ts):
+ 177                 raise ValueError(f"processor made {int(g[0])} video blocks, presentation labels {len(ts)}")
+ 178     return vision, img_counts, vid_counts, vid_ts
+```
+
+**Running the encoder.** diffusers runs transformers' Qwen3-VL to the end and reads `hidden_states[50]`. The port asks
+mlx-vlm's model to stop after layer 50 without the final norm, through the `encode` function the loader returns:
 
 📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/encoders.py:30-99`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/encoders.py#L30-L99)
 ```python
@@ -1377,6 +1658,31 @@ loader builds only those 50 layers, drops the LM head, and never reads the other
   98     )
   99     return outputs.hidden_states[text_encoder_layer].to(device=device, dtype=dtype)
 ```
+📍 mlx-vlm 0.7.11, `mlx_vlm/models/qwen3_vl/qwen3_vl.py:164-185`
+```python
+ 164     def hidden_state_at_layer(
+ 165         self,
+ 166         input_ids: mx.array,
+ 167         layer: int,
+ 168         pixel_values: Optional[mx.array] = None,
+ 169         mask: Optional[mx.array] = None,
+ 170         **kwargs,
+ 171     ) -> mx.array:
+ 172         """Return the pre-final-norm hidden state after ``layer`` decoder layers."""
+ 173         features = self.get_input_embeddings(
+ 174             input_ids, pixel_values, mask=mask, **kwargs
+ 175         )
+ 176         return self.language_model.model(
+ 177             input_ids,
+ 178             inputs_embeds=features.inputs_embeds,
+ 179             mask=mask,
+ 180             position_ids=features.position_ids,
+ 181             visual_pos_masks=features.visual_pos_masks,
+ 182             deepstack_visual_embeds=features.deepstack_visual_embeds,
+ 183             stop_after_layer=layer,
+ 184             apply_final_norm=False,
+ 185         )
+```
 📍 `src/h3mlx/load.py:85-123`
 ```python
   85 def load_text_encoder(d, keep_layers: int = 50, dtype=None):
@@ -1419,34 +1725,46 @@ loader builds only those 50 layers, drops the LM head, and never reads the other
  122
  123     return model, encode
 ```
-📍 `src/h3mlx/load.py:126-138`
+
+The loader builds only 50 decoder layers and no LM head. It opens every shard with `mx.load`, which is lazy: it reads
+each file's header and creates arrays without reading their data. Keys past the cut are then dropped before anything
+is evaluated, so their data is never loaded. A 1 GB test file loaded in 0.1 ms; that is a probe, not an I/O guarantee
+for every shard.
+
+`staged_text_encoder` loads, encodes and drops its own references. It does not unload anything else. To keep the text
+encoder and the transformer from being resident together, leave the transformer unevaluated until the text is done:
+
+📍 `src/h3mlx/load.py:126-139`
 ```python
  126 def staged_text_encoder(d, keep_layers: int = 50, dtype=None):
- 127     """An `encode(token_ids, vision_inputs)` that loads the text encoder, runs it, and frees it before returning, so
- 128     it is never resident together with the transformer (~51 GB bf16 for 50 layers of the release)."""
- 129
- 130     def encode(token_ids, vision_inputs):
- 131         model, run = load_text_encoder(d, keep_layers, dtype)
- 132         out = run(token_ids, vision_inputs)
- 133         mx.eval(out)
- 134         del model, run
- 135         mx.clear_cache()
- 136         return out
- 137
- 138     return encode
+ 127     """An `encode(token_ids, vision_inputs)` that loads the text encoder, runs it, and drops its own references before
+ 128     returning (~51 GB bf16 for 50 layers of the release). It does not unload anything else: keep the transformer
+ 129     unevaluated (lazy `mx.load`) until text encoding is done if the two must not be resident together."""
+ 130
+ 131     def encode(token_ids, vision_inputs):
+ 132         model, run = load_text_encoder(d, keep_layers, dtype)
+ 133         out = run(token_ids, vision_inputs)
+ 134         mx.eval(out)
+ 135         del model, run
+ 136         mx.clear_cache()
+ 137         return out
+ 138
+ 139     return encode
 ```
 
-`tests/test_presentation.py` checks token ids and tags bit-exact with the released tokenizer.
-`tests/test_text_encoder_tiny.py` compares mlx-vlm with transformers on a tiny Qwen3-VL that keeps interleaved mrope
-and deepstack, with a picture and a video in one presentation. Without `video_grid_thw`, mlx-vlm 0.7.11 raises rather
-than misplace the video tokens.
+**Tests.**
+
+- `tests/test_presentation.py`: token ids and tags bit-exact with the released tokenizer.
+- `tests/test_text_encoder_tiny.py`: mlx-vlm against transformers on a tiny Qwen3-VL that keeps interleaved mrope and
+  deepstack, with a picture and a video in one presentation. Without `video_grid_thw`, mlx-vlm 0.7.11 raises rather
+  than misplace the video tokens.
 
 ---
 
 ## 6. The video VAE
 
-A causal 3-D CNN encoder (reflect padding in space, zero frames prepended in time, group norm per frame) and a
-non-causal ViT decoder, both tiled spatially at 256 px with 64 px overlap.
+**Encoder:** a causal 3-D CNN. Reflect padding in space, zero frames prepended in time, group norm per frame.
+**Decoder:** a non-causal ViT. Both are tiled spatially (below).
 
 📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py:57-65`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py#L57-L65)
 ```python
@@ -1460,38 +1778,36 @@ non-causal ViT decoder, both tiled spatially at 256 px with 64 px overlap.
   64             hidden_states = F.pad(hidden_states, (0, 0, 0, 0, self.temporal_padding, 0), mode="constant")
   65         return F.conv3d(hidden_states, self.weight, self.bias, stride=self.stride, padding=0, dilation=self.dilation)
 ```
-📍 `src/h3mlx/vae_ops.py:24-40`
+📍 `src/h3mlx/vae_ops.py:25-41`
 ```python
-  24 def causal_conv3d(
-  25     x: mx.array,
-  26     w: mx.array,
-  27     b: mx.array | None,
-  28     stride: tuple[int, int, int] = (1, 1, 1),
-  29     spatial_padding: int = 0,
-  30     temporal_padding: int = 0,
-  31 ) -> mx.array:
-  32     """MiniMaxH3VideoCausalConv3d: symmetric reflect pad on H, W; `temporal_padding` zero frames prepended only.
-  33     x: (B, F, H, W, C); w: MLX layout (O, kt, kh, kw, I)."""
-  34     if spatial_padding > 0:
-  35         x = reflect_pad(x, 2, spatial_padding, spatial_padding)
-  36         x = reflect_pad(x, 3, spatial_padding, spatial_padding)
-  37     if temporal_padding > 0:
-  38         x = mx.pad(x, [(0, 0), (temporal_padding, 0), (0, 0), (0, 0), (0, 0)])
-  39     y = mx.conv3d(x, w, stride=stride, padding=0)
-  40     return y + b if b is not None else y
+  25 def causal_conv3d(
+  26     x: mx.array,
+  27     w: mx.array,
+  28     b: mx.array | None,
+  29     stride: tuple[int, int, int] = (1, 1, 1),
+  30     spatial_padding: int = 0,
+  31     temporal_padding: int = 0,
+  32 ) -> mx.array:
+  33     """MiniMaxH3VideoCausalConv3d: symmetric reflect pad on H, W; `temporal_padding` zero frames prepended only.
+  34     x: (B, F, H, W, C); w: MLX layout (O, kt, kh, kw, I)."""
+  35     if spatial_padding > 0:
+  36         x = reflect_pad(x, 2, spatial_padding, spatial_padding)
+  37         x = reflect_pad(x, 3, spatial_padding, spatial_padding)
+  38     if temporal_padding > 0:
+  39         x = mx.pad(x, [(0, 0), (temporal_padding, 0), (0, 0), (0, 0), (0, 0)])
+  40     y = mx.conv3d(x, w, stride=stride, padding=0)
+  41     return y + b if b is not None else y
 ```
-
-MLX's `pad` has no reflect mode, so the port gathers the mirrored indices:
-
-📍 `src/h3mlx/vae_ops.py:15-21`
+📍 `src/h3mlx/vae_ops.py:15-22`
 ```python
   15 def reflect_pad(x: mx.array, axis: int, before: int, after: int) -> mx.array:
   16     """torch F.pad(mode="reflect") along one axis (edge sample not repeated)."""
   17     n = x.shape[axis]
   18     if before >= n or after >= n:
   19         raise ValueError(f"reflect pad ({before}, {after}) needs size > pad, got {n}")
-  20     idx = list(range(before, 0, -1)) + list(range(n)) + list(range(n - 2, n - 2 - after, -1))
-  21     return mx.take(x, mx.array(idx), axis=axis)
+  20     widths = [(0, 0)] * x.ndim
+  21     widths[axis] = (before, after)
+  22     return mx.pad(x, widths, mode="reflect")
 ```
 
 📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py:74-80`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py#L74-L80)
@@ -1504,21 +1820,22 @@ MLX's `pad` has no reflect mode, so the port gathers the mirrored indices:
   79         hidden_states = hidden_states.view(batch_size, num_frames, num_channels, height, width)
   80         return hidden_states.permute(0, 2, 1, 3, 4).contiguous()
 ```
-📍 `src/h3mlx/vae_ops.py:43-51`
+📍 `src/h3mlx/vae_ops.py:44-52`
 ```python
-  43 def group_norm_per_frame(x: mx.array, groups: int, weight: mx.array, bias: mx.array, eps: float) -> mx.array:
-  44     """MiniMaxH3VideoGroupNorm: GroupNorm with statistics per (batch, frame), never across frames. Biased variance,
-  45     computed in float32."""
-  46     b, f, h, w, c = x.shape
-  47     xf = x.astype(mx.float32).reshape(b, f, h * w, groups, c // groups)
-  48     mean = xf.mean(axis=(2, 4), keepdims=True)
-  49     var = ((xf - mean) ** 2).mean(axis=(2, 4), keepdims=True)
-  50     y = ((xf - mean) * mx.rsqrt(var + eps)).reshape(b, f, h, w, c).astype(x.dtype)
-  51     return y * weight + bias
+  44 def group_norm_per_frame(x: mx.array, groups: int, weight: mx.array, bias: mx.array, eps: float) -> mx.array:
+  45     """MiniMaxH3VideoGroupNorm: GroupNorm with statistics per (batch, frame), never across frames. Biased variance,
+  46     computed in float32."""
+  47     b, f, h, w, c = x.shape
+  48     xf = x.astype(mx.float32).reshape(b, f, h * w, groups, c // groups)
+  49     mean = xf.mean(axis=(2, 4), keepdims=True)
+  50     var = ((xf - mean) ** 2).mean(axis=(2, 4), keepdims=True)
+  51     y = ((xf - mean) * mx.rsqrt(var + eps)).reshape(b, f, h, w, c).astype(x.dtype)
+  52     return y * weight + bias
 ```
 
-**A still goes through the spatial encoder alone.** Padding a single image to a 17-frame clip would run the temporal
-path, which is not the conditioning MiniMax trained with. The third-party port's public `encode` gets this wrong.
+**A still goes through the spatial encoder alone.** diffusers' comment explains why: padding one image to a 17-frame
+clip would run the temporal path and is "not the conditioning MiniMax-H3 was trained with". The third-party port's
+public `encode` pads it.
 
 📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py:776-802`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py#L776-L802)
 ```python
@@ -1568,7 +1885,10 @@ path, which is not the conditioning MiniMax trained with. The third-party port's
  172         return m[:, : -c.token_drop] if c.token_drop > 0 else m
 ```
 
-Tiling and the chunked, cross-faded decode:
+**Tiling.** Tiles are 256 px with **at least** 64 px overlap. The overlaps are then widened in 16 px steps so the tiles
+cover the frame exactly: a 2048 px edge gives 11 tiles with overlaps of 80 and 64, and a 512 px edge gives overlaps of
+128. Each tile is evaluated as soon as it is built, so a 2048 px reference (121 tiles at 2048×2048, 209 at 2048×3648) never
+holds all of their graphs at once. Tiles are blended linearly across each overlap and stitched:
 
 📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py:656-677`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py#L656-L677)
 ```python
@@ -1612,6 +1932,129 @@ Tiling and the chunked, cross-faded decode:
   81         starts.append(starts[-1] + tile - overlaps[i])
   82     return starts, [tile] * n, overlaps
 ```
+📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py:721-744`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py#L721-L744)
+```python
+ 721     def _encode_clip(self, x: torch.Tensor) -> torch.Tensor:
+ 722         r"""Encode one temporal clip, spatially tiled when tiling is enabled."""
+ 723         if not self.use_tiling:
+ 724             return self.quant_conv(self.encoder(x))
+ 725
+ 726         height, width = x.shape[-2], x.shape[-1]
+ 727         y_indices, y_lengths, y_overlaps = self._split_tiles(
+ 728             height, self.tile_sample_min_height, self.tile_sample_min_overlap_height
+ 729         )
+ 730         x_indices, x_lengths, x_overlaps = self._split_tiles(
+ 731             width, self.tile_sample_min_width, self.tile_sample_min_overlap_width
+ 732         )
+ 733
+ 734         rows = []
+ 735         for i_pos, i_len in zip(y_indices, y_lengths):
+ 736             row = []
+ 737             for j_pos, j_len in zip(x_indices, x_lengths):
+ 738                 tile = x[..., i_pos : i_pos + i_len, j_pos : j_pos + j_len]
+ 739                 row.append(self.quant_conv(self.encoder(tile)))
+ 740             rows.append(row)
+ 741
+ 742         latent_y_overlaps = [overlap // self.spatial_compression_ratio for overlap in y_overlaps]
+ 743         latent_x_overlaps = [overlap // self.spatial_compression_ratio for overlap in x_overlaps]
+ 744         return self._stitch_tiles(rows, latent_y_overlaps, latent_x_overlaps)
+```
+📍 `src/h3mlx/vae.py:148-157`
+```python
+ 148     def encode_clip(self, x):
+ 149         c = self.cfg
+ 150         if not c.use_tiling:
+ 151             return self._encoder(x)
+ 152         ys, yl, yo = split_tiles(x.shape[2], c.tile_h, c.tile_overlap_h, c.spatial_ratio)
+ 153         xs, xl, xo = split_tiles(x.shape[3], c.tile_w, c.tile_overlap_w, c.spatial_ratio)
+ 154         rows = [[_evaluated(self._encoder(x[:, :, i : i + il, j : j + jl])) for j, jl in zip(xs, xl)]
+ 155                 for i, il in zip(ys, yl)]  # one tile at a time: a 2048 px reference is ~200 tiles
+ 156         r = c.spatial_ratio
+ 157         return stitch_tiles(rows, [o // r for o in yo], [o // r for o in xo])
+```
+📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py:699-719`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py#L699-L719)
+```python
+ 699     def _stitch_tiles(
+ 700         self,
+ 701         tiles: list[list[torch.Tensor]],
+ 702         height_overlaps: list[int],
+ 703         width_overlaps: list[int],
+ 704     ) -> torch.Tensor:
+ 705         result_rows = []
+ 706         for i, row in enumerate(tiles):
+ 707             result_row = []
+ 708             for j, tile in enumerate(row):
+ 709                 if i > 0:
+ 710                     tile = self._blend(tiles[i - 1][j], tile, height_overlaps[i - 1], dim=-2)
+ 711                 if j > 0:
+ 712                     tile = self._blend(row[j - 1], tile, width_overlaps[j - 1], dim=-1)
+ 713                 if i < len(tiles) - 1:
+ 714                     tile = tile[..., : -height_overlaps[i], :]
+ 715                 if j < len(row) - 1:
+ 716                     tile = tile[..., :, : -width_overlaps[j]]
+ 717                 result_row.append(tile)
+ 718             result_rows.append(torch.cat(result_row, dim=-1))
+ 719         return torch.cat(result_rows, dim=-2)
+```
+📍 `src/h3mlx/vae.py:105-120`
+```python
+ 105 def stitch_tiles(tiles, h_overlaps, w_overlaps, h_axis=2, w_axis=3):
+ 106     rows = []
+ 107     for i, row in enumerate(tiles):
+ 108         out_row = []
+ 109         for j, t in enumerate(row):
+ 110             if i > 0:
+ 111                 t = blend(tiles[i - 1][j], t, h_overlaps[i - 1], h_axis)
+ 112             if j > 0:
+ 113                 t = blend(row[j - 1], t, w_overlaps[j - 1], w_axis)
+ 114             if i < len(tiles) - 1:
+ 115                 t = _slice(t, h_axis, 0, -h_overlaps[i])
+ 116             if j < len(row) - 1:
+ 117                 t = _slice(t, w_axis, 0, -w_overlaps[j])
+ 118             out_row.append(t)
+ 119         rows.append(mx.concatenate(out_row, axis=w_axis))
+ 120     return mx.concatenate(rows, axis=h_axis)
+```
+📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py:679-697`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py#L679-L697)
+```python
+ 679     def _blend(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int, dim: int) -> torch.Tensor:
+ 680         blend_extent = min(a.shape[dim], b.shape[dim], blend_extent)
+ 681         positions = torch.arange(blend_extent, device=b.device, dtype=b.dtype)
+ 682         shape = [1] * a.ndim
+ 683         shape[dim] = blend_extent
+ 684         weight_a = (1 - positions / blend_extent).view(shape)
+ 685         weight_b = (positions / blend_extent).view(shape)
+ 686
+ 687         slice_a = [slice(None)] * a.ndim
+ 688         slice_a[dim] = slice(-blend_extent, None)
+ 689         slice_b = [slice(None)] * b.ndim
+ 690         slice_b[dim] = slice(0, blend_extent)
+ 691         blended = a[tuple(slice_a)] * weight_a + b[tuple(slice_b)] * weight_b
+ 692
+ 693         if blend_extent == b.shape[dim]:
+ 694             return blended
+ 695         slice_rest = [slice(None)] * b.ndim
+ 696         slice_rest[dim] = slice(blend_extent, None)
+ 697         return torch.cat([blended, b[tuple(slice_rest)]], dim=dim)
+```
+📍 `src/h3mlx/vae.py:91-102`
+```python
+  91 def blend(a: mx.array, b: mx.array, extent: int, axis: int) -> mx.array:
+  92     """Linear cross-fade of a's tail into b's head over `extent` along `axis`; ramp built in b's dtype."""
+  93     extent = min(a.shape[axis], b.shape[axis], extent)
+  94     pos = mx.arange(extent).astype(b.dtype)
+  95     shape = [1] * a.ndim
+  96     shape[axis] = extent
+  97     wa = (1 - pos / extent).reshape(shape)
+  98     wb = (pos / extent).reshape(shape)
+  99     out = _slice(a, axis, -extent, None) * wa + _slice(b, axis, 0, extent) * wb
+ 100     if extent == b.shape[axis]:
+ 101         return out
+ 102     return mx.concatenate([out, _slice(b, axis, extent, None)], axis=axis)
+```
+
+**Decoding time.** The decode is chunked in time and cross-faded where chunks overlap:
+
 📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py:804-853`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py#L804-L853)
 ```python
  804     def _decode(self, z: torch.Tensor) -> torch.Tensor:
@@ -1699,9 +2142,36 @@ Tiling and the chunked, cross-faded decode:
  223         return dec
 ```
 
-The ViT decoder: every latent voxel is one token, register tokens plus one zero token sit at position 0, norms run in
-f32, and there are layer scales:
+**The ViT decoder.** Every latent voxel is one token. Register tokens and one zero-valued token are **appended after**
+the voxel tokens, with rotary coordinates `(0, 0, 0)`. Each block's norms run in f32 and its two residuals are scaled
+by learned layer scales:
 
+📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py:387-397`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py#L387-L397)
+```python
+ 387     def forward(
+ 388         self, hidden_states: torch.Tensor, rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None
+ 389     ) -> torch.Tensor:
+ 390         # The reference normalizes in float32 regardless of the compute dtype. The residual stream is float32 too
+ 391         # because the anchors are, so the normed activation follows the projections instead.
+ 392         compute_dtype = get_parameter_dtype(self.attn.to_q)
+ 393         norm_hidden_states = self.norm1(hidden_states.float()).to(compute_dtype)
+ 394         hidden_states = hidden_states + self.attn(norm_hidden_states, rotary_emb) * self.scale1
+ 395         norm_hidden_states = self.norm2(hidden_states.float()).to(compute_dtype)
+ 396         hidden_states = hidden_states + self.ff(norm_hidden_states) * self.scale2
+ 397         return hidden_states
+```
+📍 `src/h3mlx/vae_ops.py:172-180`
+```python
+ 172 def vit_block(x: mx.array, p: dict, heads: int, eps: float, rotary) -> mx.array:
+ 173     """Norms in float32, residual stream float32, attention/FF at the projections' dtype, layer scales."""
+ 174     cdt = p["attn.to_q.weight"].dtype
+ 175     h = mx.fast.rms_norm(x.astype(mx.float32), p["norm1.weight"].astype(mx.float32), eps).astype(cdt)
+ 176     x = x + vit_attention(h, _sub(p, "attn."), heads, eps, rotary) * p["scale1"]
+ 177     h = mx.fast.rms_norm(x.astype(mx.float32), p["norm2.weight"].astype(mx.float32), eps).astype(cdt)
+ 178     f = _lin(h, p, "ff.net.0.proj")
+ 179     f, gate = mx.split(f, 2, axis=-1)
+ 180     return x + _lin(f * silu(gate), p, "ff.net.2") * p["scale2"]
+```
 📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py:449-502`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py#L449-L502)
 ```python
  449     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -1759,31 +2229,35 @@ f32, and there are layer scales:
  501             width * patch_size,
  502         )
 ```
-📍 `src/h3mlx/vae_ops.py:182-200`
+📍 `src/h3mlx/vae_ops.py:183-201`
 ```python
- 182 def vit_decoder(
- 183     z: mx.array, p: dict, num_layers: int, heads: int, patch_size: int, patch_size_t: int, out_channels: int,
- 184     rope_dim: int, rope_theta: float = 100.0, eps: float = 1e-5,
- 185 ) -> mx.array:
- 186     """MiniMaxH3VideoViTDecoder3d. z: channels-last latents (B, F, H, W, C) -> pixels (B, F*pt, H*p, W*p, out)."""
- 187     b, f, h, w, c = z.shape
- 188     x = _lin(z.reshape(b, f * h * w, c), p, "proj_in")
- 189     n = x.shape[1]
- 190     regs = mx.broadcast_to(p["register_tokens"].astype(x.dtype), (b, *p["register_tokens"].shape[1:]))
- 191     x = mx.concatenate([x, regs, mx.zeros((b, 1, x.shape[-1]), dtype=x.dtype)], axis=1)
- 192     rotary = vit_rope(vit_positions(f, h, w, regs.shape[1] + 1), vit_rope_inv_freq(rope_dim, rope_theta))
- 193     for i in range(num_layers):
- 194         x = vit_block(x, _sub(p, f"transformer_blocks.{i}."), heads, eps, rotary)
- 195     x = mx.fast.layer_norm(x.astype(mx.float32), p["norm_out.weight"].astype(mx.float32),
- 196                            p["norm_out.bias"].astype(mx.float32), eps)
- 197     x = _lin(x.astype(p["proj_out.weight"].dtype), p, "proj_out")[:, :n]
- 198     x = x.reshape(b, f, h, w, out_channels, patch_size_t, patch_size, patch_size)
- 199     x = x.transpose(0, 1, 5, 2, 6, 3, 7, 4)  # (b, f, pt, h, p, w, p, c)
- 200     return x.reshape(b, f * patch_size_t, h * patch_size, w * patch_size, out_channels)
+ 183 def vit_decoder(
+ 184     z: mx.array, p: dict, num_layers: int, heads: int, patch_size: int, patch_size_t: int, out_channels: int,
+ 185     rope_dim: int, rope_theta: float = 100.0, eps: float = 1e-5,
+ 186 ) -> mx.array:
+ 187     """MiniMaxH3VideoViTDecoder3d. z: channels-last latents (B, F, H, W, C) -> pixels (B, F*pt, H*p, W*p, out)."""
+ 188     b, f, h, w, c = z.shape
+ 189     x = _lin(z.reshape(b, f * h * w, c), p, "proj_in")
+ 190     n = x.shape[1]
+ 191     regs = mx.broadcast_to(p["register_tokens"].astype(x.dtype), (b, *p["register_tokens"].shape[1:]))
+ 192     x = mx.concatenate([x, regs, mx.zeros((b, 1, x.shape[-1]), dtype=x.dtype)], axis=1)
+ 193     rotary = vit_rope(vit_positions(f, h, w, regs.shape[1] + 1), vit_rope_inv_freq(rope_dim, rope_theta))
+ 194     for i in range(num_layers):
+ 195         x = vit_block(x, _sub(p, f"transformer_blocks.{i}."), heads, eps, rotary)
+ 196     x = mx.fast.layer_norm(x.astype(mx.float32), p["norm_out.weight"].astype(mx.float32),
+ 197                            p["norm_out.bias"].astype(mx.float32), eps)
+ 198     x = _lin(x.astype(p["proj_out.weight"].dtype), p, "proj_out")[:, :n]
+ 199     x = x.reshape(b, f, h, w, out_channels, patch_size_t, patch_size, patch_size)
+ 200     x = x.transpose(0, 1, 5, 2, 6, 3, 7, 4)  # (b, f, pt, h, p, w, p, c)
+ 201     return x.reshape(b, f * patch_size_t, h * patch_size, w * patch_size, out_channels)
 ```
 
-The conditioning recipe: ImageNet-normalised pixels, the posterior **sampled** from a fresh seed-42 generator, a
-float16 round trip, then normalisation by the latent statistics:
+**The conditioning recipe for visual references:**
+
+1. normalise the pixels with ImageNet's mean and standard deviation;
+2. **sample** the posterior with a fresh seed-42 generator;
+3. round to float16 and back;
+4. normalise by the latent statistics.
 
 📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/encoders.py:102-136`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/encoders.py#L102-L136)
 ```python
@@ -1836,13 +2310,125 @@ float16 round trip, then normalisation by the latent statistics:
  240     return (lat - mx.array(latents_mean)) / mx.array(latents_std)
 ```
 
+**Tests.** `tests/test_vae_ops.py` and `tests/test_vae.py` use reduced configs: spatial ratio 4, 3 levels and 32 px
+tiles with 8 px overlap, chosen so tiling, the single-frame branch, chunking and decode padding all run. In their
+reviews, one ran ratio 16 with the real 256/64 tiles and another a 124-frame encode at the real ratios;
+those probes live in their review worktrees, not in this repo's suite.
+
 ---
 
 ## 7. The audio VAE
 
-A DAC encoder and a BigVGAN decoder on mono 32 kHz audio (stereo is a batch of two), kept in float32: diffusers notes
-that bf16 decodes come out about 20 dB quieter. The alias-free SnakeBeta activation upsamples ×2, activates, then
-low-passes back down:
+A DAC encoder and a BigVGAN decoder on mono 32 kHz audio; stereo is a batch of two. It is kept in float32: diffusers
+notes that bf16 decodes come out about 20 dB quieter.
+
+**Visual and audio references differ:** visual references use a **sampled** posterior (§6), but reference audio uses
+the posterior **mean**. diffusers' reference encoder does both, and also snaps a video reference down to the nearest
+`17n + 5` frames (`max(1, (n − 5) // 17) · 17 + 5`):
+
+📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/encoders.py:715-770`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/encoders.py#L715-L770)
+```python
+ 715     @torch.no_grad()
+ 716     def __call__(
+ 717         self, components: MiniMaxH3ModularPipeline, state: PipelineState
+ 718     ) -> tuple[MiniMaxH3ModularPipeline, PipelineState]:
+ 719         block_state = self.get_block_state(state)
+ 720         device = components._execution_device
+ 721
+ 722         audio_latents_mean = torch.tensor(components.audio_vae.config.latents_mean).view(1, 1, -1)
+ 723         audio_latents_std = torch.tensor(components.audio_vae.config.latents_std).view(1, 1, -1)
+ 724
+ 725         condition_latents, audio_condition_latents = [], []
+ 726         for reference in block_state.normalized_references:
+ 727             if reference.kind == "image":
+ 728                 pixels = torch.from_numpy(np.array(reference.image)).to(device).permute(2, 0, 1)[None, :, None]
+ 729                 condition_latents.append(
+ 730                     encode_vae_condition(
+ 731                         components.vae,
+ 732                         pixels,
+ 733                         components.pixel_mean,
+ 734                         components.pixel_std,
+ 735                         components.keyframe_encode_seed,
+ 736                     )
+ 737                 )
+ 738             elif reference.kind == "video":
+ 739                 # Snap *down* to `17 * n + 5` so the VAE encodes without padding; this only bites when the reference
+ 740                 # is shorter than the target, whose own frame count already has that form.
+ 741                 frames_per_chunk = components.vae_frames_per_chunk
+ 742                 latents_per_chunk = components.vae_latents_per_chunk
+ 743                 num_frames = reference.frames.shape[0]
+ 744                 num_frames = (
+ 745                     max(1, (num_frames - latents_per_chunk) // frames_per_chunk) * frames_per_chunk + latents_per_chunk
+ 746                 )
+ 747                 pixels = torch.from_numpy(reference.frames[:num_frames].copy()).to(device).permute(3, 0, 1, 2)[None]
+ 748                 condition_latents.append(
+ 749                     encode_vae_condition(
+ 750                         components.vae,
+ 751                         pixels,
+ 752                         components.pixel_mean,
+ 753                         components.pixel_std,
+ 754                         components.keyframe_encode_seed,
+ 755                     )
+ 756                 )
+ 757
+ 758             if reference.has_audio:
+ 759                 posterior = components.audio_vae.encode(reference.audio.to(device)[:, None], return_dict=False)[0]
+ 760                 # Channel-major rows: the two stereo channels are two batch items of the mono audio VAE. Soundtracks
+ 761                 # take the posterior *mean*, and are never sampled.
+ 762                 latents = posterior.mode().float().cpu().transpose(1, 2)
+ 763                 normalized = (latents - audio_latents_mean) / audio_latents_std
+ 764                 audio_condition_latents.append(normalized.reshape(-1, components.audio_latent_channels))
+ 765
+ 766         block_state.condition_latents = condition_latents
+ 767         block_state.audio_condition_latents = audio_condition_latents
+ 768
+ 769         self.set_block_state(state, block_state)
+ 770         return components, state
+```
+📍 `src/h3mlx/pipeline.py:181-205`
+```python
+ 181 def encode_references(c: Components, refs):
+ 182     cond, audio_rows = [], []
+ 183     a_mean = mx.array(c.audio_latents_mean)
+ 184     a_std = mx.array(c.audio_latents_std)
+ 185     for r in refs:
+ 186         if r.kind in ("image", "video"):
+ 187             if r.kind == "image":
+ 188                 px = np.asarray(r.image)[None, None]  # (1, 1, H, W, 3)
+ 189             else:
+ 190                 n = r.frames.shape[0]
+ 191                 n = max(1, (n - R.LATENTS_PER_CHUNK) // R.FRAMES_PER_CHUNK) * R.FRAMES_PER_CHUNK + R.LATENTS_PER_CHUNK
+ 192                 px = r.frames[:n][None]
+ 193             fresh = Noise(ENCODE_SEED)  # a fresh seed-42 generator per condition, as the release does
+ 194
+ 195             def noise_cl(shape_cl, fresh=fresh):  # torch draws (B, C, F, H, W); hand back channels-last
+ 196                 b, f, h, w, ch = shape_cl
+ 197                 return mx.array(fresh((b, ch, f, h, w)).transpose(0, 2, 3, 4, 1))
+ 198
+ 199             cond.append(encode_condition(c.vae, mx.array(px), PIXEL_MEAN, PIXEL_STD, c.vae_latents_mean,
+ 200                                          c.vae_latents_std, noise_cl))
+ 201         if r.has_audio:
+ 202             wave = mx.array(r.audio[:, :, None])  # (2, samples, 1): stereo channels as two batch items
+ 203             lat = c.audio_vae.encode_mean(wave)  # (2, frames, 32)
+ 204             audio_rows.append(((lat - a_mean) / a_std).reshape(-1, lat.shape[-1]))
+ 205     return cond, audio_rows
+```
+📍 `src/h3mlx/audio_vae.py:202-209`
+```python
+ 202     def encode_mean(self, wave: mx.array) -> mx.array:
+ 203         """(B, samples, 1) mono -> posterior mean (B, samples / hop, latent_channels); right-pads to the hop."""
+ 204         pad = math.ceil(wave.shape[1] / self.hop) * self.hop - wave.shape[1]
+ 205         if pad:
+ 206             wave = mx.pad(wave, [(0, 0), (0, pad), (0, 0)])
+ 207         h = encoder(wave, _sub(self.p, "encoder."), self.cfg["encoder_rates"])
+ 208         h = pre_block(h, _sub(self.p, "pre_block."), self.cfg["num_attention_heads"], self.cfg["latent_channels"])
+ 209         return conv1d(h, self.p, "mean_proj")
+```
+
+`AudioVAE.encode_mean` takes channels-last `(B, samples, 1)`, where diffusers takes `(B, 1, samples)`.
+
+**The alias-free SnakeBeta activation** upsamples ×2, applies the activation, then low-passes back down. The port uses
+MLX's grouped `conv_transpose1d` for the upsampling and reads the Kaiser filters from the checkpoint's own buffers:
 
 📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3_audio.py:185-191`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3_audio.py#L185-L191)
 ```python
@@ -1854,7 +2440,7 @@ low-passes back down:
  190         )
  191         return hidden_states[..., self.pad_left : -self.pad_right]
 ```
-📍 `src/h3mlx/audio_vae.py:73-86`
+📍 `src/h3mlx/audio_vae.py:73-82`
 ```python
   73 def upsample(x, filt: mx.array, ratio: int):
   74     """ratio * conv_transpose1d(replicate-pad(x, pad), filter, stride=ratio, groups=C), then crop."""
@@ -1863,29 +2449,22 @@ low-passes back down:
   77     pad_left = pad * ratio + (k - ratio) // 2
   78     pad_right = pad * ratio + (k - ratio + 1) // 2
   79     x = mx.pad(x, [(0, 0), (pad, pad), (0, 0)], mode="edge")
-  80     b, n, c = x.shape
-  81     # transposed depthwise conv as zero-insertion + conv with the flipped kernel
-  82     up = mx.zeros((b, (n - 1) * ratio + 1, c), dtype=x.dtype)
-  83     up[:, ::ratio] = x
-  84     up = mx.pad(up, [(0, 0), (k - 1, k - 1), (0, 0)])
-  85     y = ratio * mx.conv1d(up, _depthwise(filt.reshape(-1)[::-1], c), groups=c)
-  86     return y[:, pad_left : y.shape[1] - pad_right]
+  80     c = x.shape[-1]
+  81     y = ratio * mx.conv_transpose1d(x, _depthwise(filt, c), stride=ratio, groups=c)
+  82     return y[:, pad_left : y.shape[1] - pad_right]
 ```
-
-MLX's `conv_transpose1d` has no grouped form here, so the port inserts zeros and convolves with the flipped kernel.
-The Kaiser filters are read from the checkpoint's own buffers instead of being recomputed:
-
-📍 `src/h3mlx/audio_vae.py:89-94`
+📍 `src/h3mlx/audio_vae.py:85-90`
 ```python
-  89 def activation1d(x, p, ratio: int = 2):
-  90     """Alias-free SnakeBeta: upsample x2, activate, low-pass downsample x2. Filters are the checkpoint's buffers
-  91     (`upsample.filter`, `downsample.lowpass.filter`), Kaiser-sinc, kernel 12."""
-  92     x = upsample(x, p["upsample.filter"], ratio)
-  93     x = snake_beta(x, p["act.alpha"], p["act.beta"])
-  94     return lowpass(x, p["downsample.lowpass.filter"], ratio)
+  85 def activation1d(x, p, ratio: int = 2):
+  86     """Alias-free SnakeBeta: upsample x2, activate, low-pass downsample x2. Filters are the checkpoint's buffers
+  87     (`upsample.filter`, `downsample.lowpass.filter`), Kaiser-sinc, kernel 12."""
+  88     x = upsample(x, p["upsample.filter"], ratio)
+  89     x = snake_beta(x, p["act.alpha"], p["act.beta"])
+  90     return lowpass(x, p["downsample.lowpass.filter"], ratio)
 ```
 
-The causal attention in `pre_block` mean-pools its heads away, then adaptively average-pools the head dimension:
+**Attention in `pre_block`.** The causal attention mean-pools its heads away, then adaptively average-pools the head
+dimension:
 
 📍 [`diffusers:src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3_audio.py:315-338`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3_audio.py#L315-L338)
 ```python
@@ -1914,19 +2493,19 @@ The causal attention in `pre_block` mean-pools its heads away, then adaptively a
  337         hidden_states = F.adaptive_avg_pool1d(hidden_states, attn.out_dim)
  338         return attn.proj(hidden_states)
 ```
-📍 `src/h3mlx/audio_vae.py:155-162`
+📍 `src/h3mlx/audio_vae.py:151-158`
 ```python
- 155 def causal_attention(x, p, heads, out_dim):
- 156     b, n, c = x.shape
- 157     bias = mx.concatenate([p["q_bias"], mx.zeros_like(p["q_bias"]), p["v_bias"]])
- 158     qkv = (x @ p["qkv.weight"].T + bias).reshape(b, n, 3, heads, c // heads)
- 159     q, k, v = (qkv[:, :, i].transpose(0, 2, 1, 3) for i in range(3))
- 160     o = mx.fast.scaled_dot_product_attention(q, k, v, scale=1.0 / math.sqrt(c // heads), mask="causal")
- 161     o = o.transpose(0, 2, 1, 3).mean(axis=2)  # heads mean-pooled away
- 162     return lin(adaptive_avg_pool_last(o, out_dim), p, "proj")
+ 151 def causal_attention(x, p, heads, out_dim):
+ 152     b, n, c = x.shape
+ 153     bias = mx.concatenate([p["q_bias"], mx.zeros_like(p["q_bias"]), p["v_bias"]])
+ 154     qkv = (x @ p["qkv.weight"].T + bias).reshape(b, n, 3, heads, c // heads)
+ 155     q, k, v = (qkv[:, :, i].transpose(0, 2, 1, 3) for i in range(3))
+ 156     o = mx.fast.scaled_dot_product_attention(q, k, v, scale=1.0 / math.sqrt(c // heads), mask="causal")
+ 157     o = o.transpose(0, 2, 1, 3).mean(axis=2)  # heads mean-pooled away
+ 158     return lin(adaptive_avg_pool_last(o, out_dim), p, "proj")
 ```
 
-Weight-norm pairs (`weight_g`, `weight_v`) are folded once at load:
+**Weights.** Weight-norm pairs are folded once. The transposed-convolution weights get their own layout rule:
 
 📍 `src/h3mlx/audio_vae.py:17-31`
 ```python
@@ -1946,18 +2525,46 @@ Weight-norm pairs (`weight_g`, `weight_v`) are folded once at load:
   30             out[k] = np.asarray(v)
   31     return out
 ```
+📍 `src/h3mlx/audio_vae.py:34-42`
+```python
+  34 def to_mlx_layout(sd: dict, transpose_conv_prefixes=("decoder.ups.",)) -> dict:
+  35     """numpy torch-layout weights -> MLX arrays in MLX conv layout. 3-D `weight`s are convs."""
+  36     out = {}
+  37     for k, v in sd.items():
+  38         a = np.asarray(v, dtype=np.float32) if v.dtype != np.float32 else np.asarray(v)
+  39         if k.endswith("weight") and a.ndim == 3 and not k.endswith("filter"):
+  40             a = a.transpose(1, 2, 0) if k.startswith(transpose_conv_prefixes) else a.transpose(0, 2, 1)
+  41         out[k] = mx.array(a)
+  42     return out
+```
 
-Reference soundtracks are resampled to 32 kHz with torchaudio's sinc resampler, as diffusers does. torchaudio's
-current wheels pin an older torch than ours, so `src/h3mlx/resample.py` carries torchaudio 2.9.1's two functions
-verbatim under its BSD-2 licence. `tests/test_resample.py` checks it against real torchaudio outputs.
+**Resampling.** Reference soundtracks are resampled to 32 kHz with torchaudio's sinc resampler, as diffusers does.
+torchaudio 2.9.1 requires torch 2.9.1 and we run torch 2.15, so `src/h3mlx/resample.py` carries its two resampling
+functions verbatim under torchaudio's BSD-2 licence. `tests/test_resample.py` checks the copy against outputs from
+real torchaudio 2.9.1 at 48, 44.1, 22.05 and 16 kHz.
+
+**Tests.** `tests/test_audio_vae.py` covers a tiny config. A review also ran the release's hop of 800 in
+its review.
+
+This section is a partial tour. The full DAC encoder and BigVGAN decoder are `encoder`, `pre_block`, `amp_block` and
+`bigvgan` in `src/h3mlx/audio_vae.py`.
 
 ---
 
 ## 8. ref2va end to end
 
-The setup step validates the request (canvas multiples, at most 9/3/3/12 references, not audio alone), resolves the
-canvas (16:9 with a 768 short edge by default; image references get their **own** 2048 px short edge) and normalises
-media:
+**Setup** validates the request:
+
+- the canvas must be a multiple of 32;
+- at most 9 images, 3 videos and 3 audio clips, 12 in total;
+- audio cannot be the only reference.
+
+It then resolves the canvas (by default 1344×768), aligns the frame count to `17n + 5`, and normalises the media:
+images to their own 2048 px short edge, videos onto 24 fps and their own canvas, audio onto 32 kHz.
+
+**Accepted inputs differ.** The port accepts PIL images, uint8 numpy video `(T, H, W, 3)` and numpy audio
+`(channels, samples)`. diffusers also accepts tensors and other array layouts, and lets the caller supply their own
+latents; the port does not.
 
 📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/before_encoder.py:387-522`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/before_encoder.py#L387-L522)
 ```python
@@ -2140,8 +2747,8 @@ media:
  152     return height, width, num_frames, out
 ```
 
-The noise draws happen in one fixed order from **one** generator: each condition, then the target video tensor, then
-the target audio rows. That order is part of what a seed reproduces:
+**Noise draws** come from one generator in a fixed order: each condition, then the target video tensor, then the
+target audio rows. That order is part of what a seed reproduces:
 
 📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/before_denoise.py:954-983`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/before_denoise.py#L954-L983)
 ```python
@@ -2244,8 +2851,49 @@ the target audio rows. That order is part of what a seed reproduces:
  248     audio_rows = mx.concatenate(ref_audio + [mx.array(gen((na * AUDIO_CHANNELS, audio_ch)))])
 ```
 
-And the decode, which reverses the latent normalisation, then ImageNet's:
+**After denoising**, diffusers splits it into three steps:
 
+1. drop the reference rows and unpack the video rows;
+2. decode the video, then undo the latent and ImageNet normalisations;
+3. undo the audio latent normalisation and decode.
+
+The port does all three in one block:
+
+📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/decoders.py:98-129`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/decoders.py#L98-L129)
+```python
+  98     @torch.no_grad()
+  99     def __call__(
+ 100         self, components: MiniMaxH3ModularPipeline, state: PipelineState
+ 101     ) -> tuple[MiniMaxH3ModularPipeline, PipelineState]:
+ 102         block_state = self.get_block_state(state)
+ 103         patch_t, patch_h, patch_w = components.patch_size
+ 104         channels = components.vae_latent_channels
+ 105
+ 106         # The inverse of the patchify in the prepare-latents step: rows are frame-major then row-major.
+ 107         rows = block_state.latents[block_state.num_condition_video_rows :]
+ 108         rows = rows.reshape(
+ 109             -1,
+ 110             block_state.num_latent_frames // patch_t,
+ 111             block_state.latent_height // patch_h,
+ 112             block_state.latent_width // patch_w,
+ 113             channels,
+ 114             patch_t,
+ 115             patch_h,
+ 116             patch_w,
+ 117         )
+ 118         rows = rows.permute(0, 4, 1, 5, 2, 6, 3, 7)
+ 119         block_state.latents = rows.reshape(
+ 120             -1, channels, block_state.num_latent_frames, block_state.latent_height, block_state.latent_width
+ 121         ).contiguous()
+ 122
+ 123         # Audio rows are channel-major, and the mono audio VAE takes the two stereo channels as two batch items.
+ 124         audio_rows = block_state.audio_latents[block_state.num_condition_audio_rows :]
+ 125         audio_rows = audio_rows.reshape(components.audio_channels, block_state.num_audio_latents, audio_rows.shape[-1])
+ 126         block_state.audio_latents = audio_rows.permute(0, 2, 1).contiguous()
+ 127
+ 128         self.set_block_state(state, block_state)
+ 129         return components, state
+```
 📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/decoders.py:173-197`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/decoders.py#L173-L197)
 ```python
  173     @torch.no_grad()
@@ -2274,6 +2922,26 @@ And the decode, which reverses the latent normalisation, then ImageNet's:
  196         self.set_block_state(state, block_state)
  197         return components, state
 ```
+📍 [`diffusers:src/diffusers/modular_pipelines/minimax_h3/decoders.py:240-256`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/modular_pipelines/minimax_h3/decoders.py#L240-L256)
+```python
+ 240     @torch.no_grad()
+ 241     def __call__(
+ 242         self, components: MiniMaxH3ModularPipeline, state: PipelineState
+ 243     ) -> tuple[MiniMaxH3ModularPipeline, PipelineState]:
+ 244         block_state = self.get_block_state(state)
+ 245         device = components._execution_device
+ 246
+ 247         audio_latents_mean = torch.tensor(components.audio_vae.config.latents_mean, device=device).view(1, -1, 1)
+ 248         audio_latents_std = torch.tensor(components.audio_vae.config.latents_std, device=device).view(1, -1, 1)
+ 249         audio_latents = block_state.audio_latents * audio_latents_std + audio_latents_mean
+ 250
+ 251         audio = components.audio_vae.decode(audio_latents, return_dict=False)[0]
+ 252         block_state.audio = audio.float().permute(1, 0, 2)
+ 253         block_state.sampling_rate = components.audio_sampling_rate
+ 254
+ 255         self.set_block_state(state, block_state)
+ 256         return components, state
+```
 📍 `src/h3mlx/pipeline.py:257-264`
 ```python
  257     v_lat = ops.unpatchify(v[layout.num_condition_video_rows :], lat_ch, lf, lh, lw, patch)  # (1, C, F, H, W)
@@ -2286,16 +2954,27 @@ And the decode, which reverses the latent normalisation, then ImageNet's:
  264     audio = c.audio_vae.decode(a_lat)[:, :, 0]  # (2, samples)
 ```
 
-`tests/test_pipeline_e2e.py` runs a whole ref2va request through diffusers' own `MiniMaxH3Blocks` and through
-`h3mlx.pipeline.ref2va`. The components are tiny random models plus the released tokenizer and processor; the
-references are an image and a video with a soundtrack; 3 steps. Decoded video agrees to 3.6e-7 and audio to 1.5e-7.
+**End-to-end test.** `tests/test_pipeline_e2e.py` runs one whole ref2va request through diffusers' own
+`MiniMaxH3Blocks` and through `h3mlx.pipeline.ref2va`:
+
+- tiny random f32 models, plus the released tokenizer and processor;
+- an image reference and a video reference with a soundtrack;
+- 3 grid points, so 2 model calls.
+
+The test requires the decoded video and audio to agree within 2e-3. Observed: 3.6e-7 for video and 1.4e-7
+for audio. This is one tiny f32 configuration, not the bf16 release.
 
 ---
 
 ## 9. What is not ported, or not yet
 
-- **Sparse attention, Turbo LoRAs, quantisation.** These are optional speedups. A dense bf16 baseline comes first.
-- **t2va and fl2va pipelines.** The packers and ops are here and tested (`build_packed_sequence`); only ref2va is
+- **LoRA.** diffusers has a MiniMax H3 LoRA loader that routes each LoRA to `transformer` or `transformer_ref`; the
+  port has none yet.
+- **Speedups.** Sparse attention and quantisation: a dense bf16 baseline comes first.
+- **Caller-supplied inputs.** diffusers accepts caller-supplied latents and tensor inputs; the port takes the input
+  types listed in §8 only.
+- **t2va and fl2va pipelines.** Their packers and ops are here and tested (`build_packed_sequence`); only ref2va is
   assembled end to end.
-- **Real weights.** Everything above was checked with tiny random weights and the release's configs, index and
-  tokenizer. The first run with the released 66 GB `transformer_ref` and 67 GB `text_encoder` is still ahead.
+- **Real weights.** Everything above was checked with tiny random weights and the release's configs, index, tokenizer
+  and processor. The first run with the released 66 GB `transformer_ref` and 67 GB `text_encoder` is still ahead, and
+  with it every real number for memory, speed and quality.
