@@ -99,3 +99,25 @@ def test_release_text_encoder_config_parses():
     assert t.rope_theta == 5000000 and t.rope_scaling["mrope_section"] == [24, 20, 20] and t.rope_scaling["mrope_interleaved"]
     assert (v.depth, v.hidden_size, v.out_hidden_size, v.patch_size, v.deepstack_visual_indexes) == (27, 1152, 5120, 16, [8, 16, 24])
     assert (c.image_token_id, c.video_token_id) == (151655, 151656)
+
+
+
+def test_eval_each_layer_keeps_outputs_and_attributes(tmp_path):
+    """The per-layer evaluation must not change the hidden state, and mlx-vlm's own `layers[0].self_attn` lookup must
+    still work."""
+    from test_text_encoder_tiny import IDS, ROPE, TEXT, VISION
+    from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration
+
+    torch.manual_seed(9)
+    hf = Qwen3VLForConditionalGeneration(
+        Qwen3VLConfig(text_config=dict(TEXT, rope_parameters=dict(ROPE, rope_theta=5e6)), vision_config=VISION, **IDS)
+    ).eval().float()
+    hf.save_pretrained(tmp_path / "te")
+    model, encode = load.load_text_encoder(tmp_path / "te", keep_layers=3)
+    layers = model.language_model.model.layers
+    assert all(type(layer).__name__.endswith("EvalEach") for layer in layers)
+    assert layers[0].self_attn is not None
+    ids = [151643, 9707, 11, 1879, 0, 220]
+    with torch.no_grad():
+        want = hf.model(input_ids=torch.tensor([ids]), output_hidden_states=True, use_cache=False).hidden_states[3]
+    assert_close(encode(ids, None), want, atol=1e-4, rtol=1e-4, what="hidden state with per-layer eval")

@@ -333,6 +333,7 @@ def dit_forward(
     #@@end project-and-scatter
 
     #@@start adaln-rows-and-blocks
+    mx.eval(x)  # projections + refiner + scatter as their own graph, before the first block
     if cache is None:
         temb = timestep_embedding(timestep, _sub(p, "time_embedder."), cfg["freq_dim"])
         t_rows = timestep_indices

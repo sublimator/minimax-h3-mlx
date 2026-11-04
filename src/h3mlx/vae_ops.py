@@ -193,6 +193,7 @@ def vit_decoder(
     rotary = vit_rope(vit_positions(f, h, w, regs.shape[1] + 1), vit_rope_inv_freq(rope_dim, rope_theta))
     for i in range(num_layers):
         x = vit_block(x, _sub(p, f"transformer_blocks.{i}."), heads, eps, rotary)
+        mx.eval(x)  # 36 f32 blocks per tile: keep each one its own GPU graph
     x = mx.fast.layer_norm(x.astype(mx.float32), p["norm_out.weight"].astype(mx.float32),
                            p["norm_out.bias"].astype(mx.float32), eps)
     x = _lin(x.astype(p["proj_out.weight"].dtype), p, "proj_out")[:, :n]

@@ -55,7 +55,8 @@ def load_transformer(d) -> tuple[dict, dict]:
 
 def load_vae(d, **tiling) -> tuple[VideoVAE, tuple, tuple]:
     cfg = _config(d)
-    p = {k: (V.conv3d_weight(v) if v.ndim == 5 else v) for k, v in load_safetensors(d).items()}
+    # contiguous once: a transposed view would be copied again inside every tile's graph (121-209 tiles per reference)
+    p = {k: (mx.contiguous(V.conv3d_weight(v)) if v.ndim == 5 else v) for k, v in load_safetensors(d).items()}
     return VideoVAE(p, VaeConfig.from_diffusers(cfg, **tiling)), tuple(cfg["latents_mean"]), tuple(cfg["latents_std"])
 
 
@@ -81,6 +82,26 @@ def qwen_params(raw: dict) -> dict:
     params["vision_config"] = dict(raw["vision_config"], model_type="qwen3_vl")
     params.setdefault("vocab_size", tc["vocab_size"])
     return params
+
+
+_EVAL_EACH: dict = {}
+
+
+def eval_each_layer(layers) -> None:
+    """Make every decoder layer evaluate its output, so the 50-layer pass is 50 small GPU graphs instead of one. A single
+    long graph at 7,000+ tokens tripped macOS's GPU watchdog (kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+    in a pre-flight probe. The layer keeps its class's attributes and parameters: only `__call__` changes."""
+    for layer in layers:
+        base = type(layer)
+        if base in _EVAL_EACH.values():
+            continue
+        if base not in _EVAL_EACH:
+            def call(self, *a, _base=base, **k):
+                out = _base.__call__(self, *a, **k)
+                mx.eval(out)
+                return out
+            _EVAL_EACH[base] = type(base.__name__ + "EvalEach", (base,), {"__call__": call})
+        layer.__class__ = _EVAL_EACH[base]
 
 
 def load_text_encoder(d, keep_layers: int = 50, dtype=None):
@@ -116,6 +137,7 @@ def load_text_encoder(d, keep_layers: int = 50, dtype=None):
     missing = want - set(w)
     if missing:
         raise ValueError(f"text encoder weights missing: {sorted(missing)[:6]} (+{max(0, len(missing) - 6)})")
+    eval_each_layer(model.language_model.model.layers)
 
     def encode(token_ids, vision_inputs):
         kw = {k: mx.array(np.asarray(v)) for k, v in (vision_inputs or {}).items()}
