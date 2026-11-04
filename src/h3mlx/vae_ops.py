@@ -52,7 +52,9 @@ def group_norm_per_frame(x: mx.array, groups: int, weight: mx.array, bias: mx.ar
 
 
 def silu(x: mx.array) -> mx.array:
-    return x * mx.sigmoid(x)
+    """Single rounding like torch: float32 opmath, cast back."""
+    xf = x.astype(mx.float32)
+    return (xf * mx.sigmoid(xf)).astype(x.dtype)
 
 
 def resnet_block3d(x: mx.array, p: dict, groups: int, eps: float = 1e-6) -> mx.array:

@@ -8,7 +8,7 @@ import torch
 
 def to_mx(t: torch.Tensor) -> mx.array:
     if t.dtype == torch.bfloat16:
-        return mx.array(t.float().numpy()).astype(mx.bfloat16)
+        return mx.array(t.detach().float().numpy()).astype(mx.bfloat16)
     return mx.array(t.detach().numpy())
 
 

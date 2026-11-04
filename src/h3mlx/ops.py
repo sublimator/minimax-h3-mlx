@@ -45,14 +45,17 @@ def apply_rotary(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
 
 
 def rms_norm(x: mx.array, weight: mx.array | None, eps: float) -> mx.array:
-    """torch.nn.RMSNorm over the last axis."""
+    """torch.nn.RMSNorm over the last axis. Output keeps x's dtype, as torch does with a wider affine weight."""
     if weight is None:
         weight = mx.ones((x.shape[-1],), dtype=x.dtype)
-    return mx.fast.rms_norm(x, weight, eps)
+    return mx.fast.rms_norm(x, weight, eps).astype(x.dtype)
 
 
 def silu(x: mx.array) -> mx.array:
-    return x * mx.sigmoid(x)
+    """torch's silu rounds once: compute in float32, cast back (a bf16 x * sigmoid(x) is off by one ulp at ~30% of
+    inputs)."""
+    xf = x.astype(mx.float32)
+    return (xf * mx.sigmoid(xf)).astype(x.dtype)
 
 
 def linear(x: mx.array, w: mx.array, b: mx.array | None = None) -> mx.array:
@@ -214,6 +217,8 @@ def torch_linspace_f32(start: float, end: float, steps: int) -> np.ndarray:
     """torch.linspace(start, end, steps, dtype=float32) bit for bit (CPU, arm64): float32 step, the first half filled
     from `start` and the second from `end`, each as one fused multiply-add (exact product, single rounding).
     np.linspace differs by 1 ulp at e.g. steps=50."""
+    if steps < 2:
+        raise ValueError(f"steps must be >= 2, got {steps}")
     start32, end32 = np.float32(start), np.float32(end)
     step = np.float32((end32 - start32) / np.float32(steps - 1))
     i = np.arange(steps, dtype=np.float64)
@@ -227,6 +232,10 @@ def torch_linspace_f32(start: float, end: float, steps: int) -> np.ndarray:
 
 def flow_sigmas(num_inference_steps: int, shift: float) -> np.ndarray:
     """linspace(1, 0, n) in float32, exponential shift, consecutive duplicates collapsed. Terminal 0 included."""
+    if num_inference_steps is None or num_inference_steps < 2:
+        raise ValueError(f"num_inference_steps must be >= 2, got {num_inference_steps}")
+    if shift <= 0:
+        raise ValueError(f"shift must be positive, got {shift}")
     base = torch_linspace_f32(1.0, 0.0, num_inference_steps)
     shift32 = np.float32(shift)
     sig = (shift32 * base / (np.float32(1) + (shift32 - np.float32(1)) * base)).astype(np.float32)
