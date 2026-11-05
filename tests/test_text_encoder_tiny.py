@@ -3,19 +3,18 @@ way diffusers 0.42.1 runs it (`encoders.get_qwen3vl_prompt_embeds`: `text_encode
 `hidden_states[layer]`), on a tiny random config that keeps the released features: interleaved mrope, deepstack,
 GQA, a picture and a video in one ref2va presentation built with the released tokenizer and processor."""
 
-from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
 import pytest
 import torch
-from conftest import assert_close
+from conftest import RELEASE, assert_close
 from diffusers.modular_pipelines.minimax_h3.encoders import get_qwen3vl_prompt_embeds
 
 from h3mlx.packing import Ref
 from h3mlx.presentation import build_presentation
 
-HF = Path(__file__).resolve().parents[2] / "ref-hf"
+HF = RELEASE
 LAYER = 3
 
 TEXT = dict(vocab_size=151936, hidden_size=64, intermediate_size=128, num_hidden_layers=4, num_attention_heads=4,
@@ -31,7 +30,7 @@ IDS = dict(image_token_id=151655, video_token_id=151656, vision_start_token_id=1
 @pytest.fixture(scope="module")
 def setup():
     if not (HF / "processor").exists():
-        pytest.skip("released processor not present")
+        pytest.skip("release processor not present (run scripts/fetch_test_fixtures.py)")
     from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 
     torch.manual_seed(5)

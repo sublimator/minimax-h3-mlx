@@ -1,22 +1,22 @@
-"""The ref2va presentation against diffusers 0.42.1, with the released Qwen tokenizer (ref-hf/tokenizer @ 42ed227)."""
+"""The ref2va presentation against diffusers 0.42.1, with the released Qwen tokenizer (MiniMax-H3 @ 42ed227)."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from diffusers.modular_pipelines.minimax_h3.encoders import MiniMaxH3Ref2VATextEncoderStep as Step
+from conftest import RELEASE
 from transformers import AutoTokenizer
 
 from h3mlx.packing import Ref
 from h3mlx.presentation import build_presentation, sample_video_condition_frames
 
-TOKENIZER_DIR = Path(__file__).resolve().parents[2] / "ref-hf" / "tokenizer"
+TOKENIZER_DIR = RELEASE / "tokenizer"
 
 
 @pytest.fixture(scope="module")
 def tok():
     if not TOKENIZER_DIR.exists():
-        pytest.skip("released tokenizer not present (../ref-hf/tokenizer beside this repo)")
+        pytest.skip("release tokenizer not present (run scripts/fetch_test_fixtures.py)")
     return AutoTokenizer.from_pretrained(str(TOKENIZER_DIR))
 
 

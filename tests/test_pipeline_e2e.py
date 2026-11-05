@@ -5,16 +5,15 @@ Tiny: Qwen3-VL with 52 layers (MiniMax reads hidden_states[50]) of width 64, a 2
 (ratio 4 spatial, 4 temporal), a hop-8 audio VAE. Reference images at a 64 px short edge, a 64x64 canvas, 124 frames.
 """
 
-from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
 import pytest
 import torch
+from conftest import RELEASE as HF
 from conftest import state_mx
 from PIL import Image
 
-HF = Path(__file__).resolve().parents[2] / "ref-hf"
 
 
 def build():
@@ -115,7 +114,7 @@ def run_ours(t, prompt, image, frames, wave, steps, seed):
     return ref2va(c, prompt, refs, num_frames=124, height=64, width=64, num_inference_steps=steps, seed=seed)
 
 
-@pytest.mark.skipif(not (HF / "processor").exists(), reason="released tokenizer/processor not present")
+@pytest.mark.skipif(not (HF / "processor").exists(), reason="release fixtures not present (scripts/fetch_test_fixtures.py)")
 def test_ref2va_end_to_end_matches_diffusers():
     t = build()
     image, frames, wave = references(np.random.default_rng(3))

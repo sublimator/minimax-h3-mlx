@@ -1,9 +1,25 @@
-"""Helpers: torch <-> mlx, and a closeness check that reports the worst error."""
+"""Helpers: torch <-> mlx, a closeness check that reports the worst error, and the release fixtures."""
+
+import os
+from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
 import pytest
 import torch
+
+# Release metadata some tests need (configs, weight index, tokenizer, processor, HyperFlow header and manifest; no
+# weights). Not shipped with this repo: `uv run python scripts/fetch_test_fixtures.py` writes it to tests/data/release,
+# or point H3MLX_FIXTURES at a copy. Tests that need it are skipped without it.
+FIXTURES = Path(os.environ.get("H3MLX_FIXTURES") or Path(__file__).parent / "data" / "release")
+RELEASE = FIXTURES / "MiniMax-H3"
+
+
+def fixture(*parts: str) -> Path:
+    p = FIXTURES.joinpath(*parts)
+    if not p.exists():
+        pytest.skip(f"release fixture not present: {p} (run scripts/fetch_test_fixtures.py)")
+    return p
 
 
 def to_mx(t: torch.Tensor) -> mx.array:

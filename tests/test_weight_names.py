@@ -3,22 +3,18 @@ name, with no renaming. Uses the shipped config and safetensors index only (test
 
 import json
 import re
-from pathlib import Path
 
 import mlx.core as mx
 import torch
-from conftest import state_mx, to_mx
+from conftest import fixture, state_mx, to_mx
 from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
 from test_dit_tiny import TINY, packed_layout
 
 from h3mlx import ops
 
-DATA = Path(__file__).parent / "data"
-
-
 def released():
-    cfg = json.loads((DATA / "transformer_ref.config.json").read_text())
-    keys = set(json.loads((DATA / "transformer_ref.index.json").read_text())["weight_map"])
+    cfg = json.loads(fixture("MiniMax-H3", "transformer_ref", "config.json").read_text())
+    keys = set(json.loads(fixture("MiniMax-H3", "transformer_ref", "diffusion_pytorch_model.safetensors.index.json").read_text())["weight_map"])
     return {k: v for k, v in cfg.items() if not k.startswith("_")}, keys
 
 
@@ -67,11 +63,11 @@ def test_dit_forward_reads_exactly_the_released_names():
 
 
 def test_precision_rule_matches_the_released_headers():
-    """tests/data/transformer_ref.dtypes.json: every tensor's dtype from the 14 real shard headers (HTTP range reads,
+    """transformer_ref.dtypes.json (a release fixture): every tensor's dtype from the 14 real shard headers (HTTP range reads,
     no weights). load.KEEP_F32 must reproduce it exactly, or check_headers would block a good run."""
     from h3mlx.load import KEEP_F32
 
-    dtypes = json.loads((DATA / "transformer_ref.dtypes.json").read_text())
+    dtypes = json.loads(fixture("transformer_ref.dtypes.json").read_text())
     assert len(dtypes) == 638
     for k, v in dtypes.items():
         assert v == ("F32" if k.split(".")[0] in KEEP_F32 else "BF16"), k

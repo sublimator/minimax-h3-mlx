@@ -2,6 +2,7 @@
 name = "h3mlx"
 version = "0.0.1"
 description = "MiniMax H3 in MLX, op by op, tested against diffusers 0.42.1"
+license = "Apache-2.0"
 requires-python = ">=3.11,<3.14"
 # torch (CPU): the seeded noise and torchaudio's resampler; transformers + torchvision: the Qwen3-VL tokenizer and
 # processor; pillow: image references. The models themselves run in MLX.

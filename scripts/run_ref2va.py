@@ -238,7 +238,8 @@ def main(argv=None) -> int:
     ap.add_argument("--memory-limit-gb", type=float, default=110.0,
                     help="MLX memory limit (a guideline: allocations wait and drop cache before failing)")
     ap.add_argument("--cache-limit-gb", type=float, default=4.0, help="cap on memory MLX keeps cached after use")
-    ap.add_argument("--ref-short-edge", type=int, default=0, help="override 2048 (tests only)")
+    ap.add_argument("--ref-short-edge", type=int, default=0,
+                    help="reference image short edge (default 2048, the release's rule; 768 is much faster)")
     ap.add_argument("--canvas-short-edge", type=int, default=0, help="override 768 (tests only)")
     args = ap.parse_args(argv)
     if args.hyperflow is not None:

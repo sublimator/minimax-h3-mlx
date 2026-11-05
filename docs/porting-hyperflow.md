@@ -1,10 +1,9 @@
 # Porting HyperFlow to MLX: Video Rebirth's loader → `h3mlx`
 
-<sub>Revision 3: a review: memory and speed in §7 measured and
-qualified, the seed probe committed, provenance files saved, read_header and the run script's file check linked. Revision
-2: a review found the plan step skipped
-the key and shape checks, LoRAs on unwired linears were accepted, and an explicit empty grid fell back to the
-default. All fixed; §1, §3, §7 and §8 updated.</sub>
+<sub>Revision 3: after a review, memory and speed in §7 were measured and qualified, the seed probe committed, the
+provenance files saved, and read_header and the run script's file check linked. Revision 2: a review found that the plan
+step skipped the key and shape checks, LoRAs on unwired linears were accepted, and an explicit empty grid fell back to
+the default. All fixed; §1, §3, §7 and §8 updated.</sub>
 
 HyperFlow is Video Rebirth's LoRA for MiniMax H3. It brings the base model's 49 transformer calls per clip down to
 **8**. Video Rebirth describe it as data-free flow self-distillation: the base model was the teacher. This guide maps
@@ -20,8 +19,8 @@ transformer, the scheduler and the denoise loop.
 | weights (MiniMax H3 Community License) | HF `VideoRebirthAI/hyperflow`, `minimax_h3_hyperflow_8step_v1.0.safetensors`, 2,795,328,008 bytes | revision `5bde94d7`, sha256 `9297f450…f447` (its `hyperflow.json`) |
 | base model the LoRA was trained on | header `base_model_revision` | `MiniMaxAI/MiniMax-H3` `83db0c0e`; all 16 `transformer_ref` files (14 shards, config, index) have the same oids as our `42ed227` |
 
-The manifest and both revisions' `transformer_ref` file listings are saved in `tests/data/`
-(`hyperflow.manifest-5bde94d7.json`, `transformer_ref.lfs-42ed227-vs-83db0c0.json`), and
+The manifest and both revisions' `transformer_ref` file listings are release fixtures, fetched by
+`scripts/fetch_test_fixtures.py` (`hyperflow.manifest-5bde94d7.json`, `transformer_ref.lfs-42ed227-vs-83db0c0.json`), and
 `test_provenance_files_back_the_constants` ties the run script's sha256 and the base revision to them.
 
 **Read, not run.** Their package was read, not executed here. The torch oracle in
@@ -247,8 +246,8 @@ Two header details:
  200     return rank
 ```
 
-**The released v1.0 header**, fetched with an HTTP range request; the full header is in
-`tests/data/hyperflow_v1.0.header.json`:
+**The released v1.0 header**, fetched with an HTTP range request; `scripts/fetch_test_fixtures.py` writes the full
+header to `hyperflow_v1.0.header.json`:
 
 - **Tensors:** 632, covering 316 modules: 6 per block × 50 blocks, 6 per refiner block × 2 refiner blocks, and two
   linears each for `time_embedder` and `endpoint_time_embedder`.
@@ -350,8 +349,7 @@ Each tensor is cast to the dtype of the parameter PEFT created.
  363             parameter.requires_grad_(False)
 ```
 
-What a PEFT-wrapped `Linear` computes, from the installed PEFT 0.21.2 (extracted from this repo's `.venv`, so
-render the guide after `uv sync`):
+What a PEFT-wrapped `Linear` computes, from PEFT 0.21.2 (Apache-2.0, see `THIRD_PARTY_NOTICES.md`):
 
 📍 PEFT 0.21.2, `peft/tuners/lora/layer.py:1074-1115`
 ```python

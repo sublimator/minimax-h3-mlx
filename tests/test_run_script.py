@@ -9,16 +9,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from conftest import RELEASE
 from PIL import Image
 
-HF = Path(__file__).resolve().parents[2] / "ref-hf"
+HF = RELEASE
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(scope="module")
 def release(tmp_path_factory):
     if not (HF / "processor").exists() or shutil.which("ffmpeg") is None:
-        pytest.skip("needs the released tokenizer/processor and ffmpeg")
+        pytest.skip("needs the release fixtures (scripts/fetch_test_fixtures.py) and ffmpeg")
     from test_pipeline_e2e import build
 
     t = build()

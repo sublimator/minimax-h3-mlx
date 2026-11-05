@@ -7,7 +7,7 @@ import mlx.core as mx
 import numpy as np
 import pytest
 import torch
-from conftest import assert_close, state_mx, to_mx
+from conftest import assert_close, fixture, state_mx, to_mx
 
 from h3mlx import load, ops
 
@@ -86,13 +86,12 @@ def test_text_encoder_loads_truncated(tmp_path, keep):
 
 
 def test_release_text_encoder_config_parses():
-    """The release's own text_encoder/config.json (tests/data, from HF @ 42ed227) gives the architecture MiniMax reads."""
+    """The release's own text_encoder/config.json (a release fixture, HF @ 42ed227) gives the architecture MiniMax reads."""
     import json
-    from pathlib import Path
-
+    
     from mlx_vlm.models.qwen3_vl import ModelConfig
 
-    raw = json.loads((Path(__file__).parent / "data" / "text_encoder.config.json").read_text())
+    raw = json.loads(fixture("MiniMax-H3", "text_encoder", "config.json").read_text())
     c = ModelConfig.from_dict(load.qwen_params(raw))
     t, v = c.text_config, c.vision_config
     assert (t.num_hidden_layers, t.hidden_size, t.num_attention_heads, t.num_key_value_heads, t.head_dim) == (64, 5120, 64, 8, 128)

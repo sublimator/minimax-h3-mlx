@@ -8,13 +8,12 @@ at github.com/Video-Rebirth/hyperflow `1dd2f342` (read, not run): `TwoTimeEmbedd
 
 import copy
 import json
-from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
 import pytest
 import torch
-from conftest import assert_close, state_mx, to_mx, to_np
+from conftest import assert_close, fixture, state_mx, to_mx, to_np
 from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
 from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
 from peft import LoraConfig, inject_adapter_in_model
@@ -25,7 +24,6 @@ from test_dit_tiny import TINY, packed_layout
 from h3mlx import hyperflow, ops
 from h3mlx.denoise import KEYFRAME_NOISE_AUG, Schedules, denoise, row_time_pairs, schedule_timesteps, shift_grid
 
-DATA = Path(__file__).parent / "data"
 RAW = hyperflow.DEFAULT_SIGMAS_8STEP
 RANK = 4
 BLOCK_TARGETS = ("attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0", "ff.net.0.proj", "ff.net.2")
@@ -287,19 +285,19 @@ def test_denoise_two_time_matches():
 def test_real_header_fits_transformer_ref():
     """The released v1.0 header (read by HTTP range, 2026-11-04): 316 modules, rank 256, gate 0.25, the 9-point grid,
     and every LoRA fits a Linear of transformer_ref at its real shape (model built on the meta device)."""
-    header = json.loads((DATA / "hyperflow_v1.0.header.json").read_text())
+    header = json.loads(fixture("hyperflow_v1.0.header.json").read_text())
     md = header.pop("__metadata__")
     meta = hyperflow.HyperFlowMeta.from_header(md)
     shapes = {k: tuple(v["shape"]) for k, v in header.items()}
     assert (meta.gate, meta.lora_alpha, meta.lora_rank, meta.model_calls) == (0.25, 256.0, 256, 8)
     assert meta.sigmas == RAW and (meta.video_shift, meta.audio_shift) == (12.0, 3.0)
     assert "transformer_ref" in meta.compatible_subfolders
-    cfg = json.loads((DATA / "transformer_ref.config.json").read_text())
+    cfg = json.loads(fixture("MiniMax-H3", "transformer_ref", "config.json").read_text())
     cfg = {k: (tuple(v) if isinstance(v, list) else v) for k, v in cfg.items() if not k.startswith("_")}
     with torch.device("meta"):
         model = MiniMaxH3Transformer3DModel(**cfg)
     base = {k: tuple(v.shape) for k, v in model.state_dict().items()}
-    released = set(json.loads((DATA / "transformer_ref.dtypes.json").read_text()))
+    released = set(json.loads(fixture("transformer_ref.dtypes.json").read_text()))
     plan = hyperflow.plan_from_keys(shapes)
     assert len(plan) == 316
     assert {hyperflow._base_name(m) + ".weight" for m in plan} <= released, "every target is a released tensor"
@@ -398,11 +396,11 @@ def test_refusals():
 def test_provenance_files_back_the_constants():
     """The published manifest's sha256 is the one the run script enforces, and HyperFlow's base revision has the same
     transformer_ref files as the release we run (both fetched from the HF API, 2026-11-04)."""
-    manifest = json.loads((DATA / "hyperflow.manifest-5bde94d7.json").read_text())
+    manifest = json.loads(fixture("hyperflow.manifest-5bde94d7.json").read_text())
     name = manifest["default"]
     assert hyperflow.KNOWN_SHA256[name] == manifest["weights"][name]["sha256"]
-    oids = json.loads((DATA / "transformer_ref.lfs-42ed227-vs-83db0c0.json").read_text())
+    oids = json.loads(fixture("transformer_ref.lfs-42ed227-vs-83db0c0.json").read_text())
     ours, theirs = oids["revisions"].values()
     assert ours == theirs and len(ours) == 16
-    header = json.loads((DATA / "hyperflow_v1.0.header.json").read_text())
+    header = json.loads(fixture("hyperflow_v1.0.header.json").read_text())
     assert header["__metadata__"]["base_model_revision"] in oids["revisions"]
