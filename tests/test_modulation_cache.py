@@ -41,6 +41,19 @@ def test_cache_drops_the_adaln_weights_and_rejects_unknown_t():
         cache.rows(mx.array([0.25]), mx.array([0]))
 
 
+def test_cache_with_drop_pops_the_same_weights_in_place_and_builds_the_same_tables():
+    model = MiniMaxH3Transformer3DModel(**TINY).eval()
+    p, cfg = state_mx(model), dict(model.config)
+    t = [1.0, 0.5, 0.999]
+    kept = ops.ModulationCache(dict(p), cfg, t)
+    q = dict(p)
+    dropped = ops.ModulationCache(q, cfg, t, drop=True)
+    assert set(q) == set(ops.ModulationCache.drop_weights(p, cfg))
+    for a, b in zip(kept.blocks + [kept.out], dropped.blocks + [dropped.out]):
+        for x, y in zip(a, b):
+            assert bool(mx.array_equal(x, y))
+
+
 def test_denoise_with_cache_equals_without():
     torch.manual_seed(8)
     model = MiniMaxH3Transformer3DModel(**TINY).eval()

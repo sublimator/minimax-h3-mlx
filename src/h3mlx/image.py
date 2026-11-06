@@ -236,8 +236,9 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
 
     `modulation_cache` computes every block's AdaLN modulation once, for the run's ~10 distinct timesteps
     (`ops.ModulationCache`), instead of projecting it in every call: the same maths, batched. With `free_transformer`
-    the 13B `adaln_proj` parameters (~26 GB in bf16) are then dropped from `c.dit_params`. The weights load lazily, so
-    those are read and released before the rest of the transformer is read."""
+    the 13B `adaln_proj` parameters (~26 GB in bf16) are dropped from `c.dit_params` block by block as the tables are
+    built, so at most one block's projection is resident beside the rest of the transformer (which, quantized, is
+    already loaded)."""
     dbg = debug if debug is not None else {}
     stage = on_stage or (lambda name: None)
     m = c.canvas_multiple
@@ -304,9 +305,8 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
     cache = None
     #@@start modulation-cache
     if modulation_cache:
-        cache = ops.ModulationCache(c.dit_params, c.dit_cfg, schedule_timesteps(layout, sched))
+        cache = ops.ModulationCache(c.dit_params, c.dit_cfg, schedule_timesteps(layout, sched), drop=free_transformer)
         if free_transformer:
-            c.dit_params = ops.ModulationCache.drop_weights(c.dit_params, c.dit_cfg)
             mx.clear_cache()
         dbg.update(modulation_timesteps=cache.t)
     #@@end modulation-cache

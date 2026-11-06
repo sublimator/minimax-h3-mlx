@@ -425,9 +425,13 @@ class ModulationCache:
     The modulation depends only on t and the weights, never on the latents, so a sampling run can precompute it for
     the union of its timesteps and drop the `adaln_proj` weights (~26 GB of transformer_ref's ~66 GB in bf16). The
     rows of each table are [t0m0, t0m1, t0m2, t1m0, ...] over `self.t`, exactly what `adaln_modulation` returns.
+
+    `drop=True` pops each projection from `p` as soon as its table is evaluated (what `drop_weights` returns, done in
+    place), so only one block's projection is resident at a time even when the rest of the transformer already is
+    (a quantized one: 11-21 GB plus all 26 GB of projections otherwise).
     """
 
-    def __init__(self, p: dict, cfg: dict, timesteps):
+    def __init__(self, p: dict, cfg: dict, timesteps, drop: bool = False):
         if "endpoint_time_embedder.linear_1.weight" in p:
             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
         t = np.unique(np.asarray(timesteps, dtype=np.float32))
@@ -441,9 +445,13 @@ class ModulationCache:
             tables = adaln_modulation(temb, p[b + "weight"], p[b + "bias"], hidden)
             mx.eval(tables)
             self.blocks.append(tables)
+            if drop:
+                del p[b + "weight"], p[b + "bias"]
         w, bias = p["norm_out.linear.weight"], p["norm_out.linear.bias"]
         self.out = mx.split(linear(silu(temb).astype(w.dtype), w, bias), 2, axis=-1)
         mx.eval(self.out)
+        if drop:
+            del p["norm_out.linear.weight"], p["norm_out.linear.bias"]
 
     def rows(self, timestep: mx.array, timestep_indices: mx.array) -> mx.array:
         """Map a step's (distinct timesteps, per-row index into them) onto rows of the cached tables."""
