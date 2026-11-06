@@ -195,7 +195,7 @@ def test_cli_quantized_run_quantizes_after_encoding_and_records_it(tiny_q, tmp_p
     plain = np.asarray(Image.open(tmp_path / "plain" / "image.png"), dtype=np.float32)
     assert got.shape == plain.shape == (40, 56, 3)
     print(f"{bits}-bit vs unquantized: mean |diff| {np.abs(got - plain).mean():.2f} / 255")
-    assert np.abs(got - plain).mean() < (0.5 if bits == 8 else 2)
+    assert np.abs(got - plain).mean() < (0.05 if bits == 8 else 0.5)
 
 
 def test_cli_refuses_early(tiny, tmp_path):

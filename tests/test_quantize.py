@@ -34,9 +34,9 @@ def test_quantized_weight_is_its_dequantized_matrix(bits):
                                    (mx.float32, mx.bfloat16), (mx.float16, mx.float32)])
 def test_quantized_weight_promotes_like_the_dense_product(wd, xd):
     """Mixed input and weight dtypes: the result has the dense product's dtype and value, and a wide input isn't
-    narrowed on the way (an f16 weight of ones times 2048s is 131072, which overflows f16)."""
+    narrowed on the way: 2049 isn't a bf16 value (narrowing makes it 2048), and 64 of them overflow f16."""
     w = mx.ones((64, 64), dtype=wd)
-    x = mx.full((3, 64), 2048.0, dtype=xd)
+    x = mx.full((3, 64), 2049.0, dtype=xd)
     q = ops.QuantizedWeight(w, 8, 64)
     dense = x @ mx.dequantize(q.wq, q.scales, q.biases, group_size=64, bits=8).T
     got = ops.linear(x, q)
