@@ -2,8 +2,8 @@
    Render from the repo root:  projected-source render --no-header docs/porting-p-h3-image.md.j2 docs/porting-p-h3-image.md
    The original side is a sparse checkout of huggingface/diffusers at main commit d3d8af89 (P-H3-Image is not in a
    release yet) beside this repo at ../diffusers-main: the same commit the tests import. mlx-vlm is the v0.7.11 checkout
-   at ../mlx-vlm, as in docs/porting.md. No markers were added on either side, so their permalinks point at upstream
-   lines exactly. #}
+   at ../mlx-vlm, as in docs/porting.md. No markers were added upstream, so those permalinks point at upstream lines
+   exactly; our src/h3mlx/image.py carries two (`layout`, `noise-draws`). #}
 {% set DM = '../diffusers-main' %}
 {% set P = 'src/diffusers/modular_pipelines/p_h3_image/' %}
 {% set PVAE = 'src/diffusers/models/autoencoders/autoencoder_kl_p_h3_image.py' %}
@@ -203,16 +203,20 @@ The image VAE keeps H3's encoder and latent space and swaps the decoder. H3's Vi
 
 {{ code(H3VAE, function='MiniMaxH3VideoViTDecoder3d.forward', root=DM) }}
 
-P-H3-Image's decodes one frame. Each token becomes a 16 × 16 block, and every token sits at one fixed time coordinate:
-the one H3's decoder gives the first frame of a 7-frame window.
+P-H3-Image's decodes one frame. Each image-latent token becomes a 16 × 16 block, and every one of them sits at one
+fixed time coordinate: the one H3's decoder gives the first frame of a 7-frame window. The register tokens and the
+zero token appended after them sit at position 0 in both decoders, and are dropped before the pixels.
 
 {{ code(PVAE, var='FRAME_POSITION', root=DM) }}
 {{ code(PVAE, function='PH3ImageViTDecoder.forward', root=DM) }}
 
-Ours adds both differences to H3's decoder as parameters, so the blocks, attention and tiling are shared:
+Ours adds both differences to H3's decoder as parameters, so the blocks, attention and tiling are shared. The fixed
+coordinate replaces the time axis of the position grid; `_decoder` passes a temporal patch of 1 and the coordinate when
+the VAE is single-frame:
 
 {{ code('src/h3mlx/vae_ops.py', function='vit_positions') }}
 {{ code('src/h3mlx/vae.py', var='IMAGE_FRAME_POSITION') }}
+{{ code('src/h3mlx/vae.py', function='VideoVAE._decoder') }}
 {{ code('src/h3mlx/vae.py', function='VideoVAE.decode') }}
 
 `VaeConfig.from_diffusers` turns the mode on from the config's `_class_name`. The image VAE's `decode` and `encode`
@@ -267,20 +271,22 @@ checks decide whether it is usable. The tests: `test_requests_and_answers_match_
 `upsample_prompt` with a stand-in model that records its inputs and answers with fixed text, and compares input ids,
 pixels, grids and the returned prompt; `test_tiny_prefill_logits_match_transformers` and
 `test_tiny_greedy_tokens_match_transformers` compare a tiny random Qwen3.5 in transformers with the same weights in
-mlx-vlm (with and without pictures). On the release, the upsampler wrote a valid 312-token edit brief in 14 s.
+mlx-vlm (with and without pictures). On the release, for "give her a wide straw hat", the upsampler generated 312
+tokens (its reasoning, the brief and the end token) in 14 s, and the brief it wrote is valid and 224 tokens long.
 
 ## 10. End to end
 
 {{ code('src/h3mlx/image.py', function='generate') }}
 
-With `free_transformer`, `generate` also drops the connector once the prompt is encoded and the VAE encoder once the
-pictures are (`VideoVAE.drop_encoder`), so neither sits beside the transformer through the 8 calls.
-`test_single_use_components_free_their_weights_and_change_nothing` checks the image is the same either way.
+With `free_transformer`, `generate` also drops the connector once the prompt is encoded and, for an edit, the VAE
+encoder once the pictures are (`VideoVAE.drop_encoder`). A text-to-image request never evaluates the encoder's lazily
+loaded weights. `test_single_use_components_free_their_weights_and_change_nothing` runs an edit both ways and checks
+the image is the same.
 
 `test_end_to_end_matches_diffusers` runs diffusers' `PH3ImageBlocks` (upsampler removed) and `generate` on the same
 tiny random components: text-to-image, an edit with two pictures at Picture 1's size, and one on a set canvas. It
 compares the token tags exactly, the prompt embeddings to 1e-4, the noised picture rows, and the decoded images to
-2e-5 (measured: about 6e-7). `tests/test_run_p_h3_image.py` saves those components in the release's own layout and
+2e-5 (measured: under 1e-6). `tests/test_run_p_h3_image.py` saves those components in the release's own layout and
 runs the command line against `PH3ImageBlocks` for both workflows, plus the re-decode path and its refusals.
 
 **Measured on an M3 Ultra (60-core GPU, 256 GB)** with the release, 8 calls, bf16 transformer, float32 decode:
