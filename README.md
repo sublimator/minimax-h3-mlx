@@ -145,9 +145,11 @@ one adds its rows to the sequence. `--sigmas` replaces the 9-point grid. The VAE
 re-decodes saved latents on their own: it takes no prompt or sampling options, checks the rows, and logs the saved
 request as its source.
 
-The AdaLN modulation depends only on the timestep, and a run uses about ten distinct timesteps, so the script computes
-it once per run and drops the 13B `adaln_proj` parameters (26 GB in bf16) before the rest of the transformer loads
-(`--no-modulation-cache` turns that off). It is the same arithmetic, batched; the tests match diffusers either way.
+The AdaLN modulation depends only on the timestep, and a run makes 8 calls, so the script computes each call's tables
+up front and drops the 13B `adaln_proj` parameters (26 GB in bf16) block by block as it goes (`--no-modulation-cache`
+turns that off). Each call's tables are computed from that call's own timesteps, so a cached run is bit-identical to
+an uncached one. (A first version batched all the timesteps into one product, which rounds differently in bf16 and
+drew a different picture from the same seed.)
 
 **Measured on the M3 Ultra (60-core GPU, 256 GB),** 8 calls, bf16 transformer, float32 decode (the total includes
 loading; the peak is MLX's active allocations):
@@ -161,6 +163,34 @@ loading; the peak is MLX's active allocations):
 
 The first three ran before the modulation cache existed. The upsampler took 14 s, the text encoder 2 s, the decode 34 s
 at 8 MP. An edit's picture adds its own rows, so an 8 MP picture doubles an 8 MP sequence.
+
+### Quantized transformer
+
+`--quantize 8` or `--quantize 4` quantizes the transformer's attention and feed-forward matrices after loading: 312
+matrices, 40 GB of its 66 GB in bf16 (the other 26 GB are the AdaLN projections the modulation cache drops). It is
+MLX's affine quantization in groups of 64, takes about 3 s, and is ours, not the pipeline's: diffusers runs the
+transformer in bf16. The tests check the quantized product against the dequantized matrix, and the tiny transformer's
+whole forward against the unquantized one.
+
+The same prompt (the text-to-image one above) and seed, with the modulation cache (so the bf16 row's image is the
+one above, bit for bit), on the M3 Ultra:
+
+| `--quantize` | quantized matrices | warm call | total | MLX peak (GB) |
+| --- | --- | --- | --- | --- |
+| none (bf16) | | 26 s | 4.1 min | 43 GB |
+| 8 | 21.3 GB | 25 s | 4.0 min | 24 GB |
+| 4 | 11.3 GB | 25 s | 4.0 min | 14 GB |
+
+It saves memory, not time: at 8 MP the calls are bound by compute, and the quantized matmul does as many
+multiply-adds.
+A seed fixes the starting noise, not the picture: the first steps decide the layout, and different weights can take
+them elsewhere. 8-bit stays close enough to follow bf16 (the face matches at full resolution; the bulb, the fish's
+angle and the scale move). 4-bit takes another path from the same seed: another woman and another framing, on the
+same brief. Neither lost detail at full resolution (faces, hands, the fish's scales).
+
+| bf16 | 8-bit | 4-bit |
+| --- | --- | --- |
+| ![The fishmonger in bf16](docs/images/quant-bf16.jpg) | ![The same seed with 8-bit weights: the same scene, small details moved](docs/images/quant-8bit.jpg) | ![The same seed with 4-bit weights: a different fishmonger and framing](docs/images/quant-4bit.jpg) |
 
 ## Licence
 
