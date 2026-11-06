@@ -1,0 +1,383 @@
+{# Porting guide: HyperFlow (Video Rebirth's 8-step LoRA for MiniMax H3) -> h3mlx.
+   Render from the repo root:  projected-source render --no-header docs/porting-hyperflow.md.j2 docs/porting-hyperflow.md
+   The original sides are checkouts beside this repo, so their extracts carry GitHub permalinks:
+     ../ref-hyperflow  github.com/Video-Rebirth/hyperflow at 1dd2f342 (main, 2026-09-19), read and not run
+     ../diffusers      huggingface/diffusers at tag v0.42.1 (2a14339), as in docs/porting.md
+     ../peft           huggingface/peft at tag v0.21.2 (eaa35c7); its src/peft/tuners/lora/layer.py is byte-identical to
+                       the 0.21.2 wheel the tests import #}
+{% set HF = '../ref-hyperflow' %}
+{% set D = '../diffusers' %}
+{% set SCH = 'src/diffusers/schedulers/scheduling_minimax_h3.py' %}
+{% set PEFT = '../peft' %}
+# Porting HyperFlow to MLX: Video Rebirth's loader → `h3mlx`
+
+<sub>Revision 3: after a review, memory and speed in §7 were measured and qualified, the seed probe committed, the
+provenance files saved, and read_header and the run script's file check linked. Revision 2: a review found that the plan
+step skipped the key and shape checks, LoRAs on unwired linears were accepted, and an explicit empty grid fell back to
+the default. All fixed; §1, §3, §7 and §8 updated.</sub>
+
+HyperFlow is Video Rebirth's LoRA for MiniMax H3. It brings the base model's 49 transformer calls per clip down to
+**8**. Video Rebirth describe it as data-free flow self-distillation: the base model was the teacher. This guide maps
+their loader onto our MLX port, side by side. In each section the original comes first, then the port, then what
+changed and which test ties them together. It assumes the main guide (`docs/porting.md`), which covers the base
+transformer, the scheduler and the denoise loop.
+
+**Sources, pinned.**
+
+| what | where | pin |
+| --- | --- | --- |
+| loader (Apache-2.0) | `github.com/Video-Rebirth/hyperflow` | `1dd2f342aba5ab51da02b62885939655e8e268da` |
+| weights (MiniMax H3 Community License) | HF `VideoRebirthAI/hyperflow`, `minimax_h3_hyperflow_8step_v1.0.safetensors`, 2,795,328,008 bytes | revision `5bde94d7`, sha256 `9297f450…f447` (its `hyperflow.json`) |
+| base model the LoRA was trained on | header `base_model_revision` | `MiniMaxAI/MiniMax-H3` `83db0c0e`; all 16 `transformer_ref` files (14 shards, config, index) have the same oids as our `42ed227` |
+
+The manifest and both revisions' `transformer_ref` file listings are release fixtures, fetched by
+`scripts/fetch_test_fixtures.py` (`hyperflow.manifest-5bde94d7.json`, `transformer_ref.lfs-42ed227-vs-83db0c0.json`), and
+`test_provenance_files_back_the_constants` ties the run script's sha256 and the base revision to them.
+
+**Read, not run.** Their package was read, not executed here. The torch oracle in
+the tests is therefore diffusers 0.42.1 and PEFT 0.21.2 doing the injection their `_load_into` does, plus two short
+torch transcriptions of their code: `TwoTimeEmbedder.forward` and `build_row_time_pairs` (§8). A reviewer should
+compare those transcriptions against the originals extracted below.
+
+**What HyperFlow changes, and nothing else** (their README, "How it works", checked against the code):
+
+| piece | official MiniMax H3 | with HyperFlow |
+| --- | --- | --- |
+| block and refiner linears (`to_q`, `to_k`, `to_v`, `to_out.0`, `ff.net.0.proj`, `ff.net.2`) | base weight | base + LoRA (rank 256, alpha 256) |
+| time embedding | `time_embedder(time_proj(t))` | blend of `time_embedder` at `t` and a LoRA'd copy at the step's endpoint `r`, gate 0.25 |
+| sigma grid | `linspace(1, 0, 50)`, shifted: 49 calls | a fixed 9-point raw grid from the file, shifted the same way: 8 calls |
+| per-row timesteps | distinct `t` | distinct `(t, r)` pairs; conditioning rows keep `r = t` |
+| `adaln_proj`, packing, text encoder, VAEs, Euler update, noise | — | unchanged |
+
+`adaln_proj` carries the reference conditioning in `transformer_ref`, and the adapter never touches it. That is why
+one file serves t2va, fl2va and ref2va (header `compatible_subfolders: ["transformer", "transformer_ref"]`).
+
+## 1. The file: header and keys
+
+The weights file is a plain safetensors file. Its keys are PEFT-style:
+`transformer.<module>.lora_A.weight` / `lora_B.weight`. Its header carries the gate, the rank, the alpha, the grid and
+the shifts. Their loader parses and checks the header, then maps each key onto a module. `endpoint_time_embedder.*` is
+not a module of the official transformer: it names the copy of `time_embedder` that their wrapper creates.
+
+{{ code('src/hyperflow_h3/lora.py', function='HyperFlowMetadata.from_dict', root=HF) }}
+{{ code('src/hyperflow_h3/lora.py', function='_public_to_module_path', root=HF) }}
+{{ code('src/hyperflow_h3/lora.py', function='plan_from_keys', root=HF) }}
+
+Ours parses the same header with the same required fields, and keeps the file's public module names. The endpoint
+embedder is not a sub-module in MLX. It is a second name prefix in the flat weight dict (§2), and `_base_name` says
+which base `Linear` each LoRA sits on.
+
+`check_plan` makes the checks their `_load_into` makes explicitly (every target an `nn.Linear`, one rank matching the
+header, each tensor's shape against its parameter), and one theirs doesn't need:
+
+- **Shapes:** every LoRA must fit its base 2-D `Linear` weight.
+- **Rank and scaling:** all LoRAs share one positive rank, and the scaling must be 1 (§2).
+- **Wiring:** every target must be a linear that our forward actually runs through `plinear` (`wired_shapes`). PEFT
+  would wrap *any* `nn.Linear` a file names, `proj_in` or `adaln_proj` included. Our forward calls plain `linear` for
+  those, so a LoRA there would be silently ignored; it is refused instead. The released file targets exactly the wired
+  set.
+
+`check_file` runs all of this from the header alone, against shapes derived from the transformer's config, and also
+checks the grid. The run script calls it in the plan step (§7).
+
+Two header details:
+
+- **An empty grid.** A header that holds `"hyperflow_sigmas": "[]"` is refused, as theirs refuses it in
+  `validate_sigmas`. Only a missing key falls back to the default grid.
+- **`compatible_subfolders`.** Stricter than theirs, on purpose: ours refuses a file that lists subfolders not
+  including `transformer_ref`. Their loader parses the field but never reads it.
+
+{{ code('src/h3mlx/hyperflow.py', function='HyperFlowMeta.from_header') }}
+{{ code('src/h3mlx/hyperflow.py', function='plan_from_keys') }}
+{{ code('src/h3mlx/hyperflow.py', function='_base_name') }}
+{{ code('src/h3mlx/hyperflow.py', function='wired_shapes') }}
+{{ code('src/h3mlx/hyperflow.py', function='check_plan') }}
+{{ code('src/h3mlx/hyperflow.py', function='check_file') }}
+
+**The released v1.0 header**, fetched with an HTTP range request; `scripts/fetch_test_fixtures.py` writes the full
+header to `hyperflow_v1.0.header.json`:
+
+- **Tensors:** 632, covering 316 modules: 6 per block × 50 blocks, 6 per refiner block × 2 refiner blocks, and two
+  linears each for `time_embedder` and `endpoint_time_embedder`.
+- **LoRA:** rank 256, alpha 256, so scaling 1. Gate 0.25.
+- **Grid:** `[1.0, 0.931506, 0.839236, 0.703462, 0.5, 0.296538, 0.160764, 0.068494, 0.0]`.
+- **Shifts:** video 12, audio 3.
+- **Dtypes:** bf16 for the blocks, f32 for the time embedders.
+
+`test_real_header_fits_transformer_ref` checks every LoRA against the real `transformer_ref` shapes, building the
+model on torch's meta device. It also checks:
+
+- every target is a released tensor, and none is an `adaln_proj`;
+- the file's targets are exactly `wired_shapes`;
+- the config-derived shapes equal the real model's;
+- `check_file` passes.
+
+## 2. Injection: PEFT on their side, `plinear` on ours
+
+Their loader installs the two-time wrapper, then lets PEFT wrap every target `nn.Linear`, then copies the tensors in.
+Each tensor is cast to the dtype of the parameter PEFT created.
+
+{{ code('src/hyperflow_h3/lora.py', function='_load_into', root=HF) }}
+
+What a PEFT-wrapped `Linear` computes, from PEFT 0.21.2 (Apache-2.0, see `THIRD_PARTY_NOTICES.md`):
+
+{{ code('src/peft/tuners/lora/layer.py', function='Linear.forward', root=PEFT) }}
+
+Two facts set the port's arithmetic:
+
+1. **The adapter is in the base layer's dtype.** This was probed with `add_adapter` on a tiny bf16 model with the
+   release's f32 modules: block and refiner LoRAs come out bf16, time-embedder LoRAs f32.
+2. **The input is cast to the adapter's dtype.** PEFT's `_cast_input_dtype` is `x.to(dtype)` unless the dtypes already
+   match. The two products each round in that dtype, the scaled delta is added to the base result, and the sum is
+   cast back to the base result's dtype.
+
+`plinear` does the same. The `* scaling` is left out because `check_plan` refuses any file whose alpha/rank isn't
+exactly 1, and multiplying by 1.0 is exact.
+
+{{ code('src/h3mlx/ops.py', function='plinear') }}
+
+`attach` builds the new weight dict:
+
+- the endpoint embedder shares the base embedder's arrays, so it costs no memory beyond its own LoRA;
+- each LoRA is cast to its base weight's dtype;
+- the gate goes into `cfg`;
+- the input dict is left unmodified, and attaching twice is refused.
+
+`load` reads the file lazily with `mx.load`, like the transformer.
+
+{{ code('src/h3mlx/hyperflow.py', function='attach') }}
+{{ code('src/h3mlx/hyperflow.py', function='read_header') }}
+{{ code('src/h3mlx/hyperflow.py', function='load') }}
+
+The attention, feed-forward and timestep ops now call `plinear` by name instead of `linear`. Without LoRA keys the
+result is the same `linear` call as before, so the base model's tests still pin the base path (213 tests pass).
+
+**Not ported.** These are left out:
+
+- Merging the LoRA into the base weights. Unmerged costs about 2.3% more FLOPs per call at 52k rows and about 5.5% at
+  6.8k, by the count in §7. Merging in bf16 would also change the rounding.
+- `disable_hyperflow` and `enable_hyperflow`, which in their package give same-seed base/HyperFlow pairs from one
+  loaded model. In ours, load a second param dict instead.
+
+## 3. Two-time conditioning
+
+The official forward embeds its distinct timesteps in two lines: `temb = self.time_proj(timestep)`, then
+`temb = self.time_embedder(temb.to(get_parameter_dtype(self.time_embedder)))`. That is `transformer_minimax_h3.py`'s
+`MiniMaxH3Transformer3DModel.forward`; the main guide's §2 covers it. HyperFlow swaps `time_embedder` for a wrapper:
+
+{{ code('src/hyperflow_h3/embedder.py', function='TwoTimeEmbedder.wrap', root=HF) }}
+{{ code('src/hyperflow_h3/embedder.py', function='TwoTimeEmbedder.forward', root=HF) }}
+
+Points that matter for the port:
+
+- **Same base weights.** `endpoint` is a `deepcopy` of `time_embedder` made *before* any LoRA: new storage with the
+  same values, so the two embedders have equal base weights and differ only in their LoRAs. Ours aliases the same
+  arrays instead (§2), which is the same at inference: nothing writes the weights.
+- **`r` gets the same sinusoid.** `r` goes through a copy of the same parameter-free `time_proj`, in f32, cast to the
+  dtype of `sample` (f32 here).
+- **The blend.** It is `t_emb + gate * (r_emb - t_emb)`, with the gate a Python float: 0.25, exact in f32.
+- **No silent fallback.** The wrapper refuses to run without endpoints, so the official loop can't silently drive a
+  two-time adapter with single times.
+
+Ours is one function. It refuses the mismatch in both directions: HyperFlow weights without endpoints, and endpoints
+without HyperFlow weights. Like their wrapper, it also refuses an endpoint count that differs from the distinct
+timestep count (MLX would otherwise broadcast a length-1 array silently).
+
+{{ code('src/h3mlx/ops.py', function='two_time_embedding') }}
+
+`dit_forward` takes `endpoint` aligned with its distinct `timestep` values. The AdaLN rows are unchanged
+(`timestep_indices * 3 + modality_tag`); each distinct timestep is now a distinct `(t, r)` pair.
+
+{{ code('src/h3mlx/ops.py', marker='adaln-rows-and-blocks') }}
+
+The modulation cache (main guide, §2.6) is keyed by `t` alone. With HyperFlow the tables depend on `(t, r)`, so
+`ModulationCache` itself, `dit_forward` and `schedule_timesteps` all raise rather than build or use wrong tables. (`ref2va` never builds a cache.) Extending the cache to pairs is
+possible but not done.
+
+## 4. The sigma grid
+
+The grid comes from the file, falling back to the same 9 values hard-coded in the package. It is checked, then shifted
+per modality with the official formula. The endpoint of step `i` is `1 − sigma[i+1]`.
+
+{{ code('src/hyperflow_h3/schedule.py', var='DEFAULT_SIGMAS_8STEP', root=HF) }}
+{{ code('src/hyperflow_h3/schedule.py', function='validate_sigmas', root=HF) }}
+{{ code('src/hyperflow_h3/schedule.py', function='shift_sigmas', root=HF) }}
+{{ code('src/hyperflow_h3/schedule.py', function='endpoints_from_sigmas', root=HF) }}
+
+The shifted grid is handed to diffusers' own scheduler, which installs an explicit grid verbatim and exposes
+`timesteps = 1 − sigmas[:-1]`. The Euler update downstream is the official one, untouched.
+
+{{ code(SCH, function='MiniMaxH3Scheduler.set_timesteps', root=D) }}
+
+Ours does the same arithmetic in numpy float32. The scalars 12, 11, 3, 2 and 1 are exact in f32, and each operation is
+a single IEEE float32 operation on both sides, so the result is bit-identical. `test_grid_matches_diffusers_scheduler`
+checks it against torch's formula and against the scheduler's installed `sigmas` and `timesteps`, for both shifts.
+
+{{ code('src/h3mlx/denoise.py', function='shift_grid') }}
+{{ code('src/h3mlx/denoise.py', struct='Schedules') }}
+
+The shifts come from the pipeline (the release's schedulers: 12 and 3), not from the file. Theirs warns when the file
+was trained with different ones (`_check_shifts`), and `HyperFlowMeta.schedules` warns the same way.
+
+{{ code('src/h3mlx/hyperflow.py', function='HyperFlowMeta.schedules') }}
+
+## 5. Per-row `(t, r)` pairs
+
+The official `build_row_timesteps` gives every row a `t` and reduces the rows to the distinct values (main guide,
+§4). HyperFlow gives every row a pair:
+
+- generated video rows and text rows: `(t_v, r_v)`;
+- generated audio rows: `(t_a, r_a)`;
+- visual conditioning rows: `(max(t_v, 0.999), same)`;
+- audio reference rows: `(1, 1)`.
+
+The pairs are reduced with `torch.unique(dim=0, sorted=True)`, which sorts them lexicographically.
+
+{{ code('src/hyperflow_h3/schedule.py', function='build_row_time_pairs', root=HF) }}
+
+Ours writes the rows in the same order (later writes win, as theirs), and `np.unique(axis=0)` sorts the same
+lexicographic way.
+
+{{ code('src/h3mlx/denoise.py', function='row_time_pairs') }}
+
+`test_row_time_pairs_match` checks four cases bit for bit on a ref2va layout with an image and an audio reference:
+
+- a general step;
+- a step at the 0.999 pin, with `t_v ≥ 0.999`;
+- the first step, `t = 0`;
+- a step where the video and audio pairs coincide.
+
+**The released grid**, after the shifts (`Schedules.from_grid`, printed to 6 places):
+
+| step i | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| video t | 0 | 0.00609 | 0.015712 | 0.033936 | 0.076923 | 0.165058 | 0.303148 | 0.531247 |
+| video r | 0.00609 | 0.015712 | 0.033936 | 0.076923 | 0.165058 | 0.303148 | 0.531247 | 1 |
+| audio t | 0 | 0.023924 | 0.060021 | 0.123202 | 0.25 | 0.441575 | 0.63505 | 0.819275 |
+| audio r | 0.023924 | 0.060021 | 0.123202 | 0.25 | 0.441575 | 0.63505 | 0.819275 | 1 |
+
+Video `t` never reaches the 0.999 pin, so the conditioning pair `(0.999, 0.999)` is always a separate entry. On the
+last step the generated rows aim at `r = 1`, which is clean. Each step has at most four distinct pairs: generated video
+(which text shares), generated audio, conditioning video, and audio references.
+
+## 6. The loop
+
+Their `set_timesteps` block builds the whole plan up front: one `(timestep, endpoint, indices)` triple per step. Their
+loop denoiser hands each step's endpoints to the wrapper for that one forward.
+
+{{ code('src/hyperflow_h3/blocks.py', function='HyperFlowSetTimestepsStep.__call__', root=HF) }}
+{{ code('src/hyperflow_h3/blocks.py', function='HyperFlowLoopDenoiser.__call__', root=HF) }}
+
+Ours builds the pairs per step inside `denoise` when `schedules.two_time` is set, and passes `endpoint` to
+`dit_forward`. Everything else in the loop, the Euler update included, is the official one from the main guide.
+
+{{ code('src/h3mlx/denoise.py', function='denoise') }}
+
+`test_denoise_two_time_matches` runs 8 calls on a tiny model over a ref2va layout. The torch side is:
+
+- the PEFT-injected diffusers transformer, with the transcribed wrapper;
+- diffusers' `MiniMaxH3Scheduler` with the shifted grids installed;
+- the transcribed pair builder.
+
+Results: video and audio agree within 5e-4, the conditioning rows are untouched, and `on_step` fires exactly 8 times.
+
+## 7. The run script
+
+`--hyperflow <file>` selects the file's grid and refuses `--steps`; their pipeline also raises on a different step
+count. The file is checked three times:
+
+- **Header metadata:** parsed right after the arguments, before anything loads.
+- **The whole header (`check_file`):** keys, wiring, shapes against `transformer_ref`'s config, rank, scaling, subfolder
+  and grid, in the plan step. That step runs with `--plan-only` too, and before the hash. The plan records the rank
+  `check_file` found.
+- **sha256:** hashed after the plan and before the transformer loads, and logged (`hyperflow_file` event). A file named
+  like the released v1.0 whose hash isn't the published one is refused.
+
+`plan` records the file's version, gate, rank, grid and base revision, and counts `grid_points` and `model_calls`
+from the schedule actually used. The TFLOP/s in each step event adds the LoRA's matmuls:
+
+{{ code('scripts/run_ref2va.py', function='lora_tflop_per_call') }}
+{{ code('scripts/run_ref2va.py', function='load_weights') }}
+{{ code('scripts/run_ref2va.py', function='plan') }}
+{{ code('scripts/run_ref2va.py', marker='hyperflow-file') }}
+
+`ref2va` frees the weight dict before decoding (`free_transformer`, main guide §8). The dict holds the LoRAs and the
+endpoint aliases too, so nothing of HyperFlow outlives the denoise. A `--decode-from` re-decode with `--hyperflow`
+still runs the plan's header check, but doesn't hash or load the adapter.
+
+**What to expect on an M3 Ultra (a projection, not a measurement).** run-002, at 1344×768 with a 2048 px image reference and
+52,487 rows, measured 368 s per call at 16.2 TFLOP/s.
+
+- **Speed.** The LoRA adds 2.34% more FLOPs per call at that size (5.51% at run-001's 6,823 rows). Its small rank-256
+  matmuls run a little less efficiently than the big ones, so FLOPs undercount the time a little.
+  `bench/lora_speed.py` times the largest projection (`ff.net.0.proj`, 52,487 rows, bf16, M2 Max), warm, over 3 repeats:
+
+  | mode | time per call |
+  | --- | --- |
+  | base | 1.664 s |
+  | with the LoRA | 1.793 s (+7.8%, against +5.7% FLOPs for that op) |
+  | merged into the weight | 1.669 s |
+
+  Scaling the whole call's 2.34% by that ratio gives about 3%. So 8 calls ≈ 8 × 368 × 1.03 ≈ 50–51 min of denoise,
+  against about 5 h for 49 calls, assuming the M3 Ultra keeps run-002's throughput otherwise.
+- **Cold calls.** A reviewer's single cold call of the same op took 4.17 s against 2.31 s, under a 20 GB
+  limit with no allocator cache. Expect the first call to be slower.
+- **Unchanged stages.** Text, references and decode are unchanged: 33 s, 17 s, and a decode not yet measured at 768p.
+- **Memory.** It adds 2.8 GB of adapter weights plus transient LoRA outputs. The largest transient is the
+  `ff.net.0.proj` delta, rows × 28,672 in bf16, about 3.0 GB at 52,487 rows. The same probe measured that op's peak
+  over its inputs going from 3.01 to 6.05 GB. Blocks are evaluated one at a time, so these transients don't pile up
+  across blocks. HyperFlow's whole-run peak is unmeasured.
+- **Merging.** Merging the LoRA into the weights at load (`W + B·A`) would remove both the extra time and the
+  transients. It is not done: it rounds differently from PEFT's unmerged path, and it would need its own error budget,
+  like the modulation cache's.
+
+## 8. The tests and the oracle
+
+`tests/test_hyperflow.py` builds HyperFlow-format files for tiny models in the public key format, written by the test
+itself rather than by our loader. It loads each file both ways:
+
+- **Torch:** PEFT's `add_adapter` / `inject_adapter_in_model`, as their `_load_into` does, plus the transcribed wrapper.
+- **MLX:** `hyperflow.attach`.
+
+The transcriptions to compare against §3 and §5:
+
+{{ code('tests/test_hyperflow.py', struct='TwoTimeEmbedder') }}
+{{ code('tests/test_hyperflow.py', function='torch_row_time_pairs') }}
+{{ code('tests/test_hyperflow.py', function='torch_hyperflow') }}
+
+| test | pins |
+| --- | --- |
+| `test_grid_matches_diffusers_scheduler` (×2 shifts) | grid, timesteps and endpoints bit-exact against diffusers' scheduler |
+| `test_grid_rejects_invalid` (×4) | not decreasing, start above 1, end not 0, a single point |
+| `test_row_time_pairs_match` (×4) | pairs and indices bit-exact against the transcription |
+| `test_forward_matches_peft` | f32 forward within 2e-4. Guards: the LoRA moves the output by more than 5%, and moving `r` changes it |
+| `test_mixed_precision_tracks_peft` | the release's dtypes: MLX error against f32 truth ≤ 1.5× torch's bf16 error + 1e-3 (video 0.0132 vs 0.0097, audio 0.0070 vs 0.0076); adapter dtypes asserted on both sides |
+| `test_denoise_two_time_matches` | 8 calls, ref2va layout, within 5e-4 |
+| `test_real_header_fits_transformer_ref` | the released header against `transformer_ref`'s real shapes |
+| `test_read_header_from_a_file`, `test_refusals` | header-only read, `load`, and each refusal: an endpoint count that doesn't match the distinct timesteps (as their wrapper checks); a LoRA on an unwired linear (`proj_in`, `adaln_proj`) or a 1-D weight; an explicit empty grid; rank 0; no LoRA tensors; a modulation cache on HyperFlow params; a header without `lora_rank` still checks |
+| `test_run_script_with_hyperflow`, `..._refuses_a_released_name_with_other_bytes`, `test_plan_only_checks_the_hyperflow_file` (`tests/test_run_script.py`) | 8 step events, 9 grid points, the plan block, the hash event, a 124-frame mp4; a hash mismatch fails the run; a file with an unwired LoRA fails `--plan-only`, before any hash |
+
+**The bf16 bound is close to the noise.** Over 8 seeds (`bench/hyperflow_bf16_seeds.py`, not a test; model seed `s`,
+file seed `s + 50`, input seed `100 + s`, 4 tiny layers), MLX's bf16 error divided by torch's ranged:
+
+- **HyperFlow:** 0.58–1.52 (video) and 0.93–1.54 (audio); the median of the 16 is about 1.04.
+- **Base model:** 0.94–1.16 (video) and 0.64–1.22 (audio).
+
+Two of the 16 HyperFlow ratios (1.52 and 1.54) were above 1.5. The test's bound also has an absolute slack of 1e-3,
+which at these error sizes (torch about 0.008–0.01) lifts it to about 1.6×, above every observed ratio. The margin is
+thin. These are ratios of error norms, so they say how large MLX's error is next to torch's, not in which direction.
+Eight tiny seeds show a wider spread than the base model's; they say nothing about the real rank-256, 50-layer,
+8-call trajectory.
+
+## 9. Not done, and open
+
+- **No real-weight run yet.** No real-weight HyperFlow run had been made when this was written. Quality,
+  memory and speed with HyperFlow are unmeasured. The tests pin a tiny model: one f32 8-call loop at rank 4, and one
+  mixed-precision forward on 4 layers. Nothing here compares a decoded clip against their diffusers pipeline.
+- **Shifts.** The run script uses the release's shifts (12 and 3). It does not read a modified scheduler config; a
+  caller who changes those passes them to `HyperFlowMeta.schedules`.
+- **Not ported:** Sol-Attn (CUDA only), Ulysses context parallel, merged LoRA, a two-time modulation cache, and the
+  disable/enable toggle.
+- **Licence:** the weights carry the same MiniMax H3 Community License as the base model, with the same territory
+  exclusions (EU, UK, KR, US). Check its terms before use.
+- **Our own claim, not theirs:** the README's speed table is H200; the M3 Ultra figure in §7 is a projection.
