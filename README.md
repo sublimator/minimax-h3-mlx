@@ -88,6 +88,41 @@ a single-frame ViT decoder), and a Qwen3.5-9B prompt upsampler. It samples 8 ste
 guidance and works best at 8 MP. `h3mlx.image` runs both workflows, text-to-image and editing (Picture 1 is edited,
 up to 7 more are references), and `h3mlx.upsampler` runs the upsampler with mlx-vlm.
 
+### Examples
+
+Made with this port on an M3 Ultra, from the release at seed 0.
+
+**Text-to-image, then an edit of it.** Left: 8 MP from the prompt below as written, 4.2 min. Right: "give her a wide
+straw hat" with `--upsample`, 10.5 min. The face, the fish, the scale and the light are kept.
+
+| text-to-image | edit: "give her a wide straw hat" |
+| --- | --- |
+| ![A fishmonger laughing at dawn as she lifts a mackerel onto a scale](docs/images/fishmonger.jpg) | ![The same picture, the fishmonger now wearing a wide straw hat](docs/images/fishmonger-hat.jpg) |
+
+<details><summary>The text-to-image prompt</summary>
+
+> A documentary photograph taken by an experienced street photographer on a 35mm lens. At dawn in a Phnom Penh wet
+> market, a middle-aged fishmonger in a faded blue apron laughs as she lifts a silver mackerel onto a dented brass
+> scale. Behind her are stacked ice crates and a hanging bare bulb; soft daylight comes from an open doorway on the
+> left, and the bulb puts a warm rim of light on her hair. Shallow depth of field, natural skin texture, a little
+> motion blur on her hand.
+
+</details>
+
+**A chain of edits.** The source picture was made with ChatGPT. Each edit starts from the one before, with
+`--upsample`, on a 2368x1760 canvas, in about 4.7 min.
+
+| source (made with ChatGPT) | "have the girl turn around to face the camera and the cat sleepily waking up" |
+| --- | --- |
+| ![A woman at a desk gazing at a glowing figure rising from a laptop, a tabby cat asleep in front](docs/images/study-0-source.jpg) | ![The woman now faces the camera and the cat lifts its head, half awake](docs/images/study-1-turn.jpg) |
+| **fix the Rubik's cube** | **"make the ghost in the screen turn towards the camera too"** |
+| ![The Rubik's cube on the desk redrawn as a proper cube](docs/images/study-2-cube.jpg) | ![The glowing figure now faces the camera too](docs/images/study-3-ghost.jpg) |
+
+The cube took two tries. "fix the rubix cube, it needs to be a cube" gave a flat slab five stickers wide; spelling out
+the geometry ("a real 3x3x3 Rubik's cube seen from a corner, so three faces show, each face exactly three rows of three
+square stickers") gave the cube above, a little larger than asked and not in Rubik's colours. Turning the ghost cost
+it the reaching hand it had in the source.
+
 You need the weights: `PrunaAI/P-H3-Image`, tested at revision `7f98ace` (about 100 GB with the upsampler, 81 GB
 without).
 
