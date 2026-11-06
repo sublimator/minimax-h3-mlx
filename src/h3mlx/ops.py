@@ -445,8 +445,9 @@ class ModulationCache:
     picture from the same seed.) A call's table rows are [t0m0, t0m1, t0m2, t1m0, ...], as `adaln_modulation` returns.
 
     `drop=True` pops each projection from `p` as soon as its tables are evaluated (what `drop_weights` returns, done in
-    place), so only one block's projection is resident at a time even when the rest of the transformer already is
-    (a quantized one: 11-21 GB plus all 26 GB of projections otherwise).
+    place). With lazily loaded weights and no other reference to them, only one block's projection is then resident
+    at a time, even when the rest of the transformer already is (a quantized one: 11-21 GB, plus all 26 GB of
+    projections otherwise). Popping can't free arrays someone else still holds.
     """
 
     def __init__(self, p: dict, cfg: dict, calls, drop: bool = False):

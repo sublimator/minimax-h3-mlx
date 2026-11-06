@@ -240,9 +240,9 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
 
     `modulation_cache` computes every block's AdaLN modulation up front, for each of the run's 8 calls
     (`ops.ModulationCache`), instead of projecting it inside the call: the same tables, bit for bit. With
-    `free_transformer` the 13B `adaln_proj` parameters (~26 GB in bf16) are dropped from `c.dit_params` block by block as the tables are
-    built, so at most one block's projection is resident beside the rest of the transformer (which, quantized, is
-    already loaded)."""
+    `free_transformer` the 13B `adaln_proj` parameters (~26 GB in bf16) are dropped from `c.dit_params` block by block
+    as the tables are built; with lazily loaded weights and no other reference to them, at most one block's projection
+    is then resident beside the rest of the transformer (which, quantized, is already loaded)."""
     dbg = debug if debug is not None else {}
     stage = on_stage or (lambda name: None)
     m = c.canvas_multiple

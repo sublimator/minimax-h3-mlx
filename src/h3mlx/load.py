@@ -73,8 +73,9 @@ def check_quantizable(p: dict, group_size: int = 64) -> list[str]:
 def quantize_transformer(p: dict, bits: int, group_size: int = 64) -> dict:
     """Quantize the block and refiner linears in place (`ops.QuantizedWeight`, `bits` per weight plus a bf16 scale and
     bias per `group_size` inputs); everything else stays as loaded. Every target must quantize (`check_quantizable`):
-    none is left at full precision quietly. Each weight is read, quantized and evaluated in turn and its original
-    dropped, so the full-precision copy is never resident at once. Returns `p`."""
+    none is left at full precision quietly. Each weight is read, quantized and evaluated in turn and its entry replaced,
+    so with lazily loaded weights (`load_transformer`) and no other reference to them, the full-precision matrices are
+    never resident together. Returns `p`."""
     from .ops import QuantizedWeight
 
     for k in check_quantizable(p, group_size):

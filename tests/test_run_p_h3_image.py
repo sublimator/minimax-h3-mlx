@@ -25,12 +25,11 @@ pytestmark = pytest.mark.skipif(not (RELEASE / "processor").exists(),
                                 reason="release fixtures not present (scripts/fetch_test_fixtures.py)")
 
 
-@pytest.fixture(scope="module")
-def tiny(tmp_path_factory):
+def _release(tmp_path_factory, **dims):
     """Tiny random components (as test_p_h3_image) saved as a P-H3-Image release, and the torch modules."""
     import test_p_h3_image as T
 
-    t = T.build()
+    t = T.build(**dims)
     t["vae"].enable_tiling(tile_sample_min_height=256, tile_sample_min_width=256, tile_sample_min_overlap_height=64,
                            tile_sample_min_overlap_width=64)  # the defaults, which the release layout gives ours too
     rel = tmp_path_factory.mktemp("release")
@@ -48,6 +47,17 @@ def tiny(tmp_path_factory):
         Image.fromarray(rng.integers(0, 256, (h, w, 3), dtype=np.uint8)).save(p)
         pics.append(p)
     return t, rel, pics
+
+
+@pytest.fixture(scope="module")
+def tiny(tmp_path_factory):
+    return _release(tmp_path_factory)
+
+
+@pytest.fixture(scope="module")
+def tiny_q(tmp_path_factory):
+    """The same, with widths (64, 128) that quantize whole in groups of 64."""
+    return _release(tmp_path_factory, hidden_size=64, ffn_dim=128)
 
 
 def _prompt(tmp_path, text):
@@ -161,6 +171,31 @@ def test_cli_quantize_refuses_on_the_shapes_before_the_text_encoder(tiny, tmp_pa
         _run(["--weights", rel, "--prompt-file", _prompt(tmp_path, T2I), "--out", out, "--quantize", "8"])
     log = _log(out)
     assert log["status"] == "error" and not any(e["event"].startswith(("text", "stage_")) for e in log["events"])
+
+
+@pytest.mark.parametrize("bits", [8, 4])
+def test_cli_quantized_run_quantizes_after_encoding_and_records_it(tiny_q, tmp_path, bits):
+    """A quantized generation end to end: every target quantized, at its own stage after the text encoder (the
+    order is what keeps the text encoder and the quantized matrices apart; at this size the bytes prove nothing),
+    the saved rows say so, and the picture is the unquantized one's within quantization error (measured 0.01 and
+    0.12 of 255)."""
+    _, rel, _ = tiny_q
+    common = ["--weights", rel, "--prompt-file", _prompt(tmp_path, T2I), "--seed", 7, "--height", 40, "--width", 56]
+    assert _run([*common, "--out", tmp_path / "plain"]) == 0
+    out = tmp_path / f"q{bits}"
+    assert _run([*common, "--out", out, "--quantize", bits]) == 0
+    log = _log(out)
+    names = [e["event"] for e in log["events"]]
+    assert names.index("text_done") < names.index("stage_quantize") < names.index("quantized") < names.index("stage_denoise")
+    q = next(e for e in log["events"] if e["event"] == "quantized")
+    assert q["bits"] == bits and q["weights"] == 6 * 3  # six matrices in each of 2 blocks and 1 refiner block
+    src = json.loads(str(np.load(out / "final_rows.npz")["source"]))
+    assert src["quantize"] == bits and src["modulation_cache"] is True
+    got = np.asarray(Image.open(out / "image.png"), dtype=np.float32)
+    plain = np.asarray(Image.open(tmp_path / "plain" / "image.png"), dtype=np.float32)
+    assert got.shape == plain.shape == (40, 56, 3)
+    print(f"{bits}-bit vs unquantized: mean |diff| {np.abs(got - plain).mean():.2f} / 255")
+    assert np.abs(got - plain).mean() < (0.5 if bits == 8 else 2)
 
 
 def test_cli_refuses_early(tiny, tmp_path):

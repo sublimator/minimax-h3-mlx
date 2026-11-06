@@ -311,7 +311,9 @@ def _qwen():
 # -- end to end ------------------------------------------------------------------------------------------------------
 
 
-def build():
+def build(hidden_size=48, ffn_dim=96):
+    """Tiny random release components. The defaults' widths (48, 96) aren't multiples of 64; `build(64, 128)` gives a
+    transformer whose attention and feed-forward matrices all quantize in groups of 64."""
     from diffusers.models.autoencoders.autoencoder_kl_p_h3_image import AutoencoderKLPH3Image
     from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
     from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
@@ -321,7 +323,8 @@ def build():
     vae.enable_tiling(tile_sample_min_height=32, tile_sample_min_width=32, tile_sample_min_overlap_height=8,
                       tile_sample_min_overlap_width=8)
     dit = randomize(MiniMaxH3Transformer3DModel(
-        num_attention_heads=2, attention_head_dim=32, hidden_size=48, num_layers=2, num_refiner_layers=1, ffn_dim=96,
+        num_attention_heads=2, attention_head_dim=32, hidden_size=hidden_size, num_layers=2, num_refiner_layers=1,
+        ffn_dim=ffn_dim,
         in_channels=4, audio_in_channels=4, patch_size=(1, 2, 2), text_dim=64, freq_dim=32, time_embed_hidden_dim=40,
         time_embed_dim=24, rope_freq_dim=4,
     ).eval(), 8)
