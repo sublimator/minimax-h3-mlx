@@ -84,7 +84,7 @@ def plan(c: I.Components, prompt: str, images, height, width, sigmas) -> dict:
         extra = {"picture_sizes": [list(r.size) for r in refs], "vision_sizes": [list(v.size) for v in vis],
                  "vision_tokens": int(sum(t == 0 for t in tags))}
     else:
-        height, width = I.round_canvas(height or I.DEFAULT_SIZE, width or I.DEFAULT_SIZE, m)
+        height, width = I.text2image_size(height, width, m)
         ids, tags, _ = I.text2image_presentation(c, prompt)
         layout = build_packed_sequence(np.asarray(tags), 1, height // ratio, width // ratio, I.NUM_AUDIO_LATENTS, patch, 2)
         extra = {}
@@ -116,11 +116,11 @@ def main(argv=None) -> int:
     ap.add_argument("--memory-limit-gb", type=float, default=150.0)
     ap.add_argument("--cache-limit-gb", type=float, default=4.0)
     args = ap.parse_args(argv)
-    if (args.height is None) != (args.width is None):
-        ap.error("--height and --width go together")
+    if args.image and (args.height is None) != (args.width is None):
+        ap.error("an edit takes --height and --width together, or neither (text-to-image defaults each to 2912)")
     if args.decode_from:
         given = [n for n, v in (("--prompt-file", args.prompt_file), ("--image", args.image), ("--sigmas", args.sigmas),
-                                ("--upsample", args.upsample), ("--height", args.height), ("--plan-only", args.plan_only),
+                                ("--upsample", args.upsample), ("--height", args.height), ("--width", args.width), ("--plan-only", args.plan_only),
                                 ("--seed", args.seed is not None), ("--max-new-tokens", args.max_new_tokens is not None))
                  if v]
         if given:

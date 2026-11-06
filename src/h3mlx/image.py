@@ -102,6 +102,11 @@ def round_canvas(height: int, width: int, multiple: int) -> tuple[int, int]:
     return rounded
 
 
+def text2image_size(height, width, multiple: int) -> tuple[int, int]:
+    """`PH3ImagePrepareLayoutStep`: each side defaults to 2912 on its own, then both are rounded to the multiple."""
+    return round_canvas(height or DEFAULT_SIZE, width or DEFAULT_SIZE, multiple)
+
+
 def resize(image: Image.Image, size: tuple[int, int]) -> Image.Image:
     """`VaeImageProcessor.resize` on a PIL image (its default resample, Lanczos); a no-op at the same size."""
     return image if image.size == size else image.resize(size, Image.Resampling.LANCZOS)
@@ -225,8 +230,9 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
     [0, 1]. The prompt is rendered as given (run the prompt upsampler first to expand a short request).
 
     `debug` collects intermediates under diffusers' state names; `on_denoised(video_rows, meta)` runs before decoding;
-    `free_transformer` empties `c.dit_params` before decoding; `on_stage(name)`: text, pictures, layout, denoise,
-    decode."""
+    `free_transformer` makes the components single-use: the connector is dropped once the prompt is encoded, the VAE
+    encoder once the pictures are, and `c.dit_params` before decoding. `on_stage(name)`: text, pictures, layout,
+    denoise, decode."""
     dbg = debug if debug is not None else {}
     stage = on_stage or (lambda name: None)
     m = c.canvas_multiple
@@ -235,13 +241,14 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
         height, width, ref_images, vision_images = prepare_edit(c, images, height, width)
         ids, tags, vision = edit_presentation(c, prompt, vision_images)
     else:
-        if (height is None) != (width is None):
-            raise ValueError("height and width have to be passed together, or neither of them")
-        height, width = round_canvas(height or DEFAULT_SIZE, width or DEFAULT_SIZE, m)
+        height, width = text2image_size(height, width, m)
         ids, tags, vision = text2image_presentation(c, prompt)
     stage("text")
     states = c.encode_states(ids, vision)
     text = connect(c.connector, states, c.text_dtype if c.text_dtype is not None else states[0].dtype)
+    if free_transformer:
+        mx.eval(text)
+        c.connector = {}
     dbg.update(prompt_embeds=text, text_token_tags=np.asarray(tags), token_ids=ids, height=height, width=width)
     if check_finite:
         assert_finite("prompt embeddings", text)
@@ -250,6 +257,10 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
     if edit:
         stage("pictures")
         cond = encode_pictures(c, ref_images)
+        if free_transformer:
+            mx.eval(cond)
+            c.vae.drop_encoder()
+            mx.clear_cache()
         dbg.update(condition_latents=cond)
         if check_finite:
             for i, x in enumerate(cond):
@@ -259,13 +270,16 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
     ratio = c.vae.cfg.spatial_ratio
     lh, lw = height // ratio, width // ratio
     patch = tuple(c.dit_cfg["patch_size"])
+    #@@start layout
     if edit:
         layout = build_ref2va_packed_sequence(np.asarray(tags), [Ref("image")] * len(cond),
                                               [tuple(x.shape[1:4]) for x in cond], [], 1, lh, lw, NUM_AUDIO_LATENTS,
                                               patch, AUDIO_CHANNELS)
     else:
         layout = build_packed_sequence(np.asarray(tags), 1, lh, lw, NUM_AUDIO_LATENTS, patch, AUDIO_CHANNELS)
+    #@@end layout
 
+    #@@start noise-draws
     gen = Noise(seed)
     rows = []
     for x in cond:  # one draw per picture, packed order, then held at t = 0.999 (float32, as the pipeline mixes it)
@@ -277,6 +291,7 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
     rows.append(ops.patchify(mx.array(gen((1, c.dit_cfg["in_channels"], 1, lh, lw))), patch))
     video_rows = mx.concatenate(rows)
     audio_rows = mx.array(gen((NUM_AUDIO_LATENTS * AUDIO_CHANNELS, c.dit_cfg["audio_in_channels"])))
+    #@@end noise-draws
     dbg.update(layout=layout, initial_video_rows=video_rows, initial_audio_rows=audio_rows)
 
     stage("denoise")

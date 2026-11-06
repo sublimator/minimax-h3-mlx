@@ -15,8 +15,11 @@ from h3mlx import vae_ops as V
 from h3mlx.packing import Ref, build_packed_sequence, build_ref2va_packed_sequence
 from h3mlx.vae import VaeConfig, VideoVAE, encode_condition
 
+# Temporal strides only where the spatial stride is 2, as in the release: a temporal-only downsample pads no space, so
+# (2, 2, 1) / (1, 2, 2) would shrink a 48x40 picture to a 10x8 latent instead of 12x10 (both sides agree, but no
+# released VAE takes that path).
 VAE = dict(latent_channels=4, block_out_channels=(8, 8, 8), layers_per_block=1, spatial_downsample_factors=(2, 2, 1),
-           temporal_downsample_factors=(1, 2, 2), norm_num_groups=4, decoder_num_layers=2,
+           temporal_downsample_factors=(1, 2, 1), norm_num_groups=4, decoder_num_layers=2,
            decoder_num_attention_heads=2, decoder_attention_head_dim=16, decoder_num_register_tokens=2,
            latents_mean=tuple(0.1 * i for i in range(4)), latents_std=tuple(1.0 + 0.2 * i for i in range(4)))
 TILE = dict(tile_h=32, tile_w=32, tile_overlap_h=8, tile_overlap_w=8)
@@ -351,7 +354,7 @@ def run_diffusers(t, prompt, images, height, width, seed):
     return np.asarray(out["images"])[0], out["prompt_embeds"], out["text_token_tags"], out.get("condition_rows")
 
 
-def run_ours(t, prompt, images, height, width, seed):
+def components(t):
     from h3mlx.vae import VaeConfig
 
     qm = __import__("test_text_encoder_tiny").mlx_model(t["qwen"])
@@ -366,9 +369,16 @@ def run_ours(t, prompt, images, height, width, seed):
         vae_latents_mean=tuple(vcfg["latents_mean"]), vae_latents_std=tuple(vcfg["latents_std"]),
         dit_params=state_mx(t["dit"]), dit_cfg=dict(t["dit"].config), settings=I.Settings(**E2E), text_dtype=mx.float32)
     c.dit_cfg["patch_size"] = tuple(c.dit_cfg["patch_size"])
+    return c
+
+
+def run_ours(t, prompt, images, height, width, seed, free=False):
+    c = components(t)
     dbg = {}
     with _quiet():
-        img = I.generate(c, prompt, images=images, height=height, width=width, seed=seed, check_finite=True, debug=dbg)
+        img = I.generate(c, prompt, images=images, height=height, width=width, seed=seed, check_finite=True, debug=dbg,
+                         free_transformer=free)
+    dbg["components"] = c
     return img, dbg
 
 
@@ -401,6 +411,35 @@ def test_end_to_end_matches_diffusers(workflow):
     assert got.shape == want.shape
     assert np.abs(got - want).max() < 2e-5
     assert want.std() > 0.01  # not a flat image that would match anything
+
+
+@NEEDS_PROCESSOR
+def test_single_use_components_free_their_weights_and_change_nothing():
+    t = build()
+    rng = np.random.default_rng(11)
+    images = [Image.fromarray(rng.integers(0, 256, (h, w, 3), dtype=np.uint8)) for h, w in ((40, 48), (56, 32))]
+    keep, _ = run_ours(t, EDIT_PROMPT, images, None, None, seed=7)
+    free, dbg = run_ours(t, EDIT_PROMPT, images, None, None, seed=7, free=True)
+    c = dbg["components"]
+    assert np.array_equal(keep, free)
+    assert c.connector == {} and c.dit_params == {}
+    assert not any(k.startswith(("encoder.", "quant_conv.")) for k in c.vae.p) and c.vae.enc == {}
+    assert any(k.startswith("decoder.") for k in c.vae.p)
+
+
+def test_text2image_sides_default_on_their_own():
+    from diffusers.modular_pipelines.p_h3_image.before_denoise import PH3ImagePrepareLayoutStep
+    from diffusers.modular_pipelines.p_h3_image.before_encoder import round_canvas
+
+    defaults = {p.name: p.default for p in PH3ImagePrepareLayoutStep().inputs if p.name in ("height", "width")}
+    assert defaults == {"height": I.DEFAULT_SIZE, "width": I.DEFAULT_SIZE}
+    with _quiet():
+        for h, w in ((None, None), (1000, None), (None, 1000), (2176, 3872)):
+            want = round_canvas(h or defaults["height"], w or defaults["width"], 32)
+            assert I.text2image_size(h, w, 32) == want
+
+
+EDIT_PROMPT = "give the lighthouse in picture 1 the stripes from picture 2"
 
 
 # -- the released configs --------------------------------------------------------------------------------------------

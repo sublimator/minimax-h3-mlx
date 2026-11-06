@@ -88,6 +88,41 @@ def test_requests_and_answers_match_diffusers(processor, workflow, monkeypatch):
         assert np.array_equal(seen["inputs"]["image_grid_thw"], rec.inputs["image_grid_thw"].numpy())
 
 
+@pytest.mark.parametrize("answer,why", [
+    ("<think>\nok\n</think>\n\nA photograph of a boat at dawn.", "fine"),
+    ("<think>\nok\n</think>\n\nA boat.", "too short"),
+    ("A photograph of a boat at dawn, no reasoning block.", "no </think>"),
+    ("<think>\nok\n</think>\n\nA photograph </think> of a boat at dawn.", "two </think>"),
+    ("<think>\nok\n</think>\n\nA photograph of a boat at dawn.", "cut off"),
+])
+def test_answers_are_judged_as_diffusers_judges_them(processor, monkeypatch, answer, why):
+    from diffusers.modular_pipelines.p_h3_image import prompt_upsampler as D
+
+    tok = processor.tokenizer
+    end_id = tok.convert_tokens_to_ids("<|im_end|>")
+    ids = tok(answer, add_special_tokens=False)["input_ids"] + ([] if why == "cut off" else [end_id])
+    outcome = {}
+    for side in ("diffusers", "ours"):
+        try:
+            if side == "diffusers":
+                got = D.upsample_prompt(_Recorder(ids), processor, "a boat", max_new_tokens=len(ids))
+            else:
+                monkeypatch.setattr(U, "generate_ids", lambda *a, **k: ids)
+                got = U.upsample(None, processor, "a boat", max_new_tokens=len(ids))
+            outcome[side] = ("ok", got)
+        except RuntimeError:
+            outcome[side] = ("refused", None)
+    assert outcome["ours"] == outcome["diffusers"]
+    assert outcome["ours"][0] == ("ok" if why == "fine" else "refused")
+
+
+def test_requests_refused_before_the_model(processor):
+    with pytest.raises(ValueError):
+        U.upsample(None, processor, ["two", "requests"])
+    with pytest.raises(ValueError):
+        U.upsample(None, processor, "a boat", images=pictures() * 5)  # ten pictures
+
+
 def test_helpers_match_diffusers():
     from diffusers.modular_pipelines.p_h3_image import prompt_upsampler as D
 

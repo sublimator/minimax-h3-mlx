@@ -161,6 +161,18 @@ def test_cli_refuses_early(tiny, tmp_path):
         assert not (tmp_path / "early" / "run.json").exists()
 
 
+def test_cli_sizes(tiny, tmp_path):
+    """Text-to-image takes one side alone (the other defaults to 2912); an edit takes both or neither."""
+    _, rel, pics = tiny
+    out = tmp_path / "one-side"
+    assert _run(["--weights", rel, "--prompt-file", _prompt(tmp_path, T2I), "--out", out, "--plan-only",
+                 "--height", 1000]) == 0
+    assert (_log(out)["plan"]["height"], _log(out)["plan"]["width"]) == (1000, 2912)  # the tiny release's multiple is 8
+    with pytest.raises(SystemExit):
+        _run(["--weights", rel, "--prompt-file", _prompt(tmp_path, EDIT), "--out", tmp_path / "e", "--plan-only",
+              "--image", pics[0], "--height", 64])
+
+
 def test_upsampler_aspect_is_the_requested_size():
     from diffusers.modular_pipelines.p_h3_image.prompt_upsampler import aspect_ratio_label
 

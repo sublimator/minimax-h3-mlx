@@ -181,6 +181,11 @@ class VideoVAE:
         )
         return m[:, : -c.token_drop] if c.token_drop > 0 else m
 
+    def drop_encoder(self):
+        """Release the encoder's weights once nothing more will be encoded (decoding needs none of them)."""
+        self.p = {k: v for k, v in self.p.items() if not k.startswith(("encoder.", "quant_conv."))}
+        self.enc = {}
+
     # -- decode ------------------------------------------------------------------------------------------------------
 
     def _decoder(self, z):
