@@ -109,8 +109,9 @@ def main(argv=None) -> int:
     ap.add_argument("--vae-dtype", choices=["float32", "bfloat16"], default="float32",
                     help="float32 (as h3mlx decodes H3), or bfloat16 with the pipeline's float32 modules kept")
     ap.add_argument("--upsample", action="store_true", help="expand the request with the release's prompt upsampler")
-    ap.add_argument("--modulation-cache", action="store_true",
-                    help="compute the AdaLN modulation once for the run's timesteps and drop adaln_proj (~26 GB)")
+    ap.add_argument("--modulation-cache", action=argparse.BooleanOptionalAction, default=True,
+                    help="compute the AdaLN modulation once for the run's timesteps and drop adaln_proj (~26 GB); "
+                         "on by default")
     ap.add_argument("--max-new-tokens", type=int, help="upsampler budget, reasoning included (default 1024, edits 1536)")
     ap.add_argument("--plan-only", action="store_true", help="configs, tokenizer and processor only; no weights")
     ap.add_argument("--decode-from", type=Path,

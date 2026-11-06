@@ -110,6 +110,10 @@ one adds its rows to the sequence. `--sigmas` replaces the 9-point grid. The VAE
 re-decodes saved latents on their own: it takes no prompt or sampling options, checks the rows, and logs the saved
 request as its source.
 
+The AdaLN modulation depends only on the timestep, and a run uses about ten distinct timesteps, so the script computes
+it once per run and drops the 13B `adaln_proj` parameters (26 GB in bf16) before the rest of the transformer loads
+(`--no-modulation-cache` turns that off). It is the same arithmetic, batched; the tests match diffusers either way.
+
 **Measured on the M3 Ultra (60-core GPU, 256 GB),** 8 calls, bf16 transformer, float32 decode (the total includes
 loading; the peak is MLX's active allocations):
 
@@ -117,9 +121,11 @@ loading; the peak is MLX's active allocations):
 | --- | --- | --- | --- | --- | --- |
 | text-to-image, prompt as written | 2912x2912 | 8,395 | 26 s | 4.2 min | 69 GB |
 | edit, one 8.5 MP picture, `--upsample` | 2912x2912 | 17,749 | 69 s | 10.5 min | 72 GB |
+| edit, one 1.6 MP picture, `--upsample` | 2368x1760 | 9,382 | 30 s | 4.7 min | 69 GB |
+| the same, with the modulation cache | 2368x1760 | 9,320 | 29 s | 4.6 min | 43 GB |
 
-The upsampler took 14 s, the text encoder 2 s, the decode 34 s. The edit's picture doubled the sequence; an edit at
-4 MP should take about 40% of the time, around 4.5 min (an estimate from these runs, not measured).
+The first three ran before the modulation cache existed. The upsampler took 14 s, the text encoder 2 s, the decode 34 s
+at 8 MP. An edit's picture adds its own rows, so an 8 MP picture doubles an 8 MP sequence.
 
 ## Licence
 

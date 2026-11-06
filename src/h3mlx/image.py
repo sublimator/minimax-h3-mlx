@@ -302,12 +302,14 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
     stage("denoise")
     sched = schedules(sigmas if sigmas is not None else c.settings.sample_sigmas)
     cache = None
+    #@@start modulation-cache
     if modulation_cache:
         cache = ops.ModulationCache(c.dit_params, c.dit_cfg, schedule_timesteps(layout, sched))
         if free_transformer:
             c.dit_params = ops.ModulationCache.drop_weights(c.dit_params, c.dit_cfg)
             mx.clear_cache()
         dbg.update(modulation_timesteps=cache.t)
+    #@@end modulation-cache
     v, _ = denoise(c.dit_params, c.dit_cfg, layout, text, video_rows, audio_rows, sched, on_step=on_step,
                    check_finite=check_finite, cache=cache)
     dbg.update(final_video_rows=v)
