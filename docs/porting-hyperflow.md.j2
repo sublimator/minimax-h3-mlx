@@ -191,7 +191,7 @@ timestep count (MLX would otherwise broadcast a length-1 array silently).
 {{ code('src/h3mlx/ops.py', marker='adaln-rows-and-blocks') }}
 
 The modulation cache (main guide, §2.6) is keyed by `t` alone. With HyperFlow the tables depend on `(t, r)`, so
-`ModulationCache` itself, `dit_forward` and `schedule_timesteps` all raise rather than build or use wrong tables. (`ref2va` never builds a cache.) Extending the cache to pairs is
+`ModulationCache` itself, `dit_forward` and `schedule_calls` all raise rather than build or use wrong tables. (`ref2va` never builds a cache.) Extending the cache to pairs is
 possible but not done.
 
 ## 4. The sigma grid

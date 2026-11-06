@@ -306,13 +306,15 @@ and its refusals.
 **The modulation cache.** Each block's `adaln_proj` (2688 → 96,768, 13B parameters across the 50 blocks, 40% of the
 transformer) sees only the timestep embedding, and a P-H3-Image run has about ten distinct timesteps: the 8 grid points,
 plus 0.999 for an edit's pictures. `generate(modulation_cache=True)` builds the main guide's `ModulationCache` (§2.6)
-for exactly those values and, with `free_transformer`, drops the projections before the rest of the transformer is read
-(the weights load lazily). The run script does this by default:
+for each of the 8 calls and, with `free_transformer`, drops each block's projection as soon as its tables are built
+(the weights load lazily, so at most one is resident). The run script does this by default:
 
 {{ code('src/h3mlx/image.py', marker='modulation-cache') }}
 
 `test_modulation_cache_matches_diffusers_and_drops_adaln` runs both workflows cached against diffusers (1.8e-7) and
-against our uncached path, and checks the projections are gone. Pruna's ComfyUI files make the same cut a different
+requires them bit-identical to our uncached path, and checks the projections are gone. That equality is new: the
+first version batched all ten timesteps into one product, and on the release that drew a different picture from the
+same seed (17.5 dB from the uncached image), while the per-call tables reproduce it exactly. Pruna's ComfyUI files make the same cut a different
 way: a table of 4,097 timesteps by 16 numbers and 16-wide projections, a rank-16 fit of the same curve rather than its
 exact values.
 

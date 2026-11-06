@@ -219,15 +219,15 @@ function, not a drop-in replacement for the module.
 ### 2.6 Ours only: the modulation cache (opt-in, not used by `ref2va`)
 
 The modulations depend only on the timestep, never on the latents. A run can therefore compute every block's tables
-once for every timestep it will use, and drop the `adaln_proj` weights.
+up front for every model call it will make, and drop the `adaln_proj` weights.
 
 **What that saves.** The dropped projections hold 26.08 GB of `transformer_ref`'s 66.28 GB of bf16 parameters. The
-tables cost about 1 GB at the real size for a 50-point schedule: 98 distinct timesteps with image references only, 99
-with an audio reference. These are parameter bytes, not a measured peak.
+tables cost 9.7 MB per timestep of each call (96,768 bf16 values in each of 50 blocks), so 1-2 GB for a 50-point
+schedule whose calls carry two to four distinct timesteps each. These are parameter bytes, not a measured peak.
 
 **How to use it.**
 
-1. Build the cache for every timestep the run will see: `ModulationCache(params, cfg, schedule_timesteps(layout,
+1. Build the cache for every call the run will make: `ModulationCache(params, cfg, schedule_calls(layout,
    schedules))`.
 2. Pass `cache=` to `dit_forward` or `denoise`.
 3. Pass `ModulationCache.drop_weights(params, cfg)` as the params. This returns a **new** dict; the memory is freed only
@@ -236,17 +236,19 @@ with an audio reference. These are parameter bytes, not a measured peak.
 `pipeline.ref2va` does not do this. The runs on the M3 Ultra (256 GB) were made without it; the README gives their
 times and the denoise peak (70-88 GB).
 
-**Accuracy.** The maths is the same, but the floating-point result can differ. The cache multiplies all timesteps in
-one batch; the uncached path multiplies only that step's. A review found a larger mixed-precision model
-where they differ by 0.0028 at one step of 49. `tests/test_modulation_cache.py` checks two things:
+**Accuracy: bit-identical.** Each call's tables are computed from exactly the timestep array that call passes, so they
+are the tables the call would compute itself. An earlier version multiplied the union of all timesteps in one product:
+the same maths, but bf16 rounds a 10-row product differently from a 2-row one. A review found a larger mixed-precision
+model where the two differed by 0.0028 at one step of 49; on P-H3-Image's real weights the batched tables differed by
+one bf16 step in 165 entries of the first block, and 8 steps turned that into a different picture from the same seed.
+`tests/test_modulation_cache.py` now checks:
 
-- **On small fixtures:** cached and uncached are exactly equal.
-- **On that larger model at each of the schedule's 49 timestep plans:** one forward per plan on fixed inputs (not an
-  accumulated trajectory). Cached and uncached must both be within 1.25× torch-bf16's own error against an f32 run,
-  plus 0.0001. The worst observed is 1.06×.
+- **On small fixtures and through `denoise`:** cached and uncached are exactly equal.
+- **On that larger model at each of the schedule's 49 timestep plans:** cached and uncached are bit-identical, and
+  uncached stays within 1.25× torch-bf16's own error against an f32 run, plus 0.0001 (worst observed 1.06×).
 
 {{ code('src/h3mlx/ops.py', struct='ModulationCache') }}
-{{ code('src/h3mlx/denoise.py', function='schedule_timesteps') }}
+{{ code('src/h3mlx/denoise.py', function='schedule_calls') }}
 
 ---
 
