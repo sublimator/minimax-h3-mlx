@@ -33,7 +33,7 @@ Both were built op by op and tested against their implementations in
 No weights are needed. A plain clone runs 212 tests and skips 50. Those 50 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header. These files aren't shipped here because they
 belong to MiniMax, Video Rebirth and Pruna. Fetch them from Hugging Face at pinned revisions (about 50 MB, no weights)
-and all 262 run:
+and all 265 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest

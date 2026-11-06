@@ -104,7 +104,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--height", type=int, help="default 2912 (text-to-image), Picture 1's size >= 4 MP (edit)")
     ap.add_argument("--width", type=int)
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, help="default 0")
     ap.add_argument("--sigmas", type=str, help="comma-separated grid ending in 0 (default: the checkpoint's 9 points)")
     ap.add_argument("--vae-dtype", choices=["float32", "bfloat16"], default="float32",
                     help="float32 (as h3mlx decodes H3), or bfloat16 with the pipeline's float32 modules kept")
@@ -120,12 +120,15 @@ def main(argv=None) -> int:
         ap.error("--height and --width go together")
     if args.decode_from:
         given = [n for n, v in (("--prompt-file", args.prompt_file), ("--image", args.image), ("--sigmas", args.sigmas),
-                                ("--upsample", args.upsample), ("--height", args.height), ("--plan-only", args.plan_only))
+                                ("--upsample", args.upsample), ("--height", args.height), ("--plan-only", args.plan_only),
+                                ("--seed", args.seed is not None), ("--max-new-tokens", args.max_new_tokens is not None))
                  if v]
         if given:
             ap.error(f"--decode-from decodes the saved rows as they are; drop {', '.join(given)}")
     elif args.prompt_file is None:
         ap.error("--prompt-file is required (unless --decode-from)")
+    if args.seed is None and not args.decode_from:
+        args.seed = 0
     if len(args.image) > I.MAX_EDIT_IMAGES:
         ap.error(f"at most {I.MAX_EDIT_IMAGES} --image, got {len(args.image)}")
     sigmas = [float(x) for x in args.sigmas.split(",")] if args.sigmas else None
@@ -215,7 +218,7 @@ def main(argv=None) -> int:
         log["plan"] = plan(c, prompt, images, args.height, args.width, sigmas)
         if args.upsample and args.plan_only:
             log["plan"]["text_basis"] = ("the request as given: --upsample replaces it with a longer prompt before "
-                                         "encoding, so the run's text and sequence rows will be higher")
+                                         "encoding, so the run's text and sequence rows may differ")
         event("plan", **log["plan"])
         if args.plan_only:
             log["status"] = "planned"

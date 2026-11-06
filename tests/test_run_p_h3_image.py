@@ -106,6 +106,7 @@ def test_cli_redecode_is_faithful_and_says_where_it_came_from(tiny, tmp_path):
     assert log["plan"]["workflow"] == "decode" and (log["plan"]["height"], log["plan"]["width"]) == (40, 56)
     assert log["plan"]["source"]["prompt"] == T2I and log["plan"]["source"]["seed"] == 3
     assert len(log["plan"]["decode_from_sha256"]) == 64 and "prompt_sha256" not in log and "seed" not in log
+    assert log["settings"]["seed"] is None  # a replay has no seed of its own
     assert (again / "prompt.txt").read_text().strip() == T2I
 
 
@@ -142,7 +143,8 @@ def test_cli_redecode_refuses_rows_that_do_not_fit(tiny, tmp_path):
 
 
 @pytest.mark.parametrize("extra", [["--prompt-file", "p.txt"], ["--image", "a.png"], ["--sigmas", "1,0"],
-                                   ["--upsample"], ["--height", "8", "--width", "8"]])
+                                   ["--upsample"], ["--height", "8", "--width", "8"], ["--seed", "99"],
+                                   ["--seed", "0"], ["--max-new-tokens", "6"]])
 def test_cli_redecode_refuses_generation_options(tiny, tmp_path, extra):
     _, rel, _ = tiny
     with pytest.raises(SystemExit):
