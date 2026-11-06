@@ -32,15 +32,15 @@ Both were built op by op and tested against their implementations in
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 213 tests and skips 61. Those 61 need the releases' tokenizers, processors,
+No weights are needed. A plain clone runs 213 tests and skips 63. Those 63 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header. These files aren't shipped here because they
 belong to MiniMax, Video Rebirth and Pruna. Fetch them from Hugging Face at pinned revisions (about 50 MB, no weights)
-and all 274 run:
+and all 276 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest
 
-Or point `H3MLX_FIXTURES` at a copy. Seven of the 61 also need `ffmpeg` and `ffprobe` on the `PATH`.
+Or point `H3MLX_FIXTURES` at a copy. Seven of the 63 also need `ffmpeg` and `ffprobe` on the `PATH`.
 
 The oracle is diffusers main at `d3d8af89` (P-H3-Image isn't in a diffusers release yet); its H3 code is 0.42.1's plus a
 tensor-parallel plan, and the H3 tests pass against both.

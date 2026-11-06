@@ -72,8 +72,9 @@ entry (36 here) the final normed state. Two details decide what "the output of l
 
 - **Deepstack.** Qwen3-VL adds visual features to the hidden states of its first three decoder layers, after each
   layer returns. transformers records a layer's output as the layer returns it, so the recorded state is before that
-  add. (Only an edit has pictures, and the connector reads layers from 13 on, so this does not change P-H3-Image's
-  input; the test pins it anyway.)
+  add. The add itself reaches every later layer, so it does shape an edit's conditioning; what does not matter for
+  P-H3-Image is the recording point, because it reads layers 13 and up, past the three that have an add. The test
+  pins the recording point anyway.
 - **The last entry is normed.** transformers replaces the last recorded state with the model's final output, after
   the final RMSNorm.
 
@@ -234,6 +235,7 @@ dtype:
 Ours applies the same rule per class:
 
 {{ code('src/h3mlx/load.py', var='VAE_KEEP_F32') }}
+{{ code('src/h3mlx/load.py', function='vae_dtypes') }}
 {{ code('src/h3mlx/load.py', function='load_vae') }}
 
 The run script loads the image VAE in float32 by default, as h3mlx decodes H3; `--vae-dtype bfloat16` loads it the
@@ -269,7 +271,10 @@ The text-to-image label is taken from the requested size before the canvas is ro
 rounding of each other, so on the 9B model the prompt it writes can differ from torch's in places; the same validity
 checks decide whether it is usable. The tests: `test_requests_and_answers_match_diffusers` runs diffusers'
 `upsample_prompt` with a stand-in model that records its inputs and answers with fixed text, and compares input ids,
-pixels, grids and the returned prompt; `test_tiny_prefill_logits_match_transformers` and
+pixels, grids and the returned prompt; `test_answers_are_judged_as_diffusers_judges_them` and
+`test_edit_answers_must_be_edit_prompts` feed both sides the same answers (cut off, no `</think>`, two of them, too
+short, a text-to-image answer to an edit) and check they accept and refuse the same ones;
+`test_tiny_prefill_logits_match_transformers` and
 `test_tiny_greedy_tokens_match_transformers` compare a tiny random Qwen3.5 in transformers with the same weights in
 mlx-vlm (with and without pictures). On the release, for "give her a wide straw hat", the upsampler generated 312
 tokens (its reasoning, the brief and the end token) in 14 s, and the brief it wrote is valid and 224 tokens long.

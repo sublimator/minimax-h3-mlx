@@ -116,6 +116,29 @@ def test_answers_are_judged_as_diffusers_judges_them(processor, monkeypatch, ans
     assert outcome["ours"][0] == ("ok" if why == "fine" else "refused")
 
 
+@pytest.mark.parametrize("answer,ok", [(EDIT_ANSWER, True), (T2I_ANSWER, False)])
+def test_edit_answers_must_be_edit_prompts(processor, monkeypatch, answer, ok):
+    """With pictures, both sides also require the edit form: a text-to-image answer is refused, not used."""
+    from diffusers.modular_pipelines.p_h3_image import prompt_upsampler as D
+
+    tok = processor.tokenizer
+    ids = tok(answer, add_special_tokens=False)["input_ids"] + [tok.convert_tokens_to_ids("<|im_end|>")]
+    images = pictures()
+    outcome = {}
+    for side in ("diffusers", "ours"):
+        try:
+            if side == "diffusers":
+                got = D.upsample_prompt(_Recorder(ids), processor, "give her a hat",
+                                        images=[D.prepare_upsampler_image(im) for im in images], max_new_tokens=len(ids))
+            else:
+                monkeypatch.setattr(U, "generate_ids", lambda *a, **k: ids)
+                got = U.upsample(None, processor, "give her a hat", images=images, max_new_tokens=len(ids))
+            outcome[side] = ("ok", got)
+        except RuntimeError:
+            outcome[side] = ("refused", None)
+    assert outcome["ours"] == outcome["diffusers"] and (outcome["ours"][0] == "ok") == ok
+
+
 def test_requests_refused_before_the_model(processor):
     with pytest.raises(ValueError):
         U.upsample(None, processor, ["two", "requests"])

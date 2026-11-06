@@ -15,8 +15,8 @@ The MiniMax H3 transformer, scheduler, modular pipeline and autoencoders
 `docs/porting.md` and `docs/porting-hyperflow.md`. Its P-H3-Image implementation, at main commit d3d8af89
 (`src/diffusers/modular_pipelines/p_h3_image/`, `src/diffusers/models/autoencoders/autoencoder_kl_p_h3_image.py`,
 `src/diffusers/models/condition_embedders/condition_embedder_p_h3_image.py`), is the source of `src/h3mlx/image.py`,
-`src/h3mlx/upsampler.py` and the single-frame decoder in `src/h3mlx/vae.py` and `vae_ops.py`. Those files carry these
-notices:
+`src/h3mlx/upsampler.py` and the single-frame decoder in `src/h3mlx/vae.py` and `vae_ops.py`, and is quoted in
+`docs/porting-p-h3-image.md`. Those files carry these notices:
 
 ```
 Copyright 2025 The MiniMax Team and The HuggingFace Team. All rights reserved.
@@ -85,8 +85,8 @@ limitations under the License.
 
 ## mlx-vlm
 
-https://github.com/Blaizzy/mlx-vlm, tag v0.7.11. MIT License. `docs/porting.md` quotes the Qwen3-VL
-`hidden_state_at_layer` method.
+https://github.com/Blaizzy/mlx-vlm, tag v0.7.11. MIT License. `docs/porting.md` and `docs/porting-p-h3-image.md`
+quote the Qwen3-VL `hidden_state_at_layer` method.
 
 ```
 MIT License

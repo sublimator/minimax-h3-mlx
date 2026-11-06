@@ -11,12 +11,13 @@ licence notices are reproduced in THIRD_PARTY_NOTICES.md, as their licences requ
   presentation, reference geometry, video VAE, audio VAE and pipeline are modified derivatives of it, translated from
   PyTorch to MLX and NumPy. docs/porting.md quotes it. Its P-H3-Image implementation (Pruna AI) is the source of
   src/h3mlx/image.py and src/h3mlx/upsampler.py and of the single-frame decoder in vae.py and vae_ops.py (modified
-  derivatives), and the tests run against it.
+  derivatives), the tests run against it, and docs/porting-p-h3-image.md quotes it.
 - HyperFlow (Video Rebirth), Apache License 2.0: the 8-step LoRA loader, two-time embedder and sigma grid, translated in
   src/h3mlx/hyperflow.py, ops.py and denoise.py (modified derivatives), transcribed in torch in tests/test_hyperflow.py
   as oracles, and quoted in docs/porting-hyperflow.md.
 - PEFT (Hugging Face), Apache License 2.0: quoted in docs/porting-hyperflow.md; the tests use it as an oracle.
-- mlx-vlm (Prince Canuma), MIT License: quoted in docs/porting.md; it runs the Qwen3-VL text encoder.
+- mlx-vlm (Prince Canuma), MIT License: quoted in docs/porting.md and docs/porting-p-h3-image.md; it runs the
+  Qwen3-VL text encoder and the P-H3-Image prompt upsampler.
 - torchaudio (PyTorch), BSD 2-Clause License: src/h3mlx/resample.py is its sinc resampler, copied verbatim, with its
   licence in that file.
 
