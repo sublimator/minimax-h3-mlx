@@ -299,17 +299,36 @@ the image is the same.
 `test_end_to_end_matches_diffusers` runs diffusers' `PH3ImageBlocks` (upsampler removed) and `generate` on the same
 tiny random components: text-to-image, an edit with two pictures at Picture 1's size, and one on a set canvas. It
 compares the token tags exactly, the prompt embeddings within 1e-4 (absolute and relative), the noised picture rows,
-and the decoded images to 2e-5 (measured: under 1e-6). `tests/test_run_p_h3_image.py` saves those components in the release's own layout and
-runs the command line against `PH3ImageBlocks` for both workflows, plus the re-decode path and its refusals.
+and the decoded images to 2e-5 (measured: under 1e-6). `tests/test_run_p_h3_image.py` saves those components in the
+release's own layout and runs the command line against `PH3ImageBlocks` for both workflows, plus the re-decode path
+and its refusals.
 
-**Measured on an M3 Ultra (60-core GPU, 256 GB)** with the release, 8 calls, bf16 transformer, float32 decode, at
-commits `fcf379a` (text-to-image) and `ac3da69` (edit), before `generate` dropped the connector and encoder after use.
-The total includes loading; the peak is MLX's active allocations, in decimal GB:
+**The modulation cache.** Each block's `adaln_proj` (2688 → 96,768, 13B parameters across the 50 blocks, 40% of the
+transformer) sees only the timestep embedding, and a P-H3-Image run has about ten distinct timesteps: the 8 grid points,
+plus 0.999 for an edit's pictures. `generate(modulation_cache=True)` builds the main guide's `ModulationCache` (§2.6)
+for exactly those values and, with `free_transformer`, drops the projections before the rest of the transformer is read
+(the weights load lazily). The run script does this by default:
+
+{{ code('src/h3mlx/image.py', marker='modulation-cache') }}
+
+`test_modulation_cache_matches_diffusers_and_drops_adaln` runs both workflows cached against diffusers (1.8e-7) and
+against our uncached path, and checks the projections are gone. Pruna's ComfyUI files make the same cut a different
+way: a table of 4,097 timesteps by 16 numbers and 16-wide projections, a rank-16 fit of the same curve rather than its
+exact values.
+
+**Measured on an M3 Ultra (60-core GPU, 256 GB)** with the release, 8 calls, bf16 transformer, float32 decode. The
+first two rows ran at commits `fcf379a` (text-to-image) and `ac3da69` (edit), before `generate` dropped the connector
+and encoder after use; the last two at the commits shown. The total includes loading; the peak is MLX's active
+allocations, in decimal GB:
 
 | request | size | rows | warm call (mean after the first) | total | MLX peak (GB) |
 | --- | --- | --- | --- | --- | --- |
 | text-to-image, prompt as written | 2912 × 2912 | 8,395 | 26.0 s | 4.2 min | 69 GB |
 | edit, one 8.5 MP picture, upsampled | 2912 × 2912 | 17,749 | 69.4 s | 10.5 min | 72 GB |
+| edit, one 1.6 MP picture, upsampled (`96d5198`) | 2368 × 1760 | 9,382 | 29.8 s | 4.7 min | 69.3 GB |
+| the same, with the modulation cache (`e3b94ef`) | 2368 × 1760 | 9,320 | 29.3 s | 4.6 min | 43.3 GB |
+
+The cache's saving is the 26 GB of projections; the speed is unchanged (reading them cost about 30 ms a call).
 
 ## 11. Not done, and open
 
@@ -317,5 +336,4 @@ The total includes loading; the peak is MLX's active allocations, in decimal GB:
   has only run on our side. A bf16 run of both pipelines on the same seed would show how far they drift.
 - **Not ported:** diffusers' component offloading and tensor parallelism, and Pruna's ComfyUI files (int8, w4a8, and a
   20B transformer whose AdaLN projections are replaced by a table).
-- **The modulation cache** (main guide §2.6) would apply unchanged: P-H3-Image's steps are single-time. It is not wired
-  into `generate`.
+- **Pruna's rank-16 AdaLN table** is not ported; ours caches the exact values instead (§10).
