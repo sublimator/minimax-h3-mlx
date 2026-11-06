@@ -4,9 +4,11 @@
     uv run python scripts/run_p_h3_image.py --weights P-H3-Image --prompt-file edit.txt --image photo.png \\
         --image hat.png --out out/edit-001
 
-The prompt is rendered as written: P-H3-Image wants a full, specific prompt (its card: say what the image is, one
-scene, quote every word of text, no hype words). An edit instruction gets "Edit <Picture 1>. " in front unless it
-starts with it.
+The prompt is rendered as written unless `--upsample`: P-H3-Image wants a full, specific prompt (its card: say what
+the image is, one scene, quote every word of text, no hype words). An edit instruction gets "Edit <Picture 1>. " in
+front unless it starts with it. `--upsample` first runs the release's prompt upsampler (Qwen3.5-9B, ~19 GB, freed
+before the image model loads) on the request, as the diffusers pipeline does by default; the prompt it wrote is saved
+as `prompt.txt` and logged.
 
 Order: text encoder (Qwen3-VL-4B, ~9 GB, freed after) -> pictures through the VAE encoder (edits) -> 8 transformer
 calls (66 GB, read on first use) -> save `final_rows.npz`, free the transformer -> decode -> `image.png`. `run.json`
@@ -31,6 +33,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from h3mlx import image as I  # noqa: E402
 from h3mlx import load  # noqa: E402
+from h3mlx import upsampler as U  # noqa: E402
 from h3mlx.packing import Ref, build_packed_sequence, build_ref2va_packed_sequence  # noqa: E402
 from h3mlx.vae import VaeConfig, VideoVAE  # noqa: E402
 from run_ref2va import dit_tflop_per_call, mem, provenance, sha256  # noqa: E402
@@ -88,6 +91,8 @@ def main(argv=None) -> int:
     ap.add_argument("--sigmas", type=str, help="comma-separated grid ending in 0 (default: the checkpoint's 9 points)")
     ap.add_argument("--vae-dtype", choices=["float32", "bfloat16"], default="float32",
                     help="decoder precision: float32 (as h3mlx decodes H3) or the stored bfloat16 (the pipeline's)")
+    ap.add_argument("--upsample", action="store_true", help="expand the request with the release's prompt upsampler")
+    ap.add_argument("--max-new-tokens", type=int, help="upsampler budget, reasoning included (default 1024, edits 1536)")
     ap.add_argument("--plan-only", action="store_true", help="configs, tokenizer and processor only; no weights")
     ap.add_argument("--decode-from", type=Path, help="decode a saved final_rows.npz instead of running the model")
     ap.add_argument("--memory-limit-gb", type=float, default=150.0)
@@ -140,6 +145,29 @@ def main(argv=None) -> int:
             return h
 
         c = config_components(weights, encode_states)
+        if args.upsample and not args.plan_only and not args.decode_from:
+            import gc
+
+            event("upsample_start", request_chars=len(prompt))
+            model, proc = U.load_upsampler(weights / "prompt_upsampler", weights / "prompt_upsampler_processor")
+            if images:
+                aspect = "1:1"
+            else:
+                h, w = I.round_canvas(args.height or I.DEFAULT_SIZE, args.width or I.DEFAULT_SIZE, c.canvas_multiple)
+                aspect = U.aspect_ratio_label(w, h)
+            answer = {}
+            log["request"] = prompt
+            try:
+                prompt = U.upsample(model, proc, prompt, images=images or None, aspect_ratio=aspect,
+                                    max_new_tokens=args.max_new_tokens,
+                                    on_answer=lambda a, n: answer.update(text=a, tokens=n))
+            finally:
+                log["upsampler_answer"] = answer.get("text")
+                del model, proc
+                gc.collect()
+                mx.clear_cache()
+            log["upsampled_prompt"] = prompt
+            event("upsampled", tokens=answer.get("tokens"), prompt_chars=len(prompt), aspect_ratio=aspect)
         log["plan"] = plan(c, prompt, images, args.height, args.width, sigmas)
         event("plan", **log["plan"])
         if args.plan_only:

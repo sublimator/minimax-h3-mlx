@@ -14,7 +14,8 @@ What it writes, all from Hugging Face at pinned revisions:
   hyperflow.manifest-5bde94d7.json        that repo's hyperflow.json
   P-H3-Image/                             PrunaAI/P-H3-Image @ 7f98ace: modular_model_index.json, the transformer, vae,
                                           text_connector, text_encoder and scheduler configs, the transformer's weight
-                                          index, the tokenizer and the processor
+                                          index, the tokenizer and the processor; the prompt upsampler's configs and
+                                          processor
 
 These files belong to MiniMax, Video Rebirth and Pruna and come under their licences; they are not part of this
 repository. Without them the tests that need them are skipped.
@@ -83,7 +84,8 @@ def main() -> None:
     snapshot_download(P_H3_IMAGE, revision=P_H3_IMAGE_REV, local_dir=out / "P-H3-Image", allow_patterns=[
         "modular_model_index.json", "transformer/config.json", "transformer/*.index.json", "vae/config.json",
         "text_connector/config.json", "text_encoder/config.json", "scheduler/*", "audio_scheduler/*", "tokenizer/*",
-        "processor/*"])
+        "processor/*", "prompt_upsampler/config.json", "prompt_upsampler/generation_config.json",
+        "prompt_upsampler_processor/*"])
     shutil.rmtree(out / "P-H3-Image" / ".cache", ignore_errors=True)
     print(f"wrote {out}")
 
