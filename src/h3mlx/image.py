@@ -22,7 +22,7 @@ import numpy as np
 from PIL import Image
 
 from . import ops
-from .denoise import Schedules, assert_finite, denoise
+from .denoise import Schedules, assert_finite, denoise, schedule_timesteps
 from .packing import Ref, build_packed_sequence, build_ref2va_packed_sequence
 from .pipeline import ENCODE_SEED, NOISE_AUG, PIXEL_MEAN, PIXEL_STD, Noise
 from .presentation import build_presentation
@@ -225,14 +225,19 @@ def to_uint8(image: np.ndarray) -> np.ndarray:
 
 def generate(c: Components, prompt: str, images=None, height=None, width=None, seed=0, sigmas=None, on_step=None,
              debug: dict | None = None, check_finite: bool = False, on_denoised=None, free_transformer: bool = False,
-             on_stage=None) -> np.ndarray:
+             on_stage=None, modulation_cache: bool = False) -> np.ndarray:
     """One P-H3-Image request: text-to-image without `images`, an edit with them. Returns float32 (H, W, 3) in
     [0, 1]. The prompt is rendered as given (run the prompt upsampler first to expand a short request).
 
     `debug` collects intermediates under diffusers' state names; `on_denoised(video_rows, meta)` runs before decoding;
     `free_transformer` makes the components single-use: the connector is dropped once the prompt is encoded, the VAE
     encoder once the pictures are, and `c.dit_params` before decoding. `on_stage(name)`: text, pictures, layout,
-    denoise, decode."""
+    denoise, decode.
+
+    `modulation_cache` computes every block's AdaLN modulation once, for the run's ~10 distinct timesteps
+    (`ops.ModulationCache`), instead of projecting it in every call: the same maths, batched. With `free_transformer`
+    the 13B `adaln_proj` parameters (~26 GB in bf16) are then dropped from `c.dit_params`. The weights load lazily, so
+    those are read and released before the rest of the transformer is read."""
     dbg = debug if debug is not None else {}
     stage = on_stage or (lambda name: None)
     m = c.canvas_multiple
@@ -296,8 +301,15 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
 
     stage("denoise")
     sched = schedules(sigmas if sigmas is not None else c.settings.sample_sigmas)
+    cache = None
+    if modulation_cache:
+        cache = ops.ModulationCache(c.dit_params, c.dit_cfg, schedule_timesteps(layout, sched))
+        if free_transformer:
+            c.dit_params = ops.ModulationCache.drop_weights(c.dit_params, c.dit_cfg)
+            mx.clear_cache()
+        dbg.update(modulation_timesteps=cache.t)
     v, _ = denoise(c.dit_params, c.dit_cfg, layout, text, video_rows, audio_rows, sched, on_step=on_step,
-                   check_finite=check_finite)
+                   check_finite=check_finite, cache=cache)
     dbg.update(final_video_rows=v)
     meta = dict(ncv=layout.num_condition_video_rows, lh=lh, lw=lw)
     if on_denoised:

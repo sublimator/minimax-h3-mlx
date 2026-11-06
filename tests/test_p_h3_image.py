@@ -372,12 +372,12 @@ def components(t):
     return c
 
 
-def run_ours(t, prompt, images, height, width, seed, free=False):
+def run_ours(t, prompt, images, height, width, seed, free=False, cache=False):
     c = components(t)
     dbg = {}
     with _quiet():
         img = I.generate(c, prompt, images=images, height=height, width=width, seed=seed, check_finite=True, debug=dbg,
-                         free_transformer=free)
+                         free_transformer=free, modulation_cache=cache)
     dbg["components"] = c
     return img, dbg
 
@@ -425,6 +425,28 @@ def test_single_use_components_free_their_weights_and_change_nothing():
     assert c.connector == {} and c.dit_params == {}
     assert not any(k.startswith(("encoder.", "quant_conv.")) for k in c.vae.p) and c.vae.enc == {}
     assert any(k.startswith("decoder.") for k in c.vae.p)
+
+
+@NEEDS_PROCESSOR
+@pytest.mark.parametrize("workflow", ["text2image", "edit"])
+def test_modulation_cache_matches_diffusers_and_drops_adaln(workflow):
+    """The cached AdaLN path against diffusers (which projects every call) and against our uncached path, with the
+    projections dropped: the run's distinct timesteps are the 8 grid points, plus 0.999 for an edit's pictures."""
+    t = build()
+    rng = np.random.default_rng(11)
+    images, height, width, prompt = None, 40, 56, "A risograph print of a lighthouse at dusk, two inks, no other text."
+    if workflow == "edit":
+        images = [Image.fromarray(rng.integers(0, 256, (h, w, 3), dtype=np.uint8)) for h, w in ((40, 48), (56, 32))]
+        height, width, prompt = None, None, EDIT_PROMPT
+    with torch.no_grad():
+        want, *_ = run_diffusers(t, prompt, images, height, width, seed=7)
+    plain, _ = run_ours(t, prompt, images, height, width, seed=7)
+    cached, dbg = run_ours(t, prompt, images, height, width, seed=7, free=True, cache=True)
+    print(workflow, f"cached vs diffusers {np.abs(cached - want).max():.2e}, vs uncached {np.abs(cached - plain).max():.2e}")
+    assert np.abs(cached - want).max() < 2e-5
+    assert np.abs(cached - plain).max() < 1e-6
+    assert len(dbg["modulation_timesteps"]) == (9 if workflow == "edit" else 8)
+    assert not any("adaln_proj" in k or k.startswith("norm_out.linear") for k in dbg["components"].dit_params)
 
 
 def test_text2image_sides_default_on_their_own():
