@@ -123,5 +123,9 @@ The upsampler took 14 s, the text encoder 2 s, the decode 34 s. The edit's pictu
 The code is under the Apache License 2.0 ([`LICENSE`](LICENSE)). Parts are translated from, or quote, diffusers
 (its P-H3-Image code is Pruna AI's), HyperFlow, PEFT, mlx-vlm and torchaudio. Their notices are in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), and [`NOTICE`](NOTICE) says what came from where. The MiniMax H3
-and P-H3-Image weights and release files are not included. They come under MiniMax's own licence, which has territory
-exclusions, so read it before you use them.
+and P-H3-Image weights and release files are not included. MiniMax H3 comes under MiniMax's own licence, which has
+territory exclusions, so read it before you use them. P-H3-Image's transformer, VAE, text connector and text encoder
+come under that same licence, with the text encoder's Qwen3-VL-4B parts and the prompt upsampler (based on
+Qwen3.5-9B) under the Apache License 2.0: see the
+[NOTICE](https://huggingface.co/PrunaAI/P-H3-Image/blob/7f98acef503cf2bcfba821a78cb1cf1a9928b2df/NOTICE) in its
+release.
