@@ -110,9 +110,10 @@ one adds its rows to the sequence. `--sigmas` replaces the 9-point grid. The VAE
 re-decodes saved latents on their own: it takes no prompt or sampling options, checks the rows, and logs the saved
 request as its source.
 
-**Measured on the M3 Ultra (60-core GPU, 256 GB),** 8 calls, bf16 transformer, float32 decode:
+**Measured on the M3 Ultra (60-core GPU, 256 GB),** 8 calls, bf16 transformer, float32 decode (the total includes
+loading; the peak is MLX's active allocations):
 
-| request | size | rows | per call | total | peak |
+| request | size | rows | warm call (mean after the first) | total | MLX peak (GB) |
 | --- | --- | --- | --- | --- | --- |
 | text-to-image, prompt as written | 2912x2912 | 8,395 | 26 s | 4.2 min | 69 GB |
 | edit, one 8.5 MP picture, `--upsample` | 2912x2912 | 17,749 | 69 s | 10.5 min | 72 GB |

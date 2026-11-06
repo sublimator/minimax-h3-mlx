@@ -331,6 +331,9 @@ still runs the plan's header check, but doesn't hash or load the adapter.
   transients. It is not done: it rounds differently from PEFT's unmerged path, and it would need its own error budget,
   like the modulation cache's.
 
+**Measured since.** HyperFlow has run on the M3 Ultra since this was written: the 1344×768 run with a 2048 px reference
+took 54 min in all, against the ≈ 50–51 min of denoise projected above. The README's table has the other sizes.
+
 ## 8. The tests and the oracle
 
 `tests/test_hyperflow.py` builds HyperFlow-format files for tiny models in the public key format, written by the test
@@ -371,9 +374,10 @@ Eight tiny seeds show a wider spread than the base model's; they say nothing abo
 
 ## 9. Not done, and open
 
-- **No real-weight run yet.** No real-weight HyperFlow run had been made when this was written. Quality,
-  memory and speed with HyperFlow are unmeasured. The tests pin a tiny model: one f32 8-call loop at rank 4, and one
-  mixed-precision forward on 4 layers. Nothing here compares a decoded clip against their diffusers pipeline.
+- **Real-weight runs.** HyperFlow has run on the release since this guide was first written: the README gives the
+  times and the denoise peak, and notes that it adds some frame-to-frame shimmer against the base model. The tests pin
+  a tiny model: one f32 8-call loop at rank 4, and one mixed-precision forward on 4 layers. Nothing here compares a
+  decoded clip against their diffusers pipeline.
 - **Shifts.** The run script uses the release's shifts (12 and 3). It does not read a modified scheduler config; a
   caller who changes those passes them to `HyperFlowMeta.schedules`.
 - **Not ported:** Sol-Attn (CUDA only), Ulysses context parallel, merged LoRA, a two-time modulation cache, and the

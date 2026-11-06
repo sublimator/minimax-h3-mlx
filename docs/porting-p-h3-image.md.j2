@@ -116,8 +116,9 @@ Ours reuses the H3 presentation builder (main guide §5) with image references o
 {{ code('src/h3mlx/image.py', function='edit_presentation') }}
 
 The pictures the encoder sees are the ~1 MP copies from §4, not the ones the VAE encodes. The end-to-end tests (§10)
-compare the token tags exactly and the prompt embeddings to 1e-4. A tiny random model barely reads its prompt (a wholly
-different prompt moves its image by about 2e-3), so the image alone could not catch a presentation error.
+compare the token tags exactly and the prompt embeddings within 1e-4 (absolute and relative). A tiny random model barely
+reads its prompt (a wholly different prompt moves its image by about 2e-3), so the image alone could not catch a
+presentation error.
 
 ## 4. Edit sizes
 
@@ -144,8 +145,8 @@ canvas and every resized picture pixel for pixel, with and without a canvas.
 ## 5. Encoding the pictures
 
 The pictures go through H3's conditioning recipe unchanged: ImageNet normalisation, the posterior *sampled* under a
-fresh generator seeded 42 for each picture, a float16 round trip, then the latent normalisation. A single frame takes the
-VAE's tiled spatial encoder alone, as an H3 image reference does.
+fresh generator seeded 42 for each picture, a float16 round trip, then the latent normalisation. A single frame takes
+the VAE's tiled spatial encoder alone, as an H3 image reference does.
 
 {{ code(P + 'encoders.py', function='encode_vae_condition', root=DM) }}
 {{ code('src/h3mlx/image.py', function='encode_pictures') }}
@@ -164,7 +165,7 @@ Both layouts are H3's. Text-to-image is the t2va layout for one latent frame and
 {{ code('src/h3mlx/image.py', function='text2image_size') }}
 
 An edit is the ref2va layout with image references only: each picture takes one integer slot on the rotary clock, and
-the generated rows share the slot after the last picture.
+the generated image rows share the slot after the last picture (the two audio latents count up from it).
 
 {{ code(P + 'before_denoise.py', function='PH3ImageEditPrepareLayoutStep.build_edit_packed_sequence', root=DM) }}
 
@@ -226,9 +227,9 @@ refuse more than one frame, and ours does too.
 **Precision.** With a `torch_dtype`, diffusers loads every parameter in that dtype except the class's
 `_keep_in_fp32_modules`, matched as a component of the dotted name. The two VAE classes keep different lists:
 `["encoder", "quant_conv", "proj_out"]` for the image VAE, and `encoder`, `quant_conv`, the three norms and the two
-layer scales for H3's. The release stores the image decoder in bf16 (its `proj_out` included) and the encoder in
-float32, so loading in bf16 upcasts `proj_out` to float32. `decode` then casts the latents to `post_quant_conv`'s
-dtype:
+layer scales for H3's. The release stores the image decoder in bf16 (its `proj_out` included) and the encoder in float32
+(read from its safetensors header), so loading in bf16 upcasts `proj_out` to float32. `decode` then casts the latents to
+`post_quant_conv`'s dtype:
 
 {{ code(PVAE, function='AutoencoderKLPH3Image.decode', root=DM) }}
 
@@ -238,14 +239,21 @@ Ours applies the same rule per class:
 {{ code('src/h3mlx/load.py', function='vae_dtypes') }}
 {{ code('src/h3mlx/load.py', function='load_vae') }}
 
-The run script loads the image VAE in float32 by default, as h3mlx decodes H3; `--vae-dtype bfloat16` loads it the
-pipeline's way. `test_vae_bf16_loading_matches_from_pretrained` compares every parameter's dtype with
+The run script loads the image VAE in float32 by default, as h3mlx decodes H3; `--vae-dtype bfloat16` loads its
+weights the pipeline's way. `test_vae_bf16_loading_matches_from_pretrained` compares every parameter's dtype with
 `from_pretrained(torch_dtype=bfloat16)` for both classes.
 
-The pixels are then un-normalised and rounded the way `VaeImageProcessor` rounds:
+That matches the weights, not every rounding of the activations. One known difference on the bf16 path: diffusers
+rounds the final LayerNorm's output to bf16 (the norm runs in the decoder's dtype) and then widens it for the float32
+`proj_out`; ours computes the norm in float32 and keeps that result into `proj_out` (`vit_decoder`'s last lines). On a
+tiny model, adding that rounding moved the output by up to 5e-3 without lowering the error against torch, so it is
+left as is. The default float32 decode rounds nothing.
+
+The pixels are then un-normalised and clamped, and rounded to 8 bits the way `VaeImageProcessor.numpy_to_pil` rounds:
 
 {{ code(P + 'decoders.py', function='PH3ImageDecodeStep.__call__', root=DM) }}
 {{ code('src/h3mlx/image.py', function='decode') }}
+{{ code('src/h3mlx/image.py', function='to_uint8') }}
 
 `test_image_decode_matches` (three latent sizes, tiled), `test_image_decode_untiled_and_frame_position` and
 `test_image_decode_bf16_policy_matches_pipeline` compare the decoder with diffusers'.
@@ -290,13 +298,15 @@ the image is the same.
 
 `test_end_to_end_matches_diffusers` runs diffusers' `PH3ImageBlocks` (upsampler removed) and `generate` on the same
 tiny random components: text-to-image, an edit with two pictures at Picture 1's size, and one on a set canvas. It
-compares the token tags exactly, the prompt embeddings to 1e-4, the noised picture rows, and the decoded images to
-2e-5 (measured: under 1e-6). `tests/test_run_p_h3_image.py` saves those components in the release's own layout and
+compares the token tags exactly, the prompt embeddings within 1e-4 (absolute and relative), the noised picture rows,
+and the decoded images to 2e-5 (measured: under 1e-6). `tests/test_run_p_h3_image.py` saves those components in the release's own layout and
 runs the command line against `PH3ImageBlocks` for both workflows, plus the re-decode path and its refusals.
 
-**Measured on an M3 Ultra (60-core GPU, 256 GB)** with the release, 8 calls, bf16 transformer, float32 decode:
+**Measured on an M3 Ultra (60-core GPU, 256 GB)** with the release, 8 calls, bf16 transformer, float32 decode, at
+commits `fcf379a` (text-to-image) and `ac3da69` (edit), before `generate` dropped the connector and encoder after use.
+The total includes loading; the peak is MLX's active allocations, in decimal GB:
 
-| request | size | rows | per call | total | peak |
+| request | size | rows | warm call (mean after the first) | total | MLX peak (GB) |
 | --- | --- | --- | --- | --- | --- |
 | text-to-image, prompt as written | 2912 × 2912 | 8,395 | 26.0 s | 4.2 min | 69 GB |
 | edit, one 8.5 MP picture, upsampled | 2912 × 2912 | 17,749 | 69.4 s | 10.5 min | 72 GB |

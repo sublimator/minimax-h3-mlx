@@ -233,8 +233,8 @@ with an audio reference. These are parameter bytes, not a measured peak.
 3. Pass `ModulationCache.drop_weights(params, cfg)` as the params. This returns a **new** dict; the memory is freed only
    when nothing else, such as the original dict, still holds those arrays.
 
-`pipeline.ref2va` does not do this yet. The first 256 GB run is planned without it; whether it fits is what that run
-will measure.
+`pipeline.ref2va` does not do this. The runs on the M3 Ultra (256 GB) were made without it; the README gives their
+times and the denoise peak (70-88 GB).
 
 **Accuracy.** The maths is the same, but the floating-point result can differ. The cache multiplies all timesteps in
 one batch; the uncached path multiplies only that step's. A review found a larger mixed-precision model
