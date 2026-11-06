@@ -412,9 +412,9 @@ by learned layer scales:
 {{ code('src/h3mlx/vae.py', function='encode_condition') }}
 
 **Tests.** `tests/test_vae_ops.py` and `tests/test_vae.py` use reduced configs: spatial ratio 4, 3 levels and 32 px
-tiles with 8 px overlap, chosen so tiling, the single-frame branch, chunking and decode padding all run. In their
-reviews, one ran ratio 16 with the real 256/64 tiles and another a 124-frame encode at the real ratios;
-those probes live in their review worktrees, not in this repo's suite.
+tiles with 8 px overlap, chosen so tiling, the single-frame branch, chunking and decode padding all run. Two one-off
+checks also ran ratio 16 with the real 256/64 tiles and a 124-frame encode at the real ratios; they are not in this
+repo's suite.
 
 ---
 
@@ -458,8 +458,8 @@ torchaudio 2.9.1 requires torch 2.9.1 and we run torch 2.15, so `src/h3mlx/resam
 functions verbatim under torchaudio's BSD-2 licence. `tests/test_resample.py` checks the copy against outputs from
 real torchaudio 2.9.1 at 48, 44.1, 22.05 and 16 kHz.
 
-**Tests.** `tests/test_audio_vae.py` covers a tiny config. A review also ran the release's hop of 800 in
-its review.
+**Tests.** `tests/test_audio_vae.py` covers a tiny config. The release's hop of 800 was also checked once, outside
+the suite.
 
 This section is a partial tour. The full DAC encoder and BigVGAN decoder are `encoder`, `pre_block`, `amp_block` and
 `bigvgan` in `src/h3mlx/audio_vae.py`.
