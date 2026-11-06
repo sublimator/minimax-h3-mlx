@@ -1,7 +1,7 @@
 [project]
 name = "h3mlx"
 version = "0.0.1"
-description = "MiniMax H3 in MLX, op by op, tested against diffusers 0.42.1"
+description = "MiniMax H3 and P-H3-Image in MLX, op by op, tested against diffusers"
 license = "Apache-2.0"
 requires-python = ">=3.11,<3.14"
 # torch (CPU): the seeded noise and torchaudio's resampler; transformers + torchvision: the Qwen3-VL tokenizer and

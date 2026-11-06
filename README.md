@@ -1,10 +1,14 @@
 # h3mlx
 
-MiniMax H3 (text and reference images to video with sound) in [MLX](https://github.com/ml-explore/mlx), for Apple
-silicon. It was built op by op and tested against the MiniMax H3 implementation in
-[diffusers](https://github.com/huggingface/diffusers) 0.42.1 (`transformer_minimax_h3.py`, `scheduling_minimax_h3.py`,
-`modular_pipelines/minimax_h3/`) on small random tensors. It also runs [P-H3-Image](#p-h3-image), Pruna AI's image
-model built on H3's transformer.
+Two models in [MLX](https://github.com/ml-explore/mlx), for Apple silicon:
+
+- **MiniMax H3:** text and reference images to video with sound.
+- **[P-H3-Image](#p-h3-image):** Pruna AI's image model built on H3's transformer, for text-to-image and editing with up
+  to 8 pictures.
+
+Both were built op by op and tested against their implementations in
+[diffusers](https://github.com/huggingface/diffusers) (`transformer_minimax_h3.py`, `scheduling_minimax_h3.py`,
+`modular_pipelines/minimax_h3/`, `modular_pipelines/p_h3_image/` and the autoencoders) on small random tensors.
 
 ## What's here
 
@@ -15,9 +19,11 @@ model built on H3's transformer.
   tiling) and the audio VAE.
 - **HyperFlow:** Video Rebirth's [8-step LoRA](https://github.com/Video-Rebirth/hyperflow) (`--hyperflow`), 8
   transformer calls instead of 49.
-- **P-H3-Image:** text-to-image and editing with up to 8 pictures, and its prompt upsampler (see below).
+- **P-H3-Image:** both workflows end to end, its text connector, the single-frame image decoder, and its prompt
+  upsampler (Qwen3.5-9B, via mlx-vlm). It reuses H3's transformer, packing and denoise loop unchanged.
 - **Porting guides:** [`docs/porting.md`](docs/porting.md) (diffusers -> h3mlx) and
-  [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md), side by side, with permalinks to the originals.
+  [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md), side by side, with permalinks to the originals. P-H3-Image
+  has no guide yet.
 
 ## Tests
 
@@ -37,7 +43,7 @@ Or point `H3MLX_FIXTURES` at a copy. Seven of the 33 also need `ffmpeg` and `ffp
 The oracle is diffusers main at `d3d8af89` (P-H3-Image isn't in a diffusers release yet); its H3 code is 0.42.1's plus a
 tensor-parallel plan, and the H3 tests pass against both.
 
-## Running it
+## Running H3
 
 You need:
 - **The MiniMax H3 weights:** `MiniMaxAI/MiniMax-H3` on Hugging Face, tested at revision `42ed227` (about 144 GB).
@@ -92,12 +98,27 @@ is, describe one scene, quote every word of text, leave out hype words. `--upsam
 diffusers pipeline does by default (its greedy decoding can differ from torch's in places; the prompt it wrote is saved
 as `prompt.txt`). `--plan-only` prints the sizes without reading weights.
 
-**Measured on the M3 Ultra:** an 8 MP text-to-image (2912x2912, 8,395 rows) takes 26 s per call and 4.2 min in all
-(text 2 s, decode 34 s), peaking at 69 GB.
+Sizes follow the pipeline. Text-to-image defaults to 2912x2912 (8 MP); the card lists the 8 MP size for each aspect
+ratio, and other sizes are rounded to multiples of 32. An edit is generated at Picture 1's size, scaled up to at least
+4 MP, unless `--height` and `--width` set the canvas; the pictures keep their own sizes between 1 and 8 MP, so each
+one adds its rows to the sequence. `--sigmas` replaces the 9-point grid, `--vae-dtype bfloat16` decodes at the stored
+precision instead of float32, and `--decode-from` decodes saved latents. The script writes `image.png`, `prompt.txt`
+(the prompt rendered), the final latents and a `run.json` with per-stage times and memory.
+
+**Measured on the M3 Ultra (60-core GPU, 256 GB),** 8 calls, bf16 transformer, float32 decode:
+
+| request | size | rows | per call | total | peak |
+| --- | --- | --- | --- | --- | --- |
+| text-to-image, prompt as written | 2912x2912 | 8,395 | 26 s | 4.2 min | 69 GB |
+| edit, one 8.5 MP picture, `--upsample` | 2912x2912 | 17,749 | 69 s | 10.5 min | 72 GB |
+
+The upsampler took 14 s, the text encoder 2 s, the decode 34 s. The edit's picture doubled the sequence; an edit at
+4 MP should take about 40% of the time, around 4.5 min (an estimate from these runs, not measured).
 
 ## Licence
 
-The code is under the Apache License 2.0 ([`LICENSE`](LICENSE)). Parts are translated from, or quote, diffusers,
-HyperFlow, PEFT, mlx-vlm and torchaudio. Their notices are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), and
-[`NOTICE`](NOTICE) says what came from where. The MiniMax H3 and P-H3-Image weights and release files are not included. They come
-under MiniMax's own licence, which has territory exclusions, so read it before you use them.
+The code is under the Apache License 2.0 ([`LICENSE`](LICENSE)). Parts are translated from, or quote, diffusers
+(its P-H3-Image code is Pruna AI's), HyperFlow, PEFT, mlx-vlm and torchaudio. Their notices are in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), and [`NOTICE`](NOTICE) says what came from where. The MiniMax H3
+and P-H3-Image weights and release files are not included. They come under MiniMax's own licence, which has territory
+exclusions, so read it before you use them.
