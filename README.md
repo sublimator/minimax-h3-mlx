@@ -30,15 +30,15 @@ Both were built op by op and tested against their implementations in
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 212 tests and skips 33. Those 33 need the releases' tokenizers, processors,
+No weights are needed. A plain clone runs 212 tests and skips 50. Those 50 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header. These files aren't shipped here because they
 belong to MiniMax, Video Rebirth and Pruna. Fetch them from Hugging Face at pinned revisions (about 50 MB, no weights)
-and all 245 run:
+and all 262 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest
 
-Or point `H3MLX_FIXTURES` at a copy. Seven of the 33 also need `ffmpeg` and `ffprobe` on the `PATH`.
+Or point `H3MLX_FIXTURES` at a copy. Seven of the 50 also need `ffmpeg` and `ffprobe` on the `PATH`.
 
 The oracle is diffusers main at `d3d8af89` (P-H3-Image isn't in a diffusers release yet); its H3 code is 0.42.1's plus a
 tensor-parallel plan, and the H3 tests pass against both.
@@ -101,9 +101,12 @@ as `prompt.txt`). `--plan-only` prints the sizes without reading weights.
 Sizes follow the pipeline. Text-to-image defaults to 2912x2912 (8 MP); the card lists the 8 MP size for each aspect
 ratio, and other sizes are rounded to multiples of 32. An edit is generated at Picture 1's size, scaled up to at least
 4 MP, unless `--height` and `--width` set the canvas; the pictures keep their own sizes between 1 and 8 MP, so each
-one adds its rows to the sequence. `--sigmas` replaces the 9-point grid, `--vae-dtype bfloat16` decodes at the stored
-precision instead of float32, and `--decode-from` decodes saved latents. The script writes `image.png`, `prompt.txt`
-(the prompt rendered), the final latents and a `run.json` with per-stage times and memory.
+one adds its rows to the sequence. `--sigmas` replaces the 9-point grid. The VAE decodes in float32 by default;
+`--vae-dtype bfloat16` loads it the way the pipeline does (bfloat16, with the encoder, `quant_conv` and the decoder's
+`proj_out` kept in float32). The script writes `image.png`, `prompt.txt` (the prompt rendered), the final latents
+(with a record of the request that made them) and a `run.json` with per-stage times and memory. `--decode-from`
+re-decodes saved latents on their own: it takes no prompt or sampling options, checks the rows, and logs the saved
+request as its source.
 
 **Measured on the M3 Ultra (60-core GPU, 256 GB),** 8 calls, bf16 transformer, float32 decode:
 

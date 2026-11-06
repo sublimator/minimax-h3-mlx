@@ -53,13 +53,30 @@ def load_transformer(d) -> tuple[dict, dict]:
     return load_safetensors(d), cfg
 
 
+# diffusers' `_keep_in_fp32_modules` per VAE class: with a `torch_dtype`, a parameter whose dotted name has one of these
+# as a component loads in float32 (`model_loading_utils.load_model_dict_into_meta`), everything else in that dtype.
+VAE_KEEP_F32 = {
+    "AutoencoderKLMiniMaxH3": ("encoder", "quant_conv", "norm1", "norm2", "norm_out", "scale1", "scale2"),
+    "AutoencoderKLPH3Image": ("encoder", "quant_conv", "proj_out"),
+}
+
+
+def vae_dtypes(names, class_name: str, dtype) -> dict:
+    """The dtype each parameter loads in under `dtype`, by diffusers' rule for `class_name`."""
+    keep = VAE_KEEP_F32.get(class_name, ())
+    return {k: mx.float32 if any(m in k.split(".") for m in keep) else dtype for k in names}
+
+
 def load_vae(d, dtype=None, **tiling) -> tuple[VideoVAE, tuple, tuple]:
-    """`dtype`: cast every floating weight (P-H3-Image stores its decoder in bf16; float32 decodes at H3's precision)."""
+    """`dtype=None` keeps the stored dtypes (the H3 release is float32). With a dtype, floating weights load the way
+    diffusers' `from_pretrained(torch_dtype=dtype)` loads them: the class's float32 modules stay float32, the rest is
+    cast (P-H3-Image stores its decoder in bf16 with `proj_out` among the float32 modules)."""
     cfg = _config(d)
     # contiguous once: a transposed view would be copied again inside every tile's graph (121-209 tiles per reference)
     p = {k: (mx.contiguous(V.conv3d_weight(v)) if v.ndim == 5 else v) for k, v in load_safetensors(d).items()}
     if dtype is not None:
-        p = {k: v.astype(dtype) if mx.issubdtype(v.dtype, mx.floating) else v for k, v in p.items()}
+        want = vae_dtypes(p, cfg.get("_class_name", ""), dtype)
+        p = {k: v.astype(want[k]) if mx.issubdtype(v.dtype, mx.floating) else v for k, v in p.items()}
     return VideoVAE(p, VaeConfig.from_diffusers(cfg, **tiling)), tuple(cfg["latents_mean"]), tuple(cfg["latents_std"])
 
 

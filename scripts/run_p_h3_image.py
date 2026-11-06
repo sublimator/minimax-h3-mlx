@@ -12,8 +12,10 @@ as `prompt.txt` and logged.
 
 Order: text encoder (Qwen3-VL-4B, ~9 GB, freed after) -> pictures through the VAE encoder (edits) -> 8 transformer
 calls (66 GB, read on first use) -> save `final_rows.npz`, free the transformer -> decode -> `image.png`. `run.json`
-logs every stage. `--plan-only` reads configs, the tokenizer and the processor only and prints the sizes.
-`--decode-from <final_rows.npz>` decodes saved latents.
+logs every stage. `--plan-only` reads configs, the tokenizer and the processor only and prints the sizes (with
+`--upsample`, of the request before it is expanded). `--decode-from <final_rows.npz>` re-decodes saved latents on their
+own: no prompt or sampling options, the rows checked, and the request that made them (saved in the file) logged as the
+source.
 """
 
 import argparse
@@ -39,20 +41,35 @@ from h3mlx.vae import VaeConfig, VideoVAE  # noqa: E402
 from run_ref2va import dit_tflop_per_call, mem, provenance, sha256  # noqa: E402
 
 
-def config_components(weights: Path, encode_states=None) -> I.Components:
-    """Tokenizer, processor and configs: enough for the plan; no weight file is opened."""
-    from transformers import AutoTokenizer, Qwen3VLProcessor
-
+def configs(weights: Path):
+    """(transformer config, vae config, pipeline settings): configs only."""
     vcfg = json.loads((weights / "vae" / "config.json").read_text())
     tcfg = {k: v for k, v in json.loads((weights / "transformer" / "config.json").read_text()).items()
             if not k.startswith("_")}
     tcfg["patch_size"] = tuple(tcfg["patch_size"])
+    settings = I.Settings.from_index(json.loads((weights / "modular_model_index.json").read_text()))
+    return tcfg, vcfg, settings
+
+
+def config_components(weights: Path, encode_states=None, text: bool = True) -> I.Components:
+    """Configs, and the tokenizer and processor unless `text=False`: enough for the plan; no weight file is opened."""
+    tcfg, vcfg, settings = configs(weights)
+    tokenizer = processor = None
+    if text:
+        from transformers import AutoTokenizer, Qwen3VLProcessor
+
+        tokenizer = AutoTokenizer.from_pretrained(str(weights / "tokenizer"))
+        processor = Qwen3VLProcessor.from_pretrained(str(weights / "processor"))
     return I.Components(
-        tokenizer=AutoTokenizer.from_pretrained(str(weights / "tokenizer")),
-        processor=Qwen3VLProcessor.from_pretrained(str(weights / "processor")), encode_states=encode_states,
-        connector={}, vae=VideoVAE({}, VaeConfig.from_diffusers(vcfg)), vae_latents_mean=tuple(vcfg["latents_mean"]),
-        vae_latents_std=tuple(vcfg["latents_std"]), dit_params={}, dit_cfg=tcfg,
-        settings=I.Settings.from_index(json.loads((weights / "modular_model_index.json").read_text())))
+        tokenizer=tokenizer, processor=processor, encode_states=encode_states, connector={},
+        vae=VideoVAE({}, VaeConfig.from_diffusers(vcfg)), vae_latents_mean=tuple(vcfg["latents_mean"]),
+        vae_latents_std=tuple(vcfg["latents_std"]), dit_params={}, dit_cfg=tcfg, settings=settings)
+
+
+def upsampler_aspect(height, width) -> str:
+    """The aspect label the pipeline hands the upsampler: from the requested size (default 2912 square), before the
+    canvas is rounded to multiples of 32, as `PH3ImageText2ImagePromptUpsampleStep` does."""
+    return U.aspect_ratio_label(width or I.DEFAULT_SIZE, height or I.DEFAULT_SIZE)
 
 
 def plan(c: I.Components, prompt: str, images, height, width, sigmas) -> dict:
@@ -81,7 +98,7 @@ def plan(c: I.Components, prompt: str, images, height, width, sigmas) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--weights", type=Path, required=True, help="the P-H3-Image release (diffusers layout)")
-    ap.add_argument("--prompt-file", type=Path, required=True)
+    ap.add_argument("--prompt-file", type=Path, help="the request (required unless --decode-from)")
     ap.add_argument("--image", type=Path, action="append", default=[],
                     help="a picture to edit; repeat for references (Picture 2, 3, ...; at most 8 in all)")
     ap.add_argument("--out", type=Path, required=True)
@@ -90,36 +107,47 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--sigmas", type=str, help="comma-separated grid ending in 0 (default: the checkpoint's 9 points)")
     ap.add_argument("--vae-dtype", choices=["float32", "bfloat16"], default="float32",
-                    help="decoder precision: float32 (as h3mlx decodes H3) or the stored bfloat16 (the pipeline's)")
+                    help="float32 (as h3mlx decodes H3), or bfloat16 with the pipeline's float32 modules kept")
     ap.add_argument("--upsample", action="store_true", help="expand the request with the release's prompt upsampler")
     ap.add_argument("--max-new-tokens", type=int, help="upsampler budget, reasoning included (default 1024, edits 1536)")
     ap.add_argument("--plan-only", action="store_true", help="configs, tokenizer and processor only; no weights")
-    ap.add_argument("--decode-from", type=Path, help="decode a saved final_rows.npz instead of running the model")
+    ap.add_argument("--decode-from", type=Path,
+                    help="decode a saved final_rows.npz (no prompt, pictures, sampling or upsampling options)")
     ap.add_argument("--memory-limit-gb", type=float, default=150.0)
     ap.add_argument("--cache-limit-gb", type=float, default=4.0)
     args = ap.parse_args(argv)
     if (args.height is None) != (args.width is None):
         ap.error("--height and --width go together")
+    if args.decode_from:
+        given = [n for n, v in (("--prompt-file", args.prompt_file), ("--image", args.image), ("--sigmas", args.sigmas),
+                                ("--upsample", args.upsample), ("--height", args.height), ("--plan-only", args.plan_only))
+                 if v]
+        if given:
+            ap.error(f"--decode-from decodes the saved rows as they are; drop {', '.join(given)}")
+    elif args.prompt_file is None:
+        ap.error("--prompt-file is required (unless --decode-from)")
+    if len(args.image) > I.MAX_EDIT_IMAGES:
+        ap.error(f"at most {I.MAX_EDIT_IMAGES} --image, got {len(args.image)}")
     sigmas = [float(x) for x in args.sigmas.split(",")] if args.sigmas else None
+    if sigmas is not None:
+        try:
+            I.schedules(sigmas)
+        except ValueError as e:
+            ap.error(f"--sigmas: {e}")
 
     t0 = time.time()
     mx.set_memory_limit(int(args.memory_limit_gb * 1e9))
     mx.set_cache_limit(int(args.cache_limit_gb * 1e9))
     weights = args.weights.expanduser()
-    prompt = args.prompt_file.expanduser().read_text().strip()
-    paths = [p.expanduser() for p in args.image]
-    images = [ImageOps.exif_transpose(Image.open(p)).convert("RGB") for p in paths]
     out = args.out.expanduser()
     out.mkdir(parents=True, exist_ok=True)
     log = {"argv": sys.argv if argv is None else list(argv), "pid": os.getpid(), "weights": str(weights),
-           "prompt_sha256": sha256(args.prompt_file.expanduser()), "prompt_chars": len(prompt),
-           "images": [{"path": str(p), "sha256": sha256(p), "size": list(im.size)} for p, im in zip(paths, images)],
-           "seed": args.seed, "settings": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+           "settings": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
            "provenance": provenance(), "status": "running", "events": []}
 
     def save_log():
         tmp = out / "run.json.tmp"
-        tmp.write_text(json.dumps(log, indent=1, default=str))
+        tmp.write_text(json.dumps(log, indent=1, default=str, allow_nan=False))
         os.replace(tmp, out / "run.json")
 
     last = {"t": 0.0}
@@ -135,7 +163,26 @@ def main(argv=None) -> int:
         print(json.dumps(e), flush=True)
         save_log()
 
+    def write(img, prompt_text):
+        if not np.isfinite(img).all():
+            raise FloatingPointError("non-finite values in the decoded image")
+        event("decoded", shape=list(img.shape), mean=float(img.mean()), std=float(img.std()))
+        Image.fromarray(I.to_uint8(img)).save(out / "image.png")
+        if prompt_text is not None:
+            (out / "prompt.txt").write_text(prompt_text + "\n")
+        log["status"] = "done"
+        event("written", png=str(out / "image.png"))
+
+    vae_dtype = mx.float32 if args.vae_dtype == "float32" else mx.bfloat16
     try:
+        if args.decode_from:
+            return replay(args.decode_from.expanduser(), weights, vae_dtype, log, event, save_log, write)
+
+        prompt = args.prompt_file.expanduser().read_text().strip()
+        paths = [p.expanduser() for p in args.image]
+        images = [ImageOps.exif_transpose(Image.open(p)).convert("RGB") for p in paths]
+        log.update(prompt_sha256=sha256(args.prompt_file.expanduser()), prompt_chars=len(prompt), seed=args.seed,
+                   images=[{"path": str(p), "sha256": sha256(p), "size": list(im.size)} for p, im in zip(paths, images)])
         indices = tuple(json.loads((weights / "text_connector" / "config.json").read_text())["hidden_state_indices"])
         staged = load.staged_text_encoder_states(weights / "text_encoder", indices)
 
@@ -145,20 +192,17 @@ def main(argv=None) -> int:
             return h
 
         c = config_components(weights, encode_states)
-        if args.upsample and not args.plan_only and not args.decode_from:
+        request = prompt
+        if args.upsample and not args.plan_only:
             import gc
 
             event("upsample_start", request_chars=len(prompt))
-            model, proc = U.load_upsampler(weights / "prompt_upsampler", weights / "prompt_upsampler_processor")
-            if images:
-                aspect = "1:1"
-            else:
-                h, w = I.round_canvas(args.height or I.DEFAULT_SIZE, args.width or I.DEFAULT_SIZE, c.canvas_multiple)
-                aspect = U.aspect_ratio_label(w, h)
-            answer = {}
             log["request"] = prompt
+            aspect = None if images else upsampler_aspect(args.height, args.width)
+            model, proc = U.load_upsampler(weights / "prompt_upsampler", weights / "prompt_upsampler_processor")
+            answer = {}
             try:
-                prompt = U.upsample(model, proc, prompt, images=images or None, aspect_ratio=aspect,
+                prompt = U.upsample(model, proc, prompt, images=images or None, aspect_ratio=aspect or "1:1",
                                     max_new_tokens=args.max_new_tokens,
                                     on_answer=lambda a, n: answer.update(text=a, tokens=n))
             finally:
@@ -169,47 +213,47 @@ def main(argv=None) -> int:
             log["upsampled_prompt"] = prompt
             event("upsampled", tokens=answer.get("tokens"), prompt_chars=len(prompt), aspect_ratio=aspect)
         log["plan"] = plan(c, prompt, images, args.height, args.width, sigmas)
+        if args.upsample and args.plan_only:
+            log["plan"]["text_basis"] = ("the request as given: --upsample replaces it with a longer prompt before "
+                                         "encoding, so the run's text and sequence rows will be higher")
         event("plan", **log["plan"])
         if args.plan_only:
             log["status"] = "planned"
             save_log()
             return 0
 
-        vae_dtype = mx.float32 if args.vae_dtype == "float32" else mx.bfloat16
         c.vae, _, _ = load.load_vae(weights / "vae", dtype=vae_dtype)
         c.connector = load.load_safetensors(weights / "text_connector")
-        if args.decode_from:
-            z = np.load(args.decode_from.expanduser())
-            img = I.decode(c, mx.array(z["video_rows"]), int(z["ncv"]), int(z["lh"]), int(z["lw"]))
-        else:
-            c.dit_params, _ = load.load_transformer(weights / "transformer")
-            per_call = dit_tflop_per_call(log["plan"]["sequence_rows"], c.dit_cfg)
-            clock = {"prev": None}
+        c.dit_params, _ = load.load_transformer(weights / "transformer")
+        per_call = dit_tflop_per_call(log["plan"]["sequence_rows"], c.dit_cfg)
+        clock = {"prev": None}
 
-            def stage(name):
-                if name == "denoise":
-                    clock["denoise_start"] = time.time()
-                event(f"stage_{name}")
+        def stage(name):
+            if name == "denoise":
+                clock["denoise_start"] = time.time()
+            event(f"stage_{name}")
 
-            def on_step(i, t):
-                now = time.time()
-                step_s = round(now - (clock["prev"] or clock["denoise_start"]), 2)
-                clock["prev"] = now
-                event("step", i=i, timestep=float(t), step_s=step_s, tflops=float(f"{per_call / step_s:.3g}"))
+        def on_step(i, t):
+            now = time.time()
+            step_s = round(now - (clock["prev"] or clock["denoise_start"]), 2)
+            clock["prev"] = now
+            event("step", i=i, timestep=float(t), step_s=step_s, tflops=float(f"{per_call / step_s:.3g}"))
 
-            def on_denoised(v, meta):
-                np.savez(out / "final_rows.npz", video_rows=np.array(v.astype(mx.float32)), **meta)
-                event("denoised", saved="final_rows.npz", **meta)
+        def on_denoised(v, meta):
+            # what produced these rows, so a re-decode can say so instead of describing its own command line
+            source = {"workflow": log["plan"]["workflow"], "prompt": prompt,
+                      "request": request if args.upsample else None, "seed": args.seed,
+                      "height": log["plan"]["height"], "width": log["plan"]["width"], "sigmas": log["plan"]["sigmas"],
+                      "images": log["images"], "weights": str(weights), "commit": log["provenance"]["commit"]}
+            np.savez(out / "final_rows.npz", video_rows=np.array(v.astype(mx.float32)), source=np.array(json.dumps(source)),
+                     **meta)
+            event("denoised", saved="final_rows.npz", **meta)
 
-            event("start")
-            img = I.generate(c, prompt, images=images or None, height=args.height, width=args.width, seed=args.seed,
-                             sigmas=sigmas, on_step=on_step, check_finite=True, on_denoised=on_denoised,
-                             free_transformer=True, on_stage=stage)
-        event("decoded", shape=list(img.shape), mean=float(img.mean()), std=float(img.std()))
-        Image.fromarray(I.to_uint8(img)).save(out / "image.png")
-        (out / "prompt.txt").write_text(prompt + "\n")
-        log["status"] = "done"
-        event("written", png=str(out / "image.png"))
+        event("start")
+        img = I.generate(c, prompt, images=images or None, height=args.height, width=args.width, seed=args.seed,
+                         sigmas=sigmas, on_step=on_step, check_finite=True, on_denoised=on_denoised,
+                         free_transformer=True, on_stage=stage)
+        write(img, prompt)
         steps = [e for e in log["events"] if e["event"] == "step"]
         log["summary"] = {"total_s": log["events"][-1]["t"],
                           "first_step_s": steps[0]["step_s"] if steps else None,
@@ -227,6 +271,30 @@ def main(argv=None) -> int:
         log["status"] = "error"
         event("error", error=f"{type(e).__name__}: {e}")
         raise
+
+
+def replay(path: Path, weights: Path, vae_dtype, log, event, save_log, write) -> int:
+    """`--decode-from`: decode saved rows. The plan and the prompt written are the saved run's (from the `source`
+    record `final_rows.npz` carries), never this command line's; the rows must fit their latent grid and be finite."""
+    z = np.load(path)
+    missing = sorted({"video_rows", "ncv", "lh", "lw"} - set(z.files))
+    if missing:
+        raise ValueError(f"{path.name} lacks {missing}")
+    ncv, lh, lw = int(z["ncv"]), int(z["lh"]), int(z["lw"])
+    c = config_components(weights, text=False)
+    rows = z["video_rows"]
+    I.check_rows(c, rows, ncv, lh, lw)
+    source = json.loads(str(z["source"])) if "source" in z.files else None
+    ratio = c.vae.cfg.spatial_ratio
+    log["plan"] = {"workflow": "decode", "decode_from": str(path), "decode_from_sha256": sha256(path),
+                   "height": lh * ratio, "width": lw * ratio, "source": source}
+    event("plan", **{k: v for k, v in log["plan"].items() if k != "source"})
+    c.vae, _, _ = load.load_vae(weights / "vae", dtype=vae_dtype)
+    event("stage_decode")
+    img = I.decode(c, mx.array(rows), ncv, lh, lw)
+    write(img, source.get("prompt") if source else None)
+    save_log()
+    return 0
 
 
 if __name__ == "__main__":

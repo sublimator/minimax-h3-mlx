@@ -65,7 +65,9 @@ class Components:
     dit_params: dict
     dit_cfg: dict
     settings: Settings = field(default_factory=Settings)
-    text_dtype: object = mx.bfloat16  # the text encoder's dtype: the conditioning is cast to it, as the pipeline does
+    # the conditioning is cast to the text encoder's dtype, as the pipeline does (`text_encoder.dtype`); None: the dtype
+    # its hidden states come out in
+    text_dtype: object = None
 
     @property
     def canvas_multiple(self):
@@ -198,6 +200,19 @@ def decode(c: Components, video_rows: mx.array, ncv: int, lh: int, lw: int) -> n
     return np.array(img)
 
 
+def check_rows(c: Components, video_rows, ncv: int, lh: int, lw: int) -> None:
+    """Saved final rows (for a re-decode) must fit the latent grid they claim and be finite."""
+    _, ph, pw = c.dit_cfg["patch_size"]
+    width = c.dit_cfg["in_channels"] * int(np.prod(c.dit_cfg["patch_size"]))
+    rows = np.asarray(video_rows)
+    if rows.ndim != 2 or rows.shape[1] != width:
+        raise ValueError(f"video rows must be (n, {width}), got {rows.shape}")
+    if min(ncv, lh, lw) < 0 or lh % ph or lw % pw or rows.shape[0] - ncv != (lh // ph) * (lw // pw):
+        raise ValueError(f"{rows.shape[0]} rows do not hold {ncv} conditioning rows plus a {lh}x{lw} latent image")
+    if not np.isfinite(rows).all():
+        raise FloatingPointError("non-finite values in the saved rows")
+
+
 def to_uint8(image: np.ndarray) -> np.ndarray:
     """`VaeImageProcessor.numpy_to_pil`'s rounding."""
     return (image * 255).round().astype(np.uint8)
@@ -225,7 +240,8 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
         height, width = round_canvas(height or DEFAULT_SIZE, width or DEFAULT_SIZE, m)
         ids, tags, vision = text2image_presentation(c, prompt)
     stage("text")
-    text = connect(c.connector, c.encode_states(ids, vision), c.text_dtype)
+    states = c.encode_states(ids, vision)
+    text = connect(c.connector, states, c.text_dtype if c.text_dtype is not None else states[0].dtype)
     dbg.update(prompt_embeds=text, text_token_tags=np.asarray(tags), token_ids=ids, height=height, width=width)
     if check_finite:
         assert_finite("prompt embeddings", text)
