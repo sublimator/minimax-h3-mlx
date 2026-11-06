@@ -92,6 +92,7 @@ def test_cli_matches_diffusers(tiny, tmp_path, workflow):
     assert len([e for e in log["events"] if e["event"] == "step"]) == 8
     src = json.loads(str(np.load(out / "final_rows.npz")["source"]))
     assert src["prompt"] == (EDIT if workflow == "edit" else T2I) and src["seed"] == 7
+    assert src["quantize"] is None and src["modulation_cache"] is True
 
 
 def test_cli_redecode_is_faithful_and_says_where_it_came_from(tiny, tmp_path):
@@ -144,7 +145,7 @@ def test_cli_redecode_refuses_rows_that_do_not_fit(tiny, tmp_path):
 
 @pytest.mark.parametrize("extra", [["--prompt-file", "p.txt"], ["--image", "a.png"], ["--sigmas", "1,0"],
                                    ["--upsample"], ["--height", "8", "--width", "8"], ["--seed", "99"],
-                                   ["--seed", "0"], ["--max-new-tokens", "6"]])
+                                   ["--seed", "0"], ["--max-new-tokens", "6"], ["--quantize", "8"]])
 def test_cli_redecode_refuses_generation_options(tiny, tmp_path, extra):
     _, rel, _ = tiny
     with pytest.raises(SystemExit):

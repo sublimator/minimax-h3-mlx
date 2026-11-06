@@ -112,8 +112,8 @@ def main(argv=None) -> int:
     ap.add_argument("--quantize", type=int, choices=[8, 4],
                     help="quantize the transformer's block weights to 8 or 4 bits (groups of 64) after loading")
     ap.add_argument("--modulation-cache", action=argparse.BooleanOptionalAction, default=True,
-                    help="compute the AdaLN modulation once for the run's timesteps and drop adaln_proj (~26 GB); "
-                         "on by default")
+                    help="compute each call's AdaLN modulation up front and drop adaln_proj (~26 GB); bit-identical "
+                         "results; on by default")
     ap.add_argument("--max-new-tokens", type=int, help="upsampler budget, reasoning included (default 1024, edits 1536)")
     ap.add_argument("--plan-only", action="store_true", help="configs, tokenizer and processor only; no weights")
     ap.add_argument("--decode-from", type=Path,
@@ -126,7 +126,8 @@ def main(argv=None) -> int:
     if args.decode_from:
         given = [n for n, v in (("--prompt-file", args.prompt_file), ("--image", args.image), ("--sigmas", args.sigmas),
                                 ("--upsample", args.upsample), ("--height", args.height), ("--width", args.width), ("--plan-only", args.plan_only),
-                                ("--seed", args.seed is not None), ("--max-new-tokens", args.max_new_tokens is not None))
+                                ("--seed", args.seed is not None), ("--max-new-tokens", args.max_new_tokens is not None),
+                                ("--quantize", args.quantize is not None))
                  if v]
         if given:
             ap.error(f"--decode-from decodes the saved rows as they are; drop {', '.join(given)}")
@@ -258,7 +259,8 @@ def main(argv=None) -> int:
             source = {"workflow": log["plan"]["workflow"], "prompt": prompt,
                       "request": request if args.upsample else None, "seed": args.seed,
                       "height": log["plan"]["height"], "width": log["plan"]["width"], "sigmas": log["plan"]["sigmas"],
-                      "images": log["images"], "weights": str(weights), "commit": log["provenance"]["commit"]}
+                      "images": log["images"], "weights": str(weights), "commit": log["provenance"]["commit"],
+                      "quantize": args.quantize, "modulation_cache": args.modulation_cache}
             np.savez(out / "final_rows.npz", video_rows=np.array(v.astype(mx.float32)), source=np.array(json.dumps(source)),
                      **meta)
             event("denoised", saved="final_rows.npz", **meta)
