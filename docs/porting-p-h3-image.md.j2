@@ -1,0 +1,300 @@
+{# Porting guide: P-H3-Image (Pruna AI's image model on MiniMax H3) -> h3mlx.
+   Render from the repo root:  projected-source render --no-header docs/porting-p-h3-image.md.j2 docs/porting-p-h3-image.md
+   The original side is a sparse checkout of huggingface/diffusers at main commit d3d8af89 (P-H3-Image is not in a
+   release yet) beside this repo at ../diffusers-main: the same commit the tests import. mlx-vlm is the v0.7.11 checkout
+   at ../mlx-vlm, as in docs/porting.md. No markers were added on either side, so their permalinks point at upstream
+   lines exactly. #}
+{% set DM = '../diffusers-main' %}
+{% set P = 'src/diffusers/modular_pipelines/p_h3_image/' %}
+{% set PVAE = 'src/diffusers/models/autoencoders/autoencoder_kl_p_h3_image.py' %}
+{% set H3VAE = 'src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py' %}
+{% set CONN = 'src/diffusers/models/condition_embedders/condition_embedder_p_h3_image.py' %}
+{% set SCH = 'src/diffusers/schedulers/scheduling_minimax_h3.py' %}
+{% set MV = '../mlx-vlm' %}
+# Porting P-H3-Image to MLX: diffusers' `PH3Image*` → `h3mlx`
+
+P-H3-Image is Pruna AI's image model built from MiniMax H3. It does text-to-image and editing with up to 8 pictures,
+in 8 steps with no guidance, best at 8 MP. This guide maps its diffusers implementation onto our MLX package, side by
+side: in each section the original comes first, then the port, then what changed and which test ties them together.
+It assumes the main guide (`docs/porting.md`), which covers the transformer, the packed sequence, the scheduler, the
+denoise loop, the Qwen3-VL presentation and the video VAE. Most of P-H3-Image is those, unchanged.
+
+**Sources, pinned.**
+
+| what | where | pin |
+| --- | --- | --- |
+| pipeline, image VAE, text connector (Apache-2.0, Pruna AI and Hugging Face) | `huggingface/diffusers` main | `d3d8af89e5b08a352cf47bba3a451c5fed9a49b1` |
+| weights, configs, tokenizer, processors | Hugging Face `PrunaAI/P-H3-Image` | revision `7f98acef` |
+| text encoder and upsampler runtime | `Blaizzy/mlx-vlm` | `v0.7.11` (`527c513`) |
+
+**What P-H3-Image changes, against MiniMax H3:**
+
+| piece | MiniMax H3 | P-H3-Image |
+| --- | --- | --- |
+| transformer | `MiniMaxH3Transformer3DModel`, 33.1B | the same class, config and 638 weight names, fine-tuned |
+| text encoder | Qwen3-VL, 64 layers of width 5120; hidden state 50, pre-norm | Qwen3-VL-4B, 36 layers of width 2560; states 13, 19, 25, 31 and the final normed one, through a connector |
+| VAE | video: 17-frame chunks, a ViT decoder with a temporal patch of 4 | H3's encoder and latent space; a single-frame ViT decoder |
+| audio | an audio VAE; the soundtrack is generated | no audio VAE; two audio latents ride along and are thrown away |
+| sampling | `linspace` grid shifted per modality | one fixed 9-point grid, used verbatim for both modalities: 8 calls |
+| prompt | written by hand | an upsampler (a Qwen3.5-9B fine-tune) writes it, on by default |
+
+The packing, the transformer forward, the per-row timesteps and the Euler update are H3's: diffusers marks those
+P-H3-Image steps "Copied from" the MiniMax H3 ones, and our port calls the same `packing`, `ops.dit_forward` and
+`denoise` code the video pipeline does. The new code is `src/h3mlx/image.py` (the pipeline), `src/h3mlx/upsampler.py`,
+a single-frame mode in `vae.py` and `vae_ops.py`, and a multi-state hook in `load.py`.
+
+## 1. The text connector
+
+H3 read one hidden state of its text encoder. P-H3-Image reads five of a much smaller one and maps them to the
+transformer's 5120-wide text input with one linear layer between two standardisations. Token 0 is an attention sink
+that carries the same state for every prompt, so it is replaced by a learned embedding.
+
+{{ code(CONN, function='PH3ImageTextConnector.forward', root=DM) }}
+
+The released connector keeps every parameter in float32 (`_keep_in_fp32_modules` lists all six), and the pipeline casts
+the result to the text encoder's dtype. Ours does the same arithmetic in float32 and casts after:
+
+{{ code('src/h3mlx/image.py', function='connect') }}
+
+The cast target is the text encoder's dtype in both: the pipeline passes `dtype=components.text_encoder.dtype`, and
+`generate` uses the dtype the hidden states come out in unless `Components.text_dtype` sets one. For the release
+that is bfloat16. `test_connector_matches_diffusers` compares the two on random parameters, including that token 0 is
+the sink exactly.
+
+## 2. Five hidden states of the text encoder
+
+The pipeline runs the whole Qwen3-VL with `output_hidden_states=True` and hands the tuple to the connector:
+
+{{ code(P + 'encoders.py', function='get_p_h3_image_prompt_embeds', root=DM) }}
+
+In transformers' numbering, entry 0 is the embedding output, entry `i` the output of decoder layer `i`, and the last
+entry (36 here) the final normed state. Two details decide what "the output of layer `i`" means:
+
+- **Deepstack.** Qwen3-VL adds visual features to the hidden states of its first three decoder layers, after each
+  layer returns. transformers records a layer's output as the layer returns it, so the recorded state is before that
+  add. (Only an edit has pictures, and the connector reads layers from 13 on, so this does not change P-H3-Image's
+  input; the test pins it anyway.)
+- **The last entry is normed.** transformers replaces the last recorded state with the model's final output, after
+  the final RMSNorm.
+
+mlx-vlm's Qwen3-VL returns one state at a time:
+
+{{ code('mlx_vlm/models/qwen3_vl/qwen3_vl.py', function='Model.hidden_state_at_layer', root=MV) }}
+
+Rather than run the model five times, ours records layer outputs as they happen. The H3 port already wraps every
+decoder layer with `eval_each_layer`, so each layer evaluates its own output (one long graph over a 7,000-token prompt
+tripped macOS's GPU watchdog). That wrapper now also appends the layer's return to a list when one is registered for
+it:
+
+{{ code('src/h3mlx/load.py', function='eval_each_layer') }}
+{{ code('src/h3mlx/load.py', function='hidden_states_at') }}
+
+The capture lists live in a module-level dict keyed by the layer's id: an mlx `Module` stores a list attribute as a
+child, which would put the capture into its parameter tree. The registrations are removed in `finally`, so the H3
+video pipeline (which reads one state through `hidden_state_at_layer`) never sees them.
+`test_hidden_states_and_connector_match_pipeline` runs `get_p_h3_image_prompt_embeds` against
+`hidden_states_at` + `connect` on a tiny 4-layer Qwen3-VL with deepstack, two pictures, and indices 1 to 4: two of
+them are deepstack layers and the last is the final norm.
+
+## 3. What the text encoder reads
+
+**Text-to-image:** the prompt as written. No chat template, no special tokens, every row tagged text.
+
+{{ code(P + 'encoders.py', function='PH3ImageTextEncoderStep.__call__', root=DM) }}
+{{ code('src/h3mlx/image.py', function='text2image_presentation') }}
+
+**Edit:** H3's ref2va presentation with pictures only (`"<Picture i>: "` and a vision block per picture, the block's
+rows tagged video), then the instruction with `"Edit <Picture 1>. "` in front, unless it already starts with that or
+with `subject_definitions:`, the first line of an upsampler brief (§9).
+
+{{ code(P + 'encoders.py', function='PH3ImageEditTextEncoderStep.__call__', root=DM) }}
+
+Ours reuses the H3 presentation builder (main guide §5) with image references only:
+
+{{ code('src/h3mlx/image.py', function='edit_prompt') }}
+{{ code('src/h3mlx/image.py', function='edit_presentation') }}
+
+The pictures the encoder sees are the ~1 MP copies from §4, not the ones the VAE encodes. The end-to-end tests (§10)
+compare the token tags exactly and the prompt embeddings to 1e-4. A tiny random model barely reads its prompt (a wholly
+different prompt moves its image by about 2e-3), so the image alone could not catch a presentation error.
+
+## 4. Edit sizes
+
+An edit resizes every picture twice: for the VAE, each keeps its own size unless it is under 1 MP or over 8 MP; for the
+text encoder, each goes to about 1 MP. Without `height` and `width`, the canvas is Picture 1's VAE size, scaled up to at
+least 4 MP. Sides are multiples of 32 throughout (the VAE's 16 times the patch's 2). Passing `height` and `width` sets
+the canvas only; the pictures keep their sizes.
+
+{{ code(P + 'before_encoder.py', function='_size_at_area', root=DM) }}
+{{ code(P + 'before_encoder.py', function='_size_in_area_range', root=DM) }}
+{{ code(P + 'before_encoder.py', function='PH3ImageEditResizeStep.__call__', root=DM) }}
+
+Ours is the same arithmetic. Python's `round` (half to even) is the same function on both sides, and the resize is
+PIL's Lanczos, which `VaeImageProcessor.resize` uses by default:
+
+{{ code('src/h3mlx/image.py', function='size_at_area') }}
+{{ code('src/h3mlx/image.py', function='size_in_area_range') }}
+{{ code('src/h3mlx/image.py', function='prepare_edit') }}
+
+`test_size_rules_match` runs both size functions and `round_canvas` on 400 random sizes;
+`test_prepare_edit_matches_resize_step` runs diffusers' own `PH3ImageEditResizeStep` as a pipeline and compares the
+canvas and every resized picture pixel for pixel, with and without a canvas.
+
+## 5. Encoding the pictures
+
+The pictures go through H3's conditioning recipe unchanged: ImageNet normalisation, the posterior *sampled* under a
+fresh generator seeded 42 for each picture, a float16 round trip, then the latent normalisation. A single frame takes the
+VAE's tiled spatial encoder alone, as an H3 image reference does.
+
+{{ code(P + 'encoders.py', function='encode_vae_condition', root=DM) }}
+{{ code('src/h3mlx/image.py', function='encode_pictures') }}
+
+`encode_condition` is the H3 port's (main guide §6). `test_image_encode_and_condition_recipe` compares the moments and
+the final latents against diffusers' function on the image VAE. The float16 round trip means an encoder difference of
+1e-6 can land one float16 step apart, so the end-to-end test bounds those rows by how many elements differ, not only by
+the largest difference.
+
+## 6. The packed layouts
+
+Both layouts are H3's. Text-to-image is the t2va layout for one latent frame and two audio latents per channel. Its
+`height` and `width` default to 2912 each on their own, then are rounded to multiples of 32:
+
+{{ code(P + 'before_denoise.py', function='PH3ImagePrepareLayoutStep.__call__', root=DM) }}
+{{ code('src/h3mlx/image.py', function='text2image_size') }}
+
+An edit is the ref2va layout with image references only: each picture takes one integer slot on the rotary clock, and
+the generated rows share the slot after the last picture.
+
+{{ code(P + 'before_denoise.py', function='PH3ImageEditPrepareLayoutStep.build_edit_packed_sequence', root=DM) }}
+
+Ours calls the two packers the video pipeline uses (main guide §1), so no layout code is new:
+
+{{ code('src/h3mlx/image.py', marker='layout') }}
+
+`test_text2image_layout_matches` and `test_edit_layout_matches` compare positions (float64, bit for bit), tags, indices
+and the conditioning-row counts for three canvases and for one, three and eight pictures.
+
+## 7. Noise and the schedule
+
+The draw order is H3's: one draw per picture from the request's generator (each noised to `t = 0.999` and held there),
+then the target image, then the audio rows.
+
+{{ code(P + 'before_denoise.py', function='PH3ImagePrepareConditionLatentsStep.__call__', root=DM) }}
+{{ code(P + 'before_denoise.py', function='PH3ImagePrepareLatentsStep.__call__', root=DM) }}
+{{ code('src/h3mlx/image.py', marker='noise-draws') }}
+
+Both schedulers get the checkpoint's own 9-point grid. The released scheduler config sets
+`shift_provided_sigmas: false`, so the grid is installed verbatim (no shift), and the 12 / 3 shifts of H3 play no part:
+
+{{ code(P + 'before_denoise.py', function='PH3ImageSetTimestepsStep.__call__', root=DM) }}
+{{ code(SCH, function='MiniMaxH3Scheduler.set_timesteps', root=DM) }}
+
+Ours builds H3's `Schedules` from the grid for both modalities, so the denoise loop is the H3 one, single-time:
+
+{{ code('src/h3mlx/image.py', function='schedules') }}
+
+The grid goes through float64 to float32, as the scheduler's `torch.as_tensor(..., float64)` then `.to(float32)` does.
+`test_schedule_is_the_grid_verbatim` compares sigmas and timesteps exactly with the scheduler's.
+
+## 8. The image decoder
+
+The image VAE keeps H3's encoder and latent space and swaps the decoder. H3's ViT decoder turns each latent voxel into a
+4 × 16 × 16 pixel block, with the time axis spread over the clip:
+
+{{ code(H3VAE, function='MiniMaxH3VideoViTDecoder3d.forward', root=DM) }}
+
+P-H3-Image's decodes one frame. Each token becomes a 16 × 16 block, and every token sits at one fixed time coordinate:
+the one H3's decoder gives the first frame of a 7-frame window.
+
+{{ code(PVAE, var='FRAME_POSITION', root=DM) }}
+{{ code(PVAE, function='PH3ImageViTDecoder.forward', root=DM) }}
+
+Ours adds both differences to H3's decoder as parameters, so the blocks, attention and tiling are shared:
+
+{{ code('src/h3mlx/vae_ops.py', function='vit_positions') }}
+{{ code('src/h3mlx/vae.py', var='IMAGE_FRAME_POSITION') }}
+{{ code('src/h3mlx/vae.py', function='VideoVAE.decode') }}
+
+`VaeConfig.from_diffusers` turns the mode on from the config's `_class_name`. The image VAE's `decode` and `encode`
+refuse more than one frame, and ours does too.
+
+**Precision.** With a `torch_dtype`, diffusers loads every parameter in that dtype except the class's
+`_keep_in_fp32_modules`, matched as a component of the dotted name. The two VAE classes keep different lists:
+`["encoder", "quant_conv", "proj_out"]` for the image VAE, and `encoder`, `quant_conv`, the three norms and the two
+layer scales for H3's. The release stores the image decoder in bf16 (its `proj_out` included) and the encoder in
+float32, so loading in bf16 upcasts `proj_out` to float32. `decode` then casts the latents to `post_quant_conv`'s
+dtype:
+
+{{ code(PVAE, function='AutoencoderKLPH3Image.decode', root=DM) }}
+
+Ours applies the same rule per class:
+
+{{ code('src/h3mlx/load.py', var='VAE_KEEP_F32') }}
+{{ code('src/h3mlx/load.py', function='load_vae') }}
+
+The run script loads the image VAE in float32 by default, as h3mlx decodes H3; `--vae-dtype bfloat16` loads it the
+pipeline's way. `test_vae_bf16_loading_matches_from_pretrained` compares every parameter's dtype with
+`from_pretrained(torch_dtype=bfloat16)` for both classes.
+
+The pixels are then un-normalised and rounded the way `VaeImageProcessor` rounds:
+
+{{ code(P + 'decoders.py', function='PH3ImageDecodeStep.__call__', root=DM) }}
+{{ code('src/h3mlx/image.py', function='decode') }}
+
+`test_image_decode_matches` (three latent sizes, tiled), `test_image_decode_untiled_and_frame_position` and
+`test_image_decode_bf16_policy_matches_pipeline` compare the decoder with diffusers'.
+
+## 9. The prompt upsampler
+
+The upsampler is a Qwen3.5-9B fine-tune. It gets the request in a chat template, with the aspect ratio for
+text-to-image or the pictures for an edit, and one greedy generation writes its reasoning, `</think>`, then the prompt.
+An edit's answer must be a brief in six sections or a one-paragraph instruction that says what it keeps.
+
+{{ code(P + 'prompt_upsampler.py', function='upsample_prompt', root=DM) }}
+{{ code(P + 'prompt_upsampler.py', function='PH3ImageText2ImagePromptUpsampleStep.__call__', root=DM) }}
+
+Ours builds the same request with the same processor and runs the model in mlx-vlm, whose `generate_step` decodes
+greedily at temperature 0:
+
+{{ code('src/h3mlx/upsampler.py', function='chat_text') }}
+{{ code('src/h3mlx/upsampler.py', function='generate_ids') }}
+{{ code('src/h3mlx/upsampler.py', function='upsample') }}
+
+The text-to-image label is taken from the requested size before the canvas is rounded, as the pipeline does
+(`run_p_h3_image.upsampler_aspect`). Greedy decoding in MLX and in torch can part ways once two logits are within
+rounding of each other, so on the 9B model the prompt it writes can differ from torch's in places; the same validity
+checks decide whether it is usable. The tests: `test_requests_and_answers_match_diffusers` runs diffusers'
+`upsample_prompt` with a stand-in model that records its inputs and answers with fixed text, and compares input ids,
+pixels, grids and the returned prompt; `test_tiny_prefill_logits_match_transformers` and
+`test_tiny_greedy_tokens_match_transformers` compare a tiny random Qwen3.5 in transformers with the same weights in
+mlx-vlm (with and without pictures). On the release, the upsampler wrote a valid 312-token edit brief in 14 s.
+
+## 10. End to end
+
+{{ code('src/h3mlx/image.py', function='generate') }}
+
+With `free_transformer`, `generate` also drops the connector once the prompt is encoded and the VAE encoder once the
+pictures are (`VideoVAE.drop_encoder`), so neither sits beside the transformer through the 8 calls.
+`test_single_use_components_free_their_weights_and_change_nothing` checks the image is the same either way.
+
+`test_end_to_end_matches_diffusers` runs diffusers' `PH3ImageBlocks` (upsampler removed) and `generate` on the same
+tiny random components: text-to-image, an edit with two pictures at Picture 1's size, and one on a set canvas. It
+compares the token tags exactly, the prompt embeddings to 1e-4, the noised picture rows, and the decoded images to
+2e-5 (measured: about 6e-7). `tests/test_run_p_h3_image.py` saves those components in the release's own layout and
+runs the command line against `PH3ImageBlocks` for both workflows, plus the re-decode path and its refusals.
+
+**Measured on an M3 Ultra (60-core GPU, 256 GB)** with the release, 8 calls, bf16 transformer, float32 decode:
+
+| request | size | rows | per call | total | peak |
+| --- | --- | --- | --- | --- | --- |
+| text-to-image, prompt as written | 2912 × 2912 | 8,395 | 26.0 s | 4.2 min | 69 GB |
+| edit, one 8.5 MP picture, upsampled | 2912 × 2912 | 17,749 | 69.4 s | 10.5 min | 72 GB |
+
+## 11. Not done, and open
+
+- **Real-weight equivalence with torch is not measured.** Every comparison above uses tiny random models; the release
+  has only run on our side. A bf16 run of both pipelines on the same seed would show how far they drift.
+- **Not ported:** diffusers' component offloading and tensor parallelism, and Pruna's ComfyUI files (int8, w4a8, and a
+  20B transformer whose AdaLN projections are replaced by a table).
+- **The modulation cache** (main guide §2.6) would apply unchanged: P-H3-Image's steps are single-time. It is not wired
+  into `generate`.

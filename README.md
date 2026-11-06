@@ -21,9 +21,11 @@ Both were built op by op and tested against their implementations in
   transformer calls instead of 49.
 - **P-H3-Image:** both workflows end to end, its text connector, the single-frame image decoder, and its prompt
   upsampler (Qwen3.5-9B, via mlx-vlm). It reuses H3's transformer, packing and denoise loop unchanged.
-- **Porting guides:** [`docs/porting.md`](docs/porting.md) (diffusers -> h3mlx) and
-  [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md), side by side, with permalinks to the originals. P-H3-Image
-  has no guide yet.
+- **Porting guides:** [`docs/porting.md`](docs/porting.md) (diffusers -> h3mlx),
+  [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md) and [`docs/porting-p-h3-image.md`](docs/porting-p-h3-image.md),
+  side by side, with permalinks to the originals. Each is rendered from its `.md.j2` template with
+  [projected-source](https://github.com/sublimator/projected-source); the template's header says which upstream
+  checkouts it reads.
 
 ## Tests
 
