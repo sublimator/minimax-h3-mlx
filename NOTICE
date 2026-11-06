@@ -9,7 +9,9 @@ licence notices are reproduced in THIRD_PARTY_NOTICES.md, as their licences requ
 - diffusers (Hugging Face), Apache License 2.0: the MiniMax H3 implementation this port was translated from and is
   tested against. The modules in src/h3mlx/ that implement the transformer, scheduler, denoise loop, packing,
   presentation, reference geometry, video VAE, audio VAE and pipeline are modified derivatives of it, translated from
-  PyTorch to MLX and NumPy. docs/porting.md quotes it.
+  PyTorch to MLX and NumPy. docs/porting.md quotes it. Its P-H3-Image implementation (Pruna AI) is the source of
+  src/h3mlx/image.py and src/h3mlx/upsampler.py and of the single-frame decoder in vae.py and vae_ops.py (modified
+  derivatives), and the tests run against it.
 - HyperFlow (Video Rebirth), Apache License 2.0: the 8-step LoRA loader, two-time embedder and sigma grid, translated in
   src/h3mlx/hyperflow.py, ops.py and denoise.py (modified derivatives), transcribed in torch in tests/test_hyperflow.py
   as oracles, and quoted in docs/porting-hyperflow.md.
@@ -21,5 +23,5 @@ licence notices are reproduced in THIRD_PARTY_NOTICES.md, as their licences requ
 Also credited, with no code copied: MLX (Apple, MIT License), and ComfyUI-MiniMax-H3-MLX-SolAttn (yshenaw, Apache
 License 2.0), an earlier MLX port of MiniMax H3 whose AdaLN modulation cache inspired the one in src/h3mlx/ops.py.
 
-The MiniMax H3 weights, configs, tokenizer and processor are not included. They come under the MiniMax H3 Community
-License, which has its own terms, including territory exclusions.
+The MiniMax H3 and P-H3-Image weights, configs, tokenizers and processors are not included. They come under the
+MiniMax H3 Community License, which has its own terms, including territory exclusions.

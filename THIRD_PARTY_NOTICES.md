@@ -12,12 +12,18 @@ The MiniMax H3 transformer, scheduler, modular pipeline and autoencoders
 (`src/diffusers/models/transformers/transformer_minimax_h3.py`, `src/diffusers/schedulers/scheduling_minimax_h3.py`,
 `src/diffusers/modular_pipelines/minimax_h3/`, `src/diffusers/models/autoencoders/autoencoder_kl_minimax_h3.py`,
 `autoencoder_kl_minimax_h3_audio.py`) are the source of the translated modules in `src/h3mlx/`, and are quoted in
-`docs/porting.md` and `docs/porting-hyperflow.md`. Those files carry these notices:
+`docs/porting.md` and `docs/porting-hyperflow.md`. Its P-H3-Image implementation, at main commit d3d8af89
+(`src/diffusers/modular_pipelines/p_h3_image/`, `src/diffusers/models/autoencoders/autoencoder_kl_p_h3_image.py`,
+`src/diffusers/models/condition_embedders/condition_embedder_p_h3_image.py`), is the source of `src/h3mlx/image.py`,
+`src/h3mlx/upsampler.py` and the single-frame decoder in `src/h3mlx/vae.py` and `vae_ops.py`. Those files carry these
+notices:
 
 ```
 Copyright 2025 The MiniMax Team and The HuggingFace Team. All rights reserved.
 Copyright 2025 The MiniMax authors and The HuggingFace Team. All rights reserved.
 Copyright 2026 The MiniMax and HuggingFace Teams. All rights reserved.
+Copyright 2026 Pruna AI and The HuggingFace Team. All rights reserved.
+Copyright 2026 Pruna AI, The MiniMax and HuggingFace Teams. All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
