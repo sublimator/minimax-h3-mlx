@@ -393,11 +393,12 @@ def dit_forward(
         if endpoint is not None or "endpoint_time_embedder.linear_1.weight" in p:
             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
         temb = None
-        t_rows = cache.rows(timestep, timestep_indices)  # step-local timestep index -> row of the cached table
+        call_blocks, call_out = cache.call(timestep)  # this call's own tables: the same rows as computing them here
+        t_rows = timestep_indices
     adaln_indices = t_rows * MODALITY_NUM + token_tags
     for i in range(cfg["num_layers"]):
         x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps,
-                      modulation=None if cache is None else cache.blocks[i])
+                      modulation=None if cache is None else call_blocks[i])
         mx.eval(x)  # one block's graph at a time: bounds activation memory at 20-50k rows
     #@@end adaln-rows-and-blocks
 
@@ -406,7 +407,7 @@ def dit_forward(
         x = norm_out(x, temb, p["norm_out.norm.weight"], p["norm_out.linear.weight"], p["norm_out.linear.bias"],
                      timestep_indices, final_eps)
     else:
-        shift, scale = cache.out
+        shift, scale = call_out
         h = rms_norm(x, p["norm_out.norm.weight"], final_eps)
         x = h * (1.0 + mx.take(scale, t_rows, axis=0)) + mx.take(shift, t_rows, axis=0)
     x = x.astype(p["proj_out.weight"].dtype)
@@ -420,47 +421,57 @@ def dit_forward(
 
 
 class ModulationCache:
-    """Every block's six AdaLN tables (and norm_out's shift/scale) for a fixed set of timestep values, computed once.
+    """Every block's six AdaLN tables (and norm_out's shift/scale) for each model call of a run, computed up front.
 
-    The modulation depends only on t and the weights, never on the latents, so a sampling run can precompute it for
-    the union of its timesteps and drop the `adaln_proj` weights (~26 GB of transformer_ref's ~66 GB in bf16). The
-    rows of each table are [t0m0, t0m1, t0m2, t1m0, ...] over `self.t`, exactly what `adaln_modulation` returns.
+    The modulation depends only on a call's timesteps and the weights, never on the latents, so a sampling run can
+    precompute it and drop the `adaln_proj` weights (~26 GB of transformer_ref's ~66 GB in bf16). `calls` lists each
+    call's distinct timesteps as `denoise` passes them (`schedule_calls`). Each call's tables are computed from exactly
+    that array, so they are bit-identical to what `dit_block` and `norm_out` compute inside the call. (One product over
+    the union of all timesteps is the same maths but rounds differently in bf16, and over 8 steps that drew a different
+    picture from the same seed.) A call's table rows are [t0m0, t0m1, t0m2, t1m0, ...], as `adaln_modulation` returns.
 
-    `drop=True` pops each projection from `p` as soon as its table is evaluated (what `drop_weights` returns, done in
+    `drop=True` pops each projection from `p` as soon as its tables are evaluated (what `drop_weights` returns, done in
     place), so only one block's projection is resident at a time even when the rest of the transformer already is
     (a quantized one: 11-21 GB plus all 26 GB of projections otherwise).
     """
 
-    def __init__(self, p: dict, cfg: dict, timesteps, drop: bool = False):
+    def __init__(self, p: dict, cfg: dict, calls, drop: bool = False):
         if "endpoint_time_embedder.linear_1.weight" in p:
             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
-        t = np.unique(np.asarray(timesteps, dtype=np.float32))
-        self.t = t
-        self._index = {float(v): i for i, v in enumerate(t)}
-        temb = timestep_embedding(mx.array(t), _sub(p, "time_embedder."), cfg["freq_dim"])
+        arrays = {}
+        for u in calls:  # distinct calls, in first-seen order; the array as the call passes it
+            arrays.setdefault(self.key(u), np.asarray(u))
+        self._index = {k: c for c, k in enumerate(arrays)}
+        self.t = np.unique(np.concatenate([a.astype(np.float32) for a in arrays.values()])) if arrays else np.zeros(0)
+        tembs = [timestep_embedding(mx.array(a), _sub(p, "time_embedder."), cfg["freq_dim"]) for a in arrays.values()]
+        mx.eval(tembs)
         hidden = cfg["hidden_size"]
-        self.blocks = []
+        self.blocks = [[] for _ in arrays]  # [call][block] -> the six tables
         for i in range(cfg["num_layers"]):
             b = f"transformer_blocks.{i}.adaln_proj.linear."
-            tables = adaln_modulation(temb, p[b + "weight"], p[b + "bias"], hidden)
+            tables = [adaln_modulation(temb, p[b + "weight"], p[b + "bias"], hidden) for temb in tembs]
             mx.eval(tables)
-            self.blocks.append(tables)
+            for c, tab in enumerate(tables):
+                self.blocks[c].append(tab)
             if drop:
                 del p[b + "weight"], p[b + "bias"]
         w, bias = p["norm_out.linear.weight"], p["norm_out.linear.bias"]
-        self.out = mx.split(linear(silu(temb).astype(w.dtype), w, bias), 2, axis=-1)
+        self.out = [mx.split(linear(silu(temb).astype(w.dtype), w, bias), 2, axis=-1) for temb in tembs]
         mx.eval(self.out)
         if drop:
             del p["norm_out.linear.weight"], p["norm_out.linear.bias"]
 
-    def rows(self, timestep: mx.array, timestep_indices: mx.array) -> mx.array:
-        """Map a step's (distinct timesteps, per-row index into them) onto rows of the cached tables."""
-        local = np.array(timestep.astype(mx.float32))
-        try:
-            glob = np.array([self._index[float(v)] for v in local], dtype=np.int64)
-        except KeyError as e:
-            raise KeyError(f"timestep {e} not in the cache (built for {len(self.t)} values)") from None
-        return mx.take(mx.array(glob), timestep_indices)
+    @staticmethod
+    def key(timestep) -> tuple:
+        return tuple(float(v) for v in np.asarray(timestep).reshape(-1))
+
+    def call(self, timestep: mx.array) -> tuple[list, list]:
+        """(each block's six tables, norm_out's [shift, scale]) for the call with these distinct timesteps."""
+        k = self.key(np.array(timestep))
+        if k not in self._index:
+            raise KeyError(f"timesteps {k} are not one of the {len(self._index)} calls the cache was built for")
+        c = self._index[k]
+        return self.blocks[c], self.out[c]
 
     @staticmethod
     def drop_weights(p: dict, cfg: dict) -> dict:

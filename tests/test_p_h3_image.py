@@ -444,7 +444,7 @@ def test_modulation_cache_matches_diffusers_and_drops_adaln(workflow):
     cached, dbg = run_ours(t, prompt, images, height, width, seed=7, free=True, cache=True)
     print(workflow, f"cached vs diffusers {np.abs(cached - want).max():.2e}, vs uncached {np.abs(cached - plain).max():.2e}")
     assert np.abs(cached - want).max() < 2e-5
-    assert np.abs(cached - plain).max() < 1e-6
+    assert np.array_equal(cached, plain)  # each call's own tables: bit-identical
     assert len(dbg["modulation_timesteps"]) == (9 if workflow == "edit" else 8)
     assert not any("adaln_proj" in k or k.startswith("norm_out.linear") for k in dbg["components"].dit_params)
 

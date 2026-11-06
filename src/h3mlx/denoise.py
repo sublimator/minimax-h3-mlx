@@ -108,7 +108,7 @@ def denoise(
 ):
     """video_rows (n_video, patch_dim) with conditioning rows first; audio_rows (n_audio, audio_ch) with reference rows
     first; prompt_embeds (1, n_text, text_dim). Returns the final (video_rows, audio_rows). With `cache`
-    (`ops.ModulationCache` built from `schedule_timesteps`), the AdaLN projections are not evaluated per step."""
+    (`ops.ModulationCache` built from `schedule_calls`), the AdaLN projections are not evaluated per step."""
     lay = {
         "token_tags": mx.array(layout.token_tags),
         "position_ids": mx.array(layout.position_ids.astype(np.float32)),
@@ -146,12 +146,10 @@ def denoise(
     return video_rows, audio_rows
 
 
-def schedule_timesteps(layout: Layout, schedules: Schedules) -> np.ndarray:
-    """Every distinct timestep any row takes over the whole run: what a ModulationCache needs."""
+def schedule_calls(layout: Layout, schedules: Schedules) -> list[np.ndarray]:
+    """Each model call's distinct timesteps over the whole run, exactly as `denoise` passes them: what a
+    ModulationCache needs to build bit-identical tables."""
     if schedules.two_time:
         raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
-    vals = []
-    for t, ta in zip(schedules.video_timesteps, schedules.audio_timesteps):
-        uniq, _ = row_timesteps(layout, float(t), float(ta), max(float(t), KEYFRAME_NOISE_AUG), 1.0)
-        vals.append(uniq)
-    return np.unique(np.concatenate(vals))
+    return [row_timesteps(layout, float(t), float(ta), max(float(t), KEYFRAME_NOISE_AUG), 1.0)[0]
+            for t, ta in zip(schedules.video_timesteps, schedules.audio_timesteps)]

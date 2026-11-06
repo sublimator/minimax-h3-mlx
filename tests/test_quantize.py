@@ -60,11 +60,11 @@ def test_quantized_forward_stays_close(mixed, bits, limit):
     want = ops.dit_forward(p, cfg, *x, **lay)
     qp = load.quantize_transformer(dict(p), bits, GROUP)
     got = ops.dit_forward(qp, cfg, *x, **lay)
-    cache = ops.ModulationCache(qp, cfg, np.array([1.0, 0.37, 0.05, 0.6, 0.999], dtype=np.float32))
+    cache = ops.ModulationCache(qp, cfg, [np.array(lay["timestep"])])
     cached = ops.dit_forward(ops.ModulationCache.drop_weights(qp, cfg), cfg, *x, **lay, cache=cache)
     for g, c, w in zip(got, cached, want):
         g, c, w = (np.array(a.astype(mx.float32)) for a in (g, c, w))
         rel = np.linalg.norm(g - w) / np.linalg.norm(w)
         print(f"bits {bits} mixed {mixed}: relative error {rel:.4f}")
         assert np.isfinite(g).all() and rel < limit
-        assert np.abs(c - g).max() <= 1e-2 * np.abs(g).max()  # the cache changes only the AdaLN arithmetic's order
+        assert np.array_equal(c, g)  # the cache's tables are the call's own

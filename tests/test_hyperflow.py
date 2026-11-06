@@ -22,7 +22,7 @@ from test_dit_mixed_precision import rel_err, to_mixed
 from test_dit_tiny import TINY, packed_layout
 
 from h3mlx import hyperflow, ops
-from h3mlx.denoise import KEYFRAME_NOISE_AUG, Schedules, denoise, row_time_pairs, schedule_timesteps, shift_grid
+from h3mlx.denoise import KEYFRAME_NOISE_AUG, Schedules, denoise, row_time_pairs, schedule_calls, shift_grid
 
 RAW = hyperflow.DEFAULT_SIGMAS_8STEP
 RANK = 4
@@ -340,7 +340,7 @@ def test_refusals():
     with pytest.raises(ValueError, match="one endpoint per timestep"):
         ops.dit_forward(params, cfg, *args, **lay, endpoint=mx.zeros(2))  # 3 distinct timesteps, 2 endpoints
     with pytest.raises(NotImplementedError):
-        schedule_timesteps(tiny_layout(), meta.schedules())
+        schedule_calls(tiny_layout(), meta.schedules())
     norm_lora = {**t_mx, "transformer.transformer_blocks.0.norm1.lora_A.weight": mx.zeros((4, 48)),
                  "transformer.transformer_blocks.0.norm1.lora_B.weight": mx.zeros((48, 4))}
     with pytest.raises(ValueError, match="not run through ops.plinear"):
@@ -369,7 +369,7 @@ def test_refusals():
     with pytest.raises(ValueError, match="no LoRA tensors"):
         hyperflow.check_file(meta, {}, dict(model.config))
     with pytest.raises(NotImplementedError):
-        ops.ModulationCache(params, cfg, [0.0, 0.5])
+        ops.ModulationCache(params, cfg, [np.float32([0.0, 0.5])])
     with pytest.raises(ValueError, match="already attached"):
         hyperflow.attach(params, cfg, t_mx, meta)
     with pytest.raises(ValueError, match="not a HyperFlow"):

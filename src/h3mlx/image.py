@@ -22,7 +22,7 @@ import numpy as np
 from PIL import Image
 
 from . import ops
-from .denoise import Schedules, assert_finite, denoise, schedule_timesteps
+from .denoise import Schedules, assert_finite, denoise, schedule_calls
 from .packing import Ref, build_packed_sequence, build_ref2va_packed_sequence
 from .pipeline import ENCODE_SEED, NOISE_AUG, PIXEL_MEAN, PIXEL_STD, Noise
 from .presentation import build_presentation
@@ -234,9 +234,9 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
     encoder once the pictures are, and `c.dit_params` before decoding. `on_stage(name)`: text, pictures, layout,
     denoise, decode.
 
-    `modulation_cache` computes every block's AdaLN modulation once, for the run's ~10 distinct timesteps
-    (`ops.ModulationCache`), instead of projecting it in every call: the same maths, batched. With `free_transformer`
-    the 13B `adaln_proj` parameters (~26 GB in bf16) are dropped from `c.dit_params` block by block as the tables are
+    `modulation_cache` computes every block's AdaLN modulation up front, for each of the run's 8 calls
+    (`ops.ModulationCache`), instead of projecting it inside the call: the same tables, bit for bit. With
+    `free_transformer` the 13B `adaln_proj` parameters (~26 GB in bf16) are dropped from `c.dit_params` block by block as the tables are
     built, so at most one block's projection is resident beside the rest of the transformer (which, quantized, is
     already loaded)."""
     dbg = debug if debug is not None else {}
@@ -305,7 +305,7 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
     cache = None
     #@@start modulation-cache
     if modulation_cache:
-        cache = ops.ModulationCache(c.dit_params, c.dit_cfg, schedule_timesteps(layout, sched), drop=free_transformer)
+        cache = ops.ModulationCache(c.dit_params, c.dit_cfg, schedule_calls(layout, sched), drop=free_transformer)
         if free_transformer:
             mx.clear_cache()
         dbg.update(modulation_timesteps=cache.t)

@@ -1,5 +1,6 @@
-"""The AdaLN modulation cache: exactly equal to the uncached path on the small fixtures below; in general equal in
-maths and within torch-bf16 accuracy (the error-budget test), with the adaln weights dropped."""
+"""The AdaLN modulation cache: bit-identical to the uncached path, since each call's tables are computed from exactly
+the timesteps that call passes (one product over the union of all timesteps rounded differently: the error-budget
+test's larger model showed it), with the adaln weights dropped."""
 
 import mlx.core as mx
 import numpy as np
@@ -12,7 +13,7 @@ from test_dit_mixed_precision import to_mixed
 from test_dit_tiny import TINY, packed_layout
 
 from h3mlx import ops
-from h3mlx.denoise import Schedules, denoise, schedule_timesteps
+from h3mlx.denoise import Schedules, denoise, schedule_calls
 
 
 @pytest.mark.parametrize("mixed", [False, True])
@@ -25,33 +26,38 @@ def test_forward_with_cache_equals_without(mixed):
     lay = {k: to_mx(v) for k, v in packed_layout().items()}
     x = (mx.random.normal((1, 12, 16)), mx.random.normal((1, 7, 6)), mx.random.normal((1, 5, 20)))
     want = ops.dit_forward(p, cfg, *x, **lay)
-    cache = ops.ModulationCache(p, cfg, np.array([1.0, 0.37, 0.05, 0.6, 0.999], dtype=np.float32))  # a superset
+    calls = [np.float32([0.6, 0.999]), np.array(lay["timestep"]), np.float32([0.5])]  # this call among others
+    cache = ops.ModulationCache(p, cfg, calls)
     got = ops.dit_forward(ops.ModulationCache.drop_weights(p, cfg), cfg, *x, **lay, cache=cache)
     for g, w in zip(got, want):
         assert float(mx.abs(g.astype(mx.float32) - w.astype(mx.float32)).max()) == 0.0
 
 
-def test_cache_drops_the_adaln_weights_and_rejects_unknown_t():
+def test_cache_drops_the_adaln_weights_and_rejects_unknown_calls():
     model = MiniMaxH3Transformer3DModel(**TINY).eval()
     p, cfg = state_mx(model), dict(model.config)
     small = ops.ModulationCache.drop_weights(p, cfg)
     assert not any("adaln_proj" in k or k.startswith("norm_out.linear") for k in small)
-    cache = ops.ModulationCache(p, cfg, [0.5])
-    with pytest.raises(KeyError):
-        cache.rows(mx.array([0.25]), mx.array([0]))
+    cache = ops.ModulationCache(p, cfg, [np.float32([0.5, 1.0]), np.float32([0.5, 1.0]), np.float32([0.25])])
+    assert len(cache.blocks) == 2 and list(cache.t) == [0.25, 0.5, 1.0]  # a repeated call is built once
+    cache.call(mx.array([0.5, 1.0]))
+    for unknown in ([0.5], [1.0, 0.5], [0.5, 1.0, 0.25]):  # a call is its exact timestep array, order included
+        with pytest.raises(KeyError):
+            cache.call(mx.array(unknown))
 
 
 def test_cache_with_drop_pops_the_same_weights_in_place_and_builds_the_same_tables():
     model = MiniMaxH3Transformer3DModel(**TINY).eval()
     p, cfg = state_mx(model), dict(model.config)
-    t = [1.0, 0.5, 0.999]
-    kept = ops.ModulationCache(dict(p), cfg, t)
+    calls = [np.float32([1.0, 0.5]), np.float32([0.999])]
+    kept = ops.ModulationCache(dict(p), cfg, calls)
     q = dict(p)
-    dropped = ops.ModulationCache(q, cfg, t, drop=True)
+    dropped = ops.ModulationCache(q, cfg, calls, drop=True)
     assert set(q) == set(ops.ModulationCache.drop_weights(p, cfg))
-    for a, b in zip(kept.blocks + [kept.out], dropped.blocks + [dropped.out]):
-        for x, y in zip(a, b):
-            assert bool(mx.array_equal(x, y))
+    for c in range(len(calls)):
+        for a, b in zip(kept.blocks[c] + [kept.out[c]], dropped.blocks[c] + [dropped.out[c]]):
+            for x, y in zip(a, b):
+                assert bool(mx.array_equal(x, y))
 
 
 def test_denoise_with_cache_equals_without():
@@ -64,16 +70,16 @@ def test_denoise_with_cache_equals_without():
     text = mx.random.normal((1, len(lay.text_indices), 20))
     sch = Schedules.make(5)
     want = denoise(p, cfg, lay, text, v0, a0, sch)
-    cache = ops.ModulationCache(p, cfg, schedule_timesteps(lay, sch))
+    cache = ops.ModulationCache(p, cfg, schedule_calls(lay, sch))
     got = denoise(ops.ModulationCache.drop_weights(p, cfg), cfg, lay, text, v0, a0, sch, cache=cache)
     for g, w in zip(got, want):
         assert float(mx.abs(g - w).max()) == 0.0
 
 
-def test_cache_error_budget_over_a_50_point_schedule():
-    """Not bit-identical in general (review D2: the cache multiplies all timesteps at once, a step only
-    its own; bf16 rounding then differs, e.g. step 6 here). What must hold: at every step, cached and uncached MLX are as
-    close to an f32 torch run as torch's own bf16 run is (ratio <= 1.25; observed <= 1.06)."""
+def test_cache_is_bit_identical_over_a_50_point_schedule():
+    """A larger mixed-precision model where one product over the union of the timesteps rounded differently from the
+    step's own (review D2, e.g. step 6). Per-call tables must make every step bit-identical; the uncached path must
+    stay as close to an f32 torch run as torch's own bf16 run is (ratio <= 1.25; observed <= 1.06)."""
     from test_dit_mixed_precision import rel_err
 
     from h3mlx.denoise import row_timesteps
@@ -85,7 +91,7 @@ def test_cache_error_budget_over_a_50_point_schedule():
     mixed = to_mixed(f32)
     p, c = state_mx(mixed), dict(mixed.config)
     lay, sch = tiny_layout(), Schedules.make(50)
-    cache = ops.ModulationCache(p, c, schedule_timesteps(lay, sch))
+    cache = ops.ModulationCache(p, c, schedule_calls(lay, sch))
     small = ops.ModulationCache.drop_weights(p, c)
     xt = (torch.randn(1, len(lay.video_indices), 16), torch.randn(1, len(lay.audio_indices), 6),
           torch.randn(1, len(lay.text_indices), 20))
@@ -102,5 +108,5 @@ def test_cache_error_budget_over_a_50_point_schedule():
         unc = ops.dit_forward(p, c, *x, **step)
         cac = ops.dit_forward(small, c, *x, **step, cache=cache)
         for j in range(2):
-            budget = 1.25 * rel_err(tb[j], truth[j]) + 1e-4
-            assert rel_err(unc[j], truth[j]) <= budget and rel_err(cac[j], truth[j]) <= budget, (float(t), j)
+            assert bool(mx.array_equal(cac[j], unc[j])), (float(t), j)
+            assert rel_err(unc[j], truth[j]) <= 1.25 * rel_err(tb[j], truth[j]) + 1e-4, (float(t), j)
