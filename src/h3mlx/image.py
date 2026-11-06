@@ -235,8 +235,9 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
     quantize, denoise, decode.
 
     `quantize` (8 or 4) quantizes the transformer's attention and feed-forward matrices (`load.quantize_transformer`)
-    once the text and pictures are encoded, so the text encoder and the quantized transformer are never resident
-    together.
+    once the text and pictures are encoded. With the staged text encoder the run script uses (it frees itself), the
+    text model and the quantized matrices are then never resident together; an encoder the caller keeps loaded in
+    `c.encode_states` stays loaded.
 
     `modulation_cache` computes every block's AdaLN modulation up front, for each of the run's 8 calls
     (`ops.ModulationCache`), instead of projecting it inside the call: the same tables, bit for bit. With
