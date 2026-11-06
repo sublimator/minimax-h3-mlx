@@ -47,6 +47,27 @@ def _config(d: Path) -> dict:
     return json.loads((Path(d) / "config.json").read_text())
 
 
+# The transformer's big matmuls: attention q/k/v/out and the SwiGLU pair, in the 50 blocks and the token refiner.
+QUANT_TARGETS = re.compile(r"\.(attn\.(to_q|to_k|to_v|to_out\.0)|ff\.net\.(0\.proj|2))\.weight$")
+
+
+def quantize_transformer(p: dict, bits: int, group_size: int = 64) -> dict:
+    """Quantize the block and refiner linears in place (`ops.QuantizedWeight`, `bits` per weight plus a bf16 scale and
+    bias per `group_size` inputs); everything else stays as loaded. Each weight is read, quantized and evaluated in
+    turn and its original dropped, so the full-precision copy is never resident at once. Returns `p`."""
+    from .ops import QuantizedWeight
+
+    for k in [k for k in p if QUANT_TARGETS.search(k)]:
+        w = p[k]
+        if w.ndim != 2 or w.shape[-1] % group_size:
+            continue
+        q = QuantizedWeight(w, bits, group_size)
+        mx.eval(q.wq, q.scales, q.biases)
+        p[k] = q
+        del w
+    return p
+
+
 def load_transformer(d) -> tuple[dict, dict]:
     cfg = {k: v for k, v in _config(d).items() if not k.startswith("_")}
     cfg["patch_size"] = tuple(cfg["patch_size"])

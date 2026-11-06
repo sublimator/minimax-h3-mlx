@@ -109,6 +109,8 @@ def main(argv=None) -> int:
     ap.add_argument("--vae-dtype", choices=["float32", "bfloat16"], default="float32",
                     help="float32 (as h3mlx decodes H3), or bfloat16 with the pipeline's float32 modules kept")
     ap.add_argument("--upsample", action="store_true", help="expand the request with the release's prompt upsampler")
+    ap.add_argument("--quantize", type=int, choices=[8, 4],
+                    help="quantize the transformer's block weights to 8 or 4 bits (groups of 64) after loading")
     ap.add_argument("--modulation-cache", action=argparse.BooleanOptionalAction, default=True,
                     help="compute the AdaLN modulation once for the run's timesteps and drop adaln_proj (~26 GB); "
                          "on by default")
@@ -231,6 +233,12 @@ def main(argv=None) -> int:
         c.vae, _, _ = load.load_vae(weights / "vae", dtype=vae_dtype)
         c.connector = load.load_safetensors(weights / "text_connector")
         c.dit_params, _ = load.load_transformer(weights / "transformer")
+        if args.quantize:
+            event("quantize_start", bits=args.quantize)
+            load.quantize_transformer(c.dit_params, args.quantize)
+            n = sum(1 for v in c.dit_params.values() if hasattr(v, "wq"))
+            gb = sum(v.nbytes for v in c.dit_params.values() if hasattr(v, "wq")) / 1e9
+            event("quantized", bits=args.quantize, weights=n, quantized_gb=round(gb, 2))
         per_call = dit_tflop_per_call(log["plan"]["sequence_rows"], c.dit_cfg)
         clock = {"prev": None}
 

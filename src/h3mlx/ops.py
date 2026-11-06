@@ -58,9 +58,28 @@ def silu(x: mx.array) -> mx.array:
     return (xf * mx.sigmoid(xf)).astype(x.dtype)
 
 
-def linear(x: mx.array, w: mx.array, b: mx.array | None = None) -> mx.array:
-    """torch.nn.Linear: w is (out, in)."""
-    y = x @ w.T
+class QuantizedWeight:
+    """A Linear weight kept by `mx.quantize` (affine: per-group scales and biases over `group_size` inputs), applied
+    with `mx.quantized_matmul`. `shape` and `dtype` are the original (out, in) weight's, so code that reads them keeps
+    working. Ours, not the reference's: the release and diffusers run the transformer in bf16."""
+
+    def __init__(self, w: mx.array, bits: int, group_size: int = 64):
+        self.shape, self.dtype, self.bits, self.group_size = tuple(w.shape), w.dtype, bits, group_size
+        self.wq, self.scales, self.biases = mx.quantize(w, group_size=group_size, bits=bits)
+
+    @property
+    def nbytes(self) -> int:
+        return self.wq.nbytes + self.scales.nbytes + self.biases.nbytes
+
+    def apply(self, x: mx.array) -> mx.array:
+        y = mx.quantized_matmul(x.astype(self.dtype), self.wq, self.scales, self.biases, transpose=True,
+                                group_size=self.group_size, bits=self.bits)
+        return y.astype(mx.float32) if x.dtype == mx.float32 else y  # promote like `x @ w.T`
+
+
+def linear(x: mx.array, w, b: mx.array | None = None) -> mx.array:
+    """torch.nn.Linear: w is (out, in), or a `QuantizedWeight`."""
+    y = w.apply(x) if isinstance(w, QuantizedWeight) else x @ w.T
     return y + b if b is not None else y
 
 
