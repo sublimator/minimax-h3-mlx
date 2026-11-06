@@ -118,11 +118,16 @@ def vit_rope_inv_freq(dim: int, theta: float = 100.0, num_axes: int = 3) -> mx.a
     return mx.array((np.float32(1) / np.power(np.float32(theta), exps)).astype(np.float32))
 
 
-def vit_positions(frames: int, height: int, width: int, extra: int) -> mx.array:
-    """Voxel centres normalised to [-1, 1) per axis, (t, h, w) in raster order, then `extra` zero rows."""
+def vit_positions(frames: int, height: int, width: int, extra: int, frame_position: float | None = None) -> mx.array:
+    """Voxel centres normalised to [-1, 1) per axis, (t, h, w) in raster order, then `extra` zero rows. With
+    `frame_position` (one frame only) the time axis is that fixed coordinate instead (P-H3-Image's decoder)."""
     import numpy as np
 
     axes = [2.0 * (np.arange(0.5, n, dtype=np.float32) / np.float32(n)) - 1.0 for n in (frames, height, width)]
+    if frame_position is not None:
+        if frames != 1:
+            raise ValueError(f"a fixed frame position decodes one latent frame, got {frames}")
+        axes[0] = np.array([frame_position], dtype=np.float32)
     grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3).astype(np.float32)
     return mx.array(np.concatenate([grid, np.zeros((extra, 3), dtype=np.float32)]))
 
@@ -182,15 +187,16 @@ def vit_block(x: mx.array, p: dict, heads: int, eps: float, rotary) -> mx.array:
 
 def vit_decoder(
     z: mx.array, p: dict, num_layers: int, heads: int, patch_size: int, patch_size_t: int, out_channels: int,
-    rope_dim: int, rope_theta: float = 100.0, eps: float = 1e-5,
+    rope_dim: int, rope_theta: float = 100.0, eps: float = 1e-5, frame_position: float | None = None,
 ) -> mx.array:
-    """MiniMaxH3VideoViTDecoder3d. z: channels-last latents (B, F, H, W, C) -> pixels (B, F*pt, H*p, W*p, out)."""
+    """MiniMaxH3VideoViTDecoder3d. z: channels-last latents (B, F, H, W, C) -> pixels (B, F*pt, H*p, W*p, out).
+    P-H3-Image's `PH3ImageViTDecoder` is the same with `patch_size_t=1` and one frame at `frame_position`."""
     b, f, h, w, c = z.shape
     x = _lin(z.reshape(b, f * h * w, c), p, "proj_in")
     n = x.shape[1]
     regs = mx.broadcast_to(p["register_tokens"].astype(x.dtype), (b, *p["register_tokens"].shape[1:]))
     x = mx.concatenate([x, regs, mx.zeros((b, 1, x.shape[-1]), dtype=x.dtype)], axis=1)
-    rotary = vit_rope(vit_positions(f, h, w, regs.shape[1] + 1), vit_rope_inv_freq(rope_dim, rope_theta))
+    rotary = vit_rope(vit_positions(f, h, w, regs.shape[1] + 1, frame_position), vit_rope_inv_freq(rope_dim, rope_theta))
     for i in range(num_layers):
         x = vit_block(x, _sub(p, f"transformer_blocks.{i}."), heads, eps, rotary)
         mx.eval(x)  # 36 f32 blocks per tile: keep each one its own GPU graph

@@ -9,7 +9,9 @@ requires-python = ">=3.11,<3.14"
 dependencies = ["mlx>=0.32.4", "numpy>=2", "mlx-vlm==0.7.11", "torch>=2.8", "torchvision", "transformers>=5.14", "pillow"]
 
 [dependency-groups]
-dev = ["pytest>=8", "diffusers==0.42.1", "peft"]
+# diffusers main pinned: P-H3-Image (PH3Image*) is not in a release yet; the H3 code there is 0.42.1 plus a tensor-parallel plan
+# and a scale_noise precision note (checked: the H3 tests pass against both).
+dev = ["pytest>=8", "diffusers @ git+https://github.com/huggingface/diffusers@d3d8af89e5b08a352cf47bba3a451c5fed9a49b1", "peft"]
 
 [build-system]
 requires = ["hatchling"]

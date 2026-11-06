@@ -12,9 +12,12 @@ What it writes, all from Hugging Face at pinned revisions:
                                           transformer_ref's file ids at 42ed227 and at 83db0c0 (HyperFlow's base)
   hyperflow_v1.0.header.json              the HyperFlow v1.0 adapter's safetensors header (VideoRebirthAI/hyperflow)
   hyperflow.manifest-5bde94d7.json        that repo's hyperflow.json
+  P-H3-Image/                             PrunaAI/P-H3-Image @ 7f98ace: modular_model_index.json, the transformer, vae,
+                                          text_connector, text_encoder and scheduler configs, the transformer's weight
+                                          index, the tokenizer and the processor
 
-These files belong to MiniMax and Video Rebirth and come under their licences; they are not part of this repository.
-Without them the tests that need them are skipped.
+These files belong to MiniMax, Video Rebirth and Pruna and come under their licences; they are not part of this
+repository. Without them the tests that need them are skipped.
 """
 
 import argparse
@@ -30,6 +33,8 @@ H3_BASE = "83db0c0efe6ef9824e0e194be110346c0a9542ed"  # the revision HyperFlow v
 HYPERFLOW = "VideoRebirthAI/hyperflow"
 HYPERFLOW_REV = "5bde94d7de3e78dafa2abc43ee2f280a1cb244e8"
 ADAPTER = "minimax_h3_hyperflow_8step_v1.0.safetensors"
+P_H3_IMAGE = "PrunaAI/P-H3-Image"
+P_H3_IMAGE_REV = "7f98acef503cf2bcfba821a78cb1cf1a9928b2df"
 
 
 def tree(api: HfApi, revision: str) -> dict:
@@ -74,6 +79,12 @@ def main() -> None:
 
     shutil.copyfile(hf_hub_download(HYPERFLOW, "hyperflow.json", revision=HYPERFLOW_REV),
                     out / "hyperflow.manifest-5bde94d7.json")
+
+    snapshot_download(P_H3_IMAGE, revision=P_H3_IMAGE_REV, local_dir=out / "P-H3-Image", allow_patterns=[
+        "modular_model_index.json", "transformer/config.json", "transformer/*.index.json", "vae/config.json",
+        "text_connector/config.json", "text_encoder/config.json", "scheduler/*", "audio_scheduler/*", "tokenizer/*",
+        "processor/*"])
+    shutil.rmtree(out / "P-H3-Image" / ".cache", ignore_errors=True)
     print(f"wrote {out}")
 
 

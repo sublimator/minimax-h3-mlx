@@ -1,0 +1,205 @@
+"""One P-H3-Image request (text-to-image, or an edit with --image) on the released weights.
+
+    uv run python scripts/run_p_h3_image.py --weights P-H3-Image --prompt-file prompt.txt --out out/img-001
+    uv run python scripts/run_p_h3_image.py --weights P-H3-Image --prompt-file edit.txt --image photo.png \\
+        --image hat.png --out out/edit-001
+
+The prompt is rendered as written: P-H3-Image wants a full, specific prompt (its card: say what the image is, one
+scene, quote every word of text, no hype words). An edit instruction gets "Edit <Picture 1>. " in front unless it
+starts with it.
+
+Order: text encoder (Qwen3-VL-4B, ~9 GB, freed after) -> pictures through the VAE encoder (edits) -> 8 transformer
+calls (66 GB, read on first use) -> save `final_rows.npz`, free the transformer -> decode -> `image.png`. `run.json`
+logs every stage. `--plan-only` reads configs, the tokenizer and the processor only and prints the sizes.
+`--decode-from <final_rows.npz>` decodes saved latents.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+import mlx.core as mx
+import numpy as np
+from PIL import Image, ImageOps
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from h3mlx import image as I  # noqa: E402
+from h3mlx import load  # noqa: E402
+from h3mlx.packing import Ref, build_packed_sequence, build_ref2va_packed_sequence  # noqa: E402
+from h3mlx.vae import VaeConfig, VideoVAE  # noqa: E402
+from run_ref2va import dit_tflop_per_call, mem, provenance, sha256  # noqa: E402
+
+
+def config_components(weights: Path, encode_states=None) -> I.Components:
+    """Tokenizer, processor and configs: enough for the plan; no weight file is opened."""
+    from transformers import AutoTokenizer, Qwen3VLProcessor
+
+    vcfg = json.loads((weights / "vae" / "config.json").read_text())
+    tcfg = {k: v for k, v in json.loads((weights / "transformer" / "config.json").read_text()).items()
+            if not k.startswith("_")}
+    tcfg["patch_size"] = tuple(tcfg["patch_size"])
+    return I.Components(
+        tokenizer=AutoTokenizer.from_pretrained(str(weights / "tokenizer")),
+        processor=Qwen3VLProcessor.from_pretrained(str(weights / "processor")), encode_states=encode_states,
+        connector={}, vae=VideoVAE({}, VaeConfig.from_diffusers(vcfg)), vae_latents_mean=tuple(vcfg["latents_mean"]),
+        vae_latents_std=tuple(vcfg["latents_std"]), dit_params={}, dit_cfg=tcfg,
+        settings=I.Settings.from_index(json.loads((weights / "modular_model_index.json").read_text())))
+
+
+def plan(c: I.Components, prompt: str, images, height, width, sigmas) -> dict:
+    m, ratio = c.canvas_multiple, c.vae.cfg.spatial_ratio
+    patch = tuple(c.dit_cfg["patch_size"])
+    if images:
+        height, width, refs, vis = I.prepare_edit(c, images, height, width)
+        ids, tags, vision = I.edit_presentation(c, prompt, vis)
+        shapes = [(1, r.size[1] // ratio, r.size[0] // ratio) for r in refs]
+        layout = build_ref2va_packed_sequence(np.asarray(tags), [Ref("image")] * len(refs), shapes, [], 1,
+                                              height // ratio, width // ratio, I.NUM_AUDIO_LATENTS, patch, 2)
+        extra = {"picture_sizes": [list(r.size) for r in refs], "vision_sizes": [list(v.size) for v in vis],
+                 "vision_tokens": int(sum(t == 0 for t in tags))}
+    else:
+        height, width = I.round_canvas(height or I.DEFAULT_SIZE, width or I.DEFAULT_SIZE, m)
+        ids, tags, _ = I.text2image_presentation(c, prompt)
+        layout = build_packed_sequence(np.asarray(tags), 1, height // ratio, width // ratio, I.NUM_AUDIO_LATENTS, patch, 2)
+        extra = {}
+    sch = I.schedules(sigmas if sigmas is not None else c.settings.sample_sigmas)
+    return {"workflow": "edit" if images else "text2image", "height": height, "width": width,
+            "megapixels": round(height * width / 1e6, 2), "text_rows": len(ids), **extra,
+            "picture_rows": layout.num_condition_video_rows, "sequence_rows": int(layout.position_ids.shape[0]),
+            "sigmas": [float(s) for s in sch.video_sigmas], "model_calls": int(len(sch.video_timesteps))}
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--weights", type=Path, required=True, help="the P-H3-Image release (diffusers layout)")
+    ap.add_argument("--prompt-file", type=Path, required=True)
+    ap.add_argument("--image", type=Path, action="append", default=[],
+                    help="a picture to edit; repeat for references (Picture 2, 3, ...; at most 8 in all)")
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--height", type=int, help="default 2912 (text-to-image), Picture 1's size >= 4 MP (edit)")
+    ap.add_argument("--width", type=int)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--sigmas", type=str, help="comma-separated grid ending in 0 (default: the checkpoint's 9 points)")
+    ap.add_argument("--vae-dtype", choices=["float32", "bfloat16"], default="float32",
+                    help="decoder precision: float32 (as h3mlx decodes H3) or the stored bfloat16 (the pipeline's)")
+    ap.add_argument("--plan-only", action="store_true", help="configs, tokenizer and processor only; no weights")
+    ap.add_argument("--decode-from", type=Path, help="decode a saved final_rows.npz instead of running the model")
+    ap.add_argument("--memory-limit-gb", type=float, default=150.0)
+    ap.add_argument("--cache-limit-gb", type=float, default=4.0)
+    args = ap.parse_args(argv)
+    if (args.height is None) != (args.width is None):
+        ap.error("--height and --width go together")
+    sigmas = [float(x) for x in args.sigmas.split(",")] if args.sigmas else None
+
+    t0 = time.time()
+    mx.set_memory_limit(int(args.memory_limit_gb * 1e9))
+    mx.set_cache_limit(int(args.cache_limit_gb * 1e9))
+    weights = args.weights.expanduser()
+    prompt = args.prompt_file.expanduser().read_text().strip()
+    paths = [p.expanduser() for p in args.image]
+    images = [ImageOps.exif_transpose(Image.open(p)).convert("RGB") for p in paths]
+    out = args.out.expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    log = {"argv": sys.argv if argv is None else list(argv), "pid": os.getpid(), "weights": str(weights),
+           "prompt_sha256": sha256(args.prompt_file.expanduser()), "prompt_chars": len(prompt),
+           "images": [{"path": str(p), "sha256": sha256(p), "size": list(im.size)} for p, im in zip(paths, images)],
+           "seed": args.seed, "settings": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+           "provenance": provenance(), "status": "running", "events": []}
+
+    def save_log():
+        tmp = out / "run.json.tmp"
+        tmp.write_text(json.dumps(log, indent=1, default=str))
+        os.replace(tmp, out / "run.json")
+
+    last = {"t": 0.0}
+
+    def event(name, **kw):
+        now = round(time.time() - t0, 1)
+        e = {"t": now, "dt": round(now - last["t"], 1), "event": name, **mem(), **kw}
+        if name.startswith("stage_") or name in ("text_done", "denoised", "decoded", "written"):
+            e["stage_peak_gb"] = round(mx.get_peak_memory() / 1e9, 2)
+            mx.reset_peak_memory()
+        last["t"] = now
+        log["events"].append(e)
+        print(json.dumps(e), flush=True)
+        save_log()
+
+    try:
+        indices = tuple(json.loads((weights / "text_connector" / "config.json").read_text())["hidden_state_indices"])
+        staged = load.staged_text_encoder_states(weights / "text_encoder", indices)
+
+        def encode_states(ids, vision):
+            h = staged(ids, vision)
+            event("text_done", text_rows=len(ids), states=len(h))
+            return h
+
+        c = config_components(weights, encode_states)
+        log["plan"] = plan(c, prompt, images, args.height, args.width, sigmas)
+        event("plan", **log["plan"])
+        if args.plan_only:
+            log["status"] = "planned"
+            save_log()
+            return 0
+
+        vae_dtype = mx.float32 if args.vae_dtype == "float32" else mx.bfloat16
+        c.vae, _, _ = load.load_vae(weights / "vae", dtype=vae_dtype)
+        c.connector = load.load_safetensors(weights / "text_connector")
+        if args.decode_from:
+            z = np.load(args.decode_from.expanduser())
+            img = I.decode(c, mx.array(z["video_rows"]), int(z["ncv"]), int(z["lh"]), int(z["lw"]))
+        else:
+            c.dit_params, _ = load.load_transformer(weights / "transformer")
+            per_call = dit_tflop_per_call(log["plan"]["sequence_rows"], c.dit_cfg)
+            clock = {"prev": None}
+
+            def stage(name):
+                if name == "denoise":
+                    clock["denoise_start"] = time.time()
+                event(f"stage_{name}")
+
+            def on_step(i, t):
+                now = time.time()
+                step_s = round(now - (clock["prev"] or clock["denoise_start"]), 2)
+                clock["prev"] = now
+                event("step", i=i, timestep=float(t), step_s=step_s, tflops=float(f"{per_call / step_s:.3g}"))
+
+            def on_denoised(v, meta):
+                np.savez(out / "final_rows.npz", video_rows=np.array(v.astype(mx.float32)), **meta)
+                event("denoised", saved="final_rows.npz", **meta)
+
+            event("start")
+            img = I.generate(c, prompt, images=images or None, height=args.height, width=args.width, seed=args.seed,
+                             sigmas=sigmas, on_step=on_step, check_finite=True, on_denoised=on_denoised,
+                             free_transformer=True, on_stage=stage)
+        event("decoded", shape=list(img.shape), mean=float(img.mean()), std=float(img.std()))
+        Image.fromarray(I.to_uint8(img)).save(out / "image.png")
+        (out / "prompt.txt").write_text(prompt + "\n")
+        log["status"] = "done"
+        event("written", png=str(out / "image.png"))
+        steps = [e for e in log["events"] if e["event"] == "step"]
+        log["summary"] = {"total_s": log["events"][-1]["t"],
+                          "first_step_s": steps[0]["step_s"] if steps else None,
+                          "step_s_mean_after_first": round(sum(s["step_s"] for s in steps[1:]) / max(1, len(steps) - 1), 2)
+                          if len(steps) > 1 else None,
+                          "peak_rss_gb": max(e["max_rss_gb"] for e in log["events"])}
+        save_log()
+        print(json.dumps({"summary": log["summary"]}), flush=True)
+        return 0
+    except KeyboardInterrupt:
+        log["status"] = "interrupted"
+        event("interrupted")
+        raise
+    except BaseException as e:
+        log["status"] = "error"
+        event("error", error=f"{type(e).__name__}: {e}")
+        raise
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -53,10 +53,13 @@ def load_transformer(d) -> tuple[dict, dict]:
     return load_safetensors(d), cfg
 
 
-def load_vae(d, **tiling) -> tuple[VideoVAE, tuple, tuple]:
+def load_vae(d, dtype=None, **tiling) -> tuple[VideoVAE, tuple, tuple]:
+    """`dtype`: cast every floating weight (P-H3-Image stores its decoder in bf16; float32 decodes at H3's precision)."""
     cfg = _config(d)
     # contiguous once: a transposed view would be copied again inside every tile's graph (121-209 tiles per reference)
     p = {k: (mx.contiguous(V.conv3d_weight(v)) if v.ndim == 5 else v) for k, v in load_safetensors(d).items()}
+    if dtype is not None:
+        p = {k: v.astype(dtype) if mx.issubdtype(v.dtype, mx.floating) else v for k, v in p.items()}
     return VideoVAE(p, VaeConfig.from_diffusers(cfg, **tiling)), tuple(cfg["latents_mean"]), tuple(cfg["latents_std"])
 
 
@@ -85,6 +88,9 @@ def qwen_params(raw: dict) -> dict:
 
 
 _EVAL_EACH: dict = {}
+# id(layer) -> list the layer appends its output to (see `hidden_states_at`). Kept outside the module: an mlx Module
+# stores list attributes as children, which would put the capture into its parameter tree.
+_CAPTURE: dict = {}
 
 
 def eval_each_layer(layers) -> None:
@@ -99,6 +105,9 @@ def eval_each_layer(layers) -> None:
             def call(self, *a, _base=base, **k):
                 out = _base.__call__(self, *a, **k)
                 mx.eval(out)
+                sink = _CAPTURE.get(id(self))
+                if sink is not None:
+                    sink.append(out)
                 return out
             _EVAL_EACH[base] = type(base.__name__ + "EvalEach", (base,), {"__call__": call})
         layer.__class__ = _EVAL_EACH[base]
@@ -144,6 +153,72 @@ def load_text_encoder(d, keep_layers: int = 50, dtype=None):
         return model.hidden_state_at_layer(mx.array([token_ids]), keep_layers, **kw)
 
     return model, encode
+
+
+def hidden_states_at(model, token_ids, vision_inputs, indices, num_layers: int) -> list:
+    """transformers' `output_hidden_states=True` entries `indices` of an mlx-vlm Qwen3-VL whose decoder layers went
+    through `eval_each_layer`: 0 is the embedding output, `i` the output of decoder layer `i` (as the layer returns
+    it, before a deepstack add), and `num_layers` the final normed state. `num_layers` is the release's layer count,
+    which the model must hold in full when it is asked for."""
+    kw = {k: mx.array(np.asarray(v)) for k, v in (vision_inputs or {}).items()}
+    ids = mx.array([token_ids])
+    feats = model.get_input_embeddings(ids, kw.pop("pixel_values", None), mask=None, **kw)
+    lm = model.language_model.model
+    built = len(lm.layers)
+    for i in indices:
+        if not 0 <= i <= num_layers or (i == num_layers and built != num_layers) or (0 < i < num_layers and i > built):
+            raise ValueError(f"hidden state {i} is not available from {built} of {num_layers} layers")
+    sinks = {i: [] for i in indices if 0 < i < num_layers}
+    for i, sink in sinks.items():
+        _CAPTURE[id(lm.layers[i - 1])] = sink
+    try:
+        last = max(i for i in indices)
+        final = lm(ids, inputs_embeds=feats.inputs_embeds, mask=None, position_ids=feats.position_ids,
+                   visual_pos_masks=feats.visual_pos_masks, deepstack_visual_embeds=feats.deepstack_visual_embeds,
+                   stop_after_layer=None if last == num_layers else last, apply_final_norm=last == num_layers)
+    finally:
+        for i in sinks:
+            _CAPTURE.pop(id(lm.layers[i - 1]), None)
+    out = []
+    for i in indices:
+        if i == 0:
+            out.append(feats.inputs_embeds)
+        elif i == num_layers:
+            out.append(final)
+        else:
+            if len(sinks[i]) != 1:
+                raise RuntimeError(f"decoder layer {i} ran {len(sinks[i])} times; were its layers wrapped by eval_each_layer?")
+            out.append(sinks[i][0])
+    return out
+
+
+def load_text_encoder_states(d, indices, dtype=None):
+    """mlx-vlm Qwen3-VL from a `text_encoder/` folder, built only as deep as `indices` need (all layers and the final
+    norm when the last index is the layer count). Returns (model, encode(token_ids, vision_inputs) -> list of
+    (1, n, hidden) states, one per index; see `hidden_states_at`)."""
+    num_layers = _config(d)["text_config"]["num_hidden_layers"]
+    keep = num_layers if max(indices) == num_layers else max(indices)
+    model, _ = load_text_encoder(d, keep_layers=keep, dtype=dtype)
+
+    def encode(token_ids, vision_inputs):
+        return hidden_states_at(model, token_ids, vision_inputs, indices, num_layers)
+
+    return model, encode
+
+
+def staged_text_encoder_states(d, indices, dtype=None):
+    """`staged_text_encoder` for several states: loads, encodes, frees; returns the list of states, evaluated."""
+
+    def encode(token_ids, vision_inputs):
+        model, run = load_text_encoder_states(d, indices, dtype)
+        out = run(token_ids, vision_inputs)
+        mx.eval(out)
+        del model, run
+        gc.collect()
+        mx.clear_cache()
+        return out
+
+    return encode
 
 
 def staged_text_encoder(d, keep_layers: int = 50, dtype=None):

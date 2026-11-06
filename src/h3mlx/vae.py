@@ -12,6 +12,9 @@ import mlx.core as mx
 
 from . import vae_ops as V
 
+# `PH3ImageViTDecoder`'s one time coordinate: the first latent frame of H3's 7-latent-frame decode window.
+IMAGE_FRAME_POSITION = 2.0 * (0.5 / 7) - 1.0
+
 
 @dataclass
 class VaeConfig:
@@ -35,10 +38,15 @@ class VaeConfig:
     tile_overlap_h: int = 64
     tile_overlap_w: int = 64
     use_tiling: bool = True
+    # P-H3-Image's `AutoencoderKLPH3Image`: H3's encoder and latent space, a ViT decoder for one latent frame (no
+    # temporal patch, every token at one fixed time coordinate), images only.
+    single_frame: bool = False
 
     @classmethod
     def from_diffusers(cls, cfg: dict, **kw):
         names = cls.__dataclass_fields__
+        if cfg.get("_class_name") == "AutoencoderKLPH3Image":
+            kw.setdefault("single_frame", True)
         return cls(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in cfg.items() if k in names}, **kw)
 
     @property
@@ -162,6 +170,8 @@ class VideoVAE:
         n = x.shape[1]
         if n == 1:
             return self.encode_clip(x)
+        if c.single_frame:
+            raise ValueError(f"this VAE encodes single frames, got {n}")
         if n % c.clip_length:
             x = mx.concatenate([x, mx.repeat(x[:, -1:], (-n) % c.clip_length, axis=1)], axis=1)
         m = mx.concatenate(
@@ -177,8 +187,9 @@ class VideoVAE:
         c = self.cfg
         z = V.causal_conv3d(z, self.p["post_quant_conv.weight"], self.p["post_quant_conv.bias"])
         return V.vit_decoder(z, self.dec, c.decoder_num_layers, c.decoder_num_attention_heads, c.spatial_ratio,
-                             c.temporal_ratio, 3, int(c.decoder_attention_head_dim * c.decoder_rope_dim_ratio),
-                             c.decoder_rope_theta, c.decoder_norm_eps)
+                             1 if c.single_frame else c.temporal_ratio, 3,
+                             int(c.decoder_attention_head_dim * c.decoder_rope_dim_ratio), c.decoder_rope_theta,
+                             c.decoder_norm_eps, IMAGE_FRAME_POSITION if c.single_frame else None)
 
     def decode_clip(self, z):
         c = self.cfg
@@ -192,8 +203,13 @@ class VideoVAE:
         return stitch_tiles(rows, yo, xo)
 
     def decode(self, z):
-        """Latents (B, F, H, W, latent) -> pixels (B, frames, H*r, W*r, 3), chunked and cross-faded like `_decode`."""
+        """Latents (B, F, H, W, latent) -> pixels (B, frames, H*r, W*r, 3), chunked and cross-faded like `_decode`.
+        A single-frame VAE decodes its one latent frame into one image frame (spatially tiled)."""
         c = self.cfg
+        if c.single_frame:
+            if z.shape[1] != 1:
+                raise ValueError(f"this VAE decodes single latent frames, got {z.shape[1]}")
+            return self.decode_clip(z.astype(self.p["post_quant_conv.weight"].dtype))
         tcs, drop, tr = c.tokens_chunk_size, c.token_drop, c.temporal_ratio
         chunk_frames = tcs * tr
         num_tokens = z.shape[1] + drop
