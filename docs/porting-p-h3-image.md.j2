@@ -3,7 +3,7 @@
    The original side is a sparse checkout of huggingface/diffusers at main commit d3d8af89 (P-H3-Image is not in a
    release yet) beside this repo at ../diffusers-main: the same commit the tests import. mlx-vlm is the v0.7.11 checkout
    at ../mlx-vlm, as in docs/porting.md. No markers were added upstream, so those permalinks point at upstream lines
-   exactly; our src/h3mlx/image.py carries two (`layout`, `noise-draws`). #}
+   exactly; our src/h3mlx/image.py carries three (`layout`, `noise-draws`, `modulation-cache`). #}
 {% set DM = '../diffusers-main' %}
 {% set P = 'src/diffusers/modular_pipelines/p_h3_image/' %}
 {% set PVAE = 'src/diffusers/models/autoencoders/autoencoder_kl_p_h3_image.py' %}
@@ -304,8 +304,8 @@ release's own layout and runs the command line against `PH3ImageBlocks` for both
 and its refusals.
 
 **The modulation cache.** Each block's `adaln_proj` (2688 → 96,768, 13B parameters across the 50 blocks, 40% of the
-transformer) sees only the timestep embedding, and a P-H3-Image run has about ten distinct timesteps: the 8 grid points,
-plus 0.999 for an edit's pictures. `generate(modulation_cache=True)` builds the main guide's `ModulationCache` (§2.6)
+transformer) sees only the timestep embedding, and a P-H3-Image run has 8 distinct timesteps (the grid's 8 points; an
+edit adds 0.999 for its pictures, so 9). `generate(modulation_cache=True)` builds the main guide's `ModulationCache` (§2.6)
 for each of the 8 calls and, with `free_transformer`, drops each block's projection as soon as its tables are built
 (the weights load lazily, so at most one is resident). The run script does this by default:
 
@@ -313,9 +313,9 @@ for each of the 8 calls and, with `free_transformer`, drops each block's project
 
 `test_modulation_cache_matches_diffusers_and_drops_adaln` runs both workflows cached against diffusers (1.8e-7) and
 requires them bit-identical to our uncached path, and checks the projections are gone. That equality is new: the
-first version batched all ten timesteps into one product, and on the release that drew a different picture from the
-same seed (17.5 dB from the uncached image), while the per-call tables reproduce it exactly. Pruna's ComfyUI files make the same cut a different
-way: a table of 4,097 timesteps by 16 numbers and 16-wide projections, a rank-16 fit of the same curve rather than its
+first version batched all of a run's timesteps into one product, and on the release that drew a different picture
+from the same seed (17.5 dB from the uncached image), while the per-call tables reproduce it exactly. Pruna's ComfyUI
+files make the same cut a different way: a table of 4,097 timesteps by 16 numbers and 16-wide projections, a rank-16 fit of the same curve rather than its
 exact values.
 
 **Measured on an M3 Ultra (60-core GPU, 256 GB)** with the release, 8 calls, bf16 transformer, float32 decode. The
@@ -328,9 +328,22 @@ allocations, in decimal GB:
 | text-to-image, prompt as written | 2912 × 2912 | 8,395 | 26.0 s | 4.2 min | 69 GB |
 | edit, one 8.5 MP picture, upsampled | 2912 × 2912 | 17,749 | 69.4 s | 10.5 min | 72 GB |
 | edit, one 1.6 MP picture, upsampled (`96d5198`) | 2368 × 1760 | 9,382 | 29.8 s | 4.7 min | 69.3 GB |
-| the same, with the modulation cache (`e3b94ef`) | 2368 × 1760 | 9,320 | 29.3 s | 4.6 min | 43.3 GB |
+| the same request, with the modulation cache (`e3b94ef`) | 2368 × 1760 | 9,320 | 29.3 s | 4.6 min | 43.3 GB |
 
-The cache's saving is the 26 GB of projections; the speed is unchanged (reading them cost about 30 ms a call).
+The cache's saving is the 26 GB of projections; the speed is unchanged (reading them cost about 30 ms a call). The
+cache doesn't change the sequence: the second run's upsampled prompt came out 62 tokens shorter, and that run used the
+first, batched cache (same saving, a different picture).
+
+**Quantized weights (ours).** `generate(quantize=8)` or `4` replaces the 312 attention and feed-forward matrices of the
+50 blocks and the token refiner (40 GB of the transformer's 66 GB) with MLX affine-quantized ones, after the text and
+pictures are encoded so the text encoder is never resident beside them. `load.check_quantizable` refuses a matrix whose
+input width isn't a multiple of the group (64), so none is left at full precision quietly; `ops.QuantizedWeight`
+computes in the dtype the dense product would promote to. The README gives the measured memory and the same seed's
+pictures. Neither the release nor diffusers does this, so there is nothing to compare against but our own bf16 path:
+`tests/test_quantize.py` checks each product against its dequantized matrix and the tiny transformer's whole forward
+against the unquantized one.
+
+{{ code('src/h3mlx/load.py', function='quantize_transformer') }}
 
 ## 11. Not done, and open
 

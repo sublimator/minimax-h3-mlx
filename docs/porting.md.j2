@@ -238,8 +238,8 @@ times and the denoise peak (70-88 GB).
 
 **Accuracy: bit-identical.** Each call's tables are computed from exactly the timestep array that call passes, so they
 are the tables the call would compute itself. An earlier version multiplied the union of all timesteps in one product:
-the same maths, but bf16 rounds a 10-row product differently from a 2-row one. A review found a larger mixed-precision
-model where the two differed by 0.0028 at one step of 49; on P-H3-Image's real weights the batched tables differed by
+the same maths, but bf16 rounds a product over all of a run's timesteps differently from one over a call's two or
+three. On a larger mixed-precision test model the two differed by 0.0028 at one step of 49; on P-H3-Image's real weights the batched tables differed by
 one bf16 step in 165 entries of the first block, and 8 steps turned that into a different picture from the same seed.
 `tests/test_modulation_cache.py` now checks:
 
@@ -526,7 +526,9 @@ for audio. This is one tiny f32 configuration, not the bf16 release.
   dict carries `<name>.lora_A.weight` / `.lora_B.weight`, and without them it is exactly `linear(x, p[name + ".weight"], p[name + ".bias"] if bias else
   None)`, the call §2's attention, feed-forward and time-embedder code made before HyperFlow. Only the linears that go
   through `plinear` can carry a LoRA (`hyperflow.wired_shapes`); a file targeting any other is refused.
-- **Speedups.** Sparse attention and quantisation: a dense bf16 baseline comes first.
+- **Speedups.** Sparse attention is not ported: a dense bf16 baseline comes first. Weight quantization exists
+  (`load.quantize_transformer`, `ops.QuantizedWeight`) and P-H3-Image's run script uses it (`--quantize`; see
+  `docs/porting-p-h3-image.md`); `ref2va` and its script don't yet.
 - **Caller-supplied inputs.** diffusers accepts caller-supplied latents and tensor inputs; the port takes the input
   types listed in §8 only.
 - **t2va and fl2va pipelines.** Their packers and ops are here and tested (`build_packed_sequence`); only ref2va is
