@@ -32,15 +32,15 @@ Both were built op by op and tested against their implementations in
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 213 tests and skips 63. Those 63 need the releases' tokenizers, processors,
+No weights are needed. A plain clone runs 228 tests and skips 70. Those 70 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header. These files aren't shipped here because they
 belong to MiniMax, Video Rebirth and Pruna. Fetch them from Hugging Face at pinned revisions (about 50 MB, no weights)
-and all 276 run:
+and all 298 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest
 
-Or point `H3MLX_FIXTURES` at a copy. Seven of the 63 also need `ffmpeg` and `ffprobe` on the `PATH`.
+Or point `H3MLX_FIXTURES` at a copy. Seven of the 70 also need `ffmpeg` and `ffprobe` on the `PATH`.
 
 The oracle is diffusers main at `d3d8af89` (P-H3-Image isn't in a diffusers release yet); its H3 code is 0.42.1's plus a
 tensor-parallel plan, and the H3 tests pass against both.
@@ -152,28 +152,29 @@ an uncached one. (A first version batched all the timesteps into one product, wh
 drew a different picture from the same seed.)
 
 **Measured on the M3 Ultra (60-core GPU, 256 GB),** 8 calls, bf16 transformer, float32 decode (the total includes
-loading; the peak is MLX's active allocations):
+loading; the peak is the largest of MLX's per-stage peaks of active allocations, over the whole run):
 
 | request | size | rows | warm call (mean after the first) | total | MLX peak (GB) |
 | --- | --- | --- | --- | --- | --- |
 | text-to-image, prompt as written | 2912x2912 | 8,395 | 26 s | 4.2 min | 69 GB |
+| the same, with the modulation cache | 2912x2912 | 8,395 | 26 s | 4.1 min | 43 GB |
 | edit, one 8.5 MP picture, `--upsample` | 2912x2912 | 17,749 | 69 s | 10.5 min | 72 GB |
 | edit, one 1.6 MP picture, `--upsample` | 2368x1760 | 9,382 | 30 s | 4.7 min | 69 GB |
-| the same, with the modulation cache | 2368x1760 | 9,320 | 29 s | 4.6 min | 43 GB |
 
-The first three ran before the modulation cache existed. The upsampler took 14 s, the text encoder 2 s, the decode 34 s
-at 8 MP. An edit's picture adds its own rows, so an 8 MP picture doubles an 8 MP sequence.
+The second row is the first's request with the cache: the same image, bit for bit. The others ran without it. The
+upsampler took 14 s, the text encoder 2 s, the decode 34 s at 8 MP. An edit's picture adds its own rows, so an 8 MP picture doubles an 8 MP sequence.
 
 ### Quantized transformer
 
-`--quantize 8` or `--quantize 4` quantizes the transformer's attention and feed-forward matrices after loading: 312
-matrices, 40 GB of its 66 GB in bf16 (the other 26 GB are the AdaLN projections the modulation cache drops). It is
-MLX's affine quantization in groups of 64, takes about 3 s, and is ours, not the pipeline's: diffusers runs the
-transformer in bf16. The tests check the quantized product against the dequantized matrix, and the tiny transformer's
-whole forward against the unquantized one.
+`--quantize 8` or `--quantize 4` quantizes the transformer's attention and feed-forward matrices: 312 matrices, 40 GB
+of its 66 GB in bf16 (the other 26 GB are the AdaLN projections the modulation cache drops). It runs once the text and
+pictures are encoded, so the text encoder is never resident beside the quantized matrices. It is MLX's affine
+quantization in groups of 64, takes a few seconds, and is ours, not the pipeline's: diffusers runs the transformer in
+bf16. The tests check the quantized product against the dequantized matrix, and the tiny transformer's whole forward
+against the unquantized one.
 
 The same prompt (the text-to-image one above) and seed, with the modulation cache (so the bf16 row's image is the
-one above, bit for bit), on the M3 Ultra:
+one above, bit for bit), on the M3 Ultra; the peak is the whole run's (the text encoder's stage peaked at 8 GB):
 
 | `--quantize` | quantized matrices | warm call | total | MLX peak (GB) |
 | --- | --- | --- | --- | --- |
@@ -181,8 +182,7 @@ one above, bit for bit), on the M3 Ultra:
 | 8 | 21.3 GB | 25 s | 4.0 min | 24 GB |
 | 4 | 11.3 GB | 25 s | 4.0 min | 14 GB |
 
-It saves memory, not time: at 8 MP the calls are bound by compute, and the quantized matmul does as many
-multiply-adds.
+These runs show the memory saving and almost no change in time (warm calls 25.7 s in bf16, 25.0 s quantized).
 A seed fixes the starting noise, not the picture: the first steps decide the layout, and different weights can take
 them elsewhere. 8-bit stays close enough to follow bf16 (the face matches at full resolution; the bulb, the fish's
 angle and the scale move). 4-bit takes another path from the same seed: another woman and another framing, on the

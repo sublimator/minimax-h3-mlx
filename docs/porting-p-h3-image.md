@@ -60,7 +60,7 @@ that carries the same state for every prompt, so it is replaced by a learned emb
 The released connector keeps every parameter in float32 (`_keep_in_fp32_modules` lists all six), and the pipeline casts
 the result to the text encoder's dtype. Ours does the same arithmetic in float32 and casts after:
 
-📍 [`src/h3mlx/image.py:140-148`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L140-L148)
+📍 [`src/h3mlx/image.py:140-148`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L140-L148)
 ```python
  140 def connect(p: dict, states, out_dtype=mx.bfloat16) -> mx.array:
  141     """`PH3ImageTextConnector`: concatenate the hidden states, standardise, one linear map, destandardise, and put the
@@ -174,64 +174,64 @@ decoder layer with `eval_each_layer`, so each layer evaluates its own output (on
 tripped macOS's GPU watchdog). That wrapper now also appends the layer's return to a list when one is registered for
 it:
 
-📍 [`src/h3mlx/load.py:150-167`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/load.py#L150-L167)
+📍 [`src/h3mlx/load.py:151-168`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/load.py#L151-L168)
 ```python
- 150 def eval_each_layer(layers) -> None:
- 151     """Make every decoder layer evaluate its output, so the 50-layer pass is 50 small GPU graphs instead of one. A single
- 152     long graph at 7,000+ tokens tripped macOS's GPU watchdog (kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
- 153     in a pre-flight probe. The layer keeps its class's attributes and parameters: only `__call__` changes."""
- 154     for layer in layers:
- 155         base = type(layer)
- 156         if base in _EVAL_EACH.values():
- 157             continue
- 158         if base not in _EVAL_EACH:
- 159             def call(self, *a, _base=base, **k):
- 160                 out = _base.__call__(self, *a, **k)
- 161                 mx.eval(out)
- 162                 sink = _CAPTURE.get(id(self))
- 163                 if sink is not None:
- 164                     sink.append(out)
- 165                 return out
- 166             _EVAL_EACH[base] = type(base.__name__ + "EvalEach", (base,), {"__call__": call})
- 167         layer.__class__ = _EVAL_EACH[base]
+ 151 def eval_each_layer(layers) -> None:
+ 152     """Make every decoder layer evaluate its output, so the 50-layer pass is 50 small GPU graphs instead of one. A single
+ 153     long graph at 7,000+ tokens tripped macOS's GPU watchdog (kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+ 154     in a pre-flight probe. The layer keeps its class's attributes and parameters: only `__call__` changes."""
+ 155     for layer in layers:
+ 156         base = type(layer)
+ 157         if base in _EVAL_EACH.values():
+ 158             continue
+ 159         if base not in _EVAL_EACH:
+ 160             def call(self, *a, _base=base, **k):
+ 161                 out = _base.__call__(self, *a, **k)
+ 162                 mx.eval(out)
+ 163                 sink = _CAPTURE.get(id(self))
+ 164                 if sink is not None:
+ 165                     sink.append(out)
+ 166                 return out
+ 167             _EVAL_EACH[base] = type(base.__name__ + "EvalEach", (base,), {"__call__": call})
+ 168         layer.__class__ = _EVAL_EACH[base]
 ```
-📍 [`src/h3mlx/load.py:212-246`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/load.py#L212-L246)
+📍 [`src/h3mlx/load.py:213-247`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/load.py#L213-L247)
 ```python
- 212 def hidden_states_at(model, token_ids, vision_inputs, indices, num_layers: int) -> list:
- 213     """transformers' `output_hidden_states=True` entries `indices` of an mlx-vlm Qwen3-VL whose decoder layers went
- 214     through `eval_each_layer`: 0 is the embedding output, `i` the output of decoder layer `i` (as the layer returns
- 215     it, before a deepstack add), and `num_layers` the final normed state. `num_layers` is the release's layer count,
- 216     which the model must hold in full when it is asked for."""
- 217     kw = {k: mx.array(np.asarray(v)) for k, v in (vision_inputs or {}).items()}
- 218     ids = mx.array([token_ids])
- 219     feats = model.get_input_embeddings(ids, kw.pop("pixel_values", None), mask=None, **kw)
- 220     lm = model.language_model.model
- 221     built = len(lm.layers)
- 222     for i in indices:
- 223         if not 0 <= i <= num_layers or (i == num_layers and built != num_layers) or (0 < i < num_layers and i > built):
- 224             raise ValueError(f"hidden state {i} is not available from {built} of {num_layers} layers")
- 225     sinks = {i: [] for i in indices if 0 < i < num_layers}
- 226     for i, sink in sinks.items():
- 227         _CAPTURE[id(lm.layers[i - 1])] = sink
- 228     try:
- 229         last = max(i for i in indices)
- 230         final = lm(ids, inputs_embeds=feats.inputs_embeds, mask=None, position_ids=feats.position_ids,
- 231                    visual_pos_masks=feats.visual_pos_masks, deepstack_visual_embeds=feats.deepstack_visual_embeds,
- 232                    stop_after_layer=None if last == num_layers else last, apply_final_norm=last == num_layers)
- 233     finally:
- 234         for i in sinks:
- 235             _CAPTURE.pop(id(lm.layers[i - 1]), None)
- 236     out = []
- 237     for i in indices:
- 238         if i == 0:
- 239             out.append(feats.inputs_embeds)
- 240         elif i == num_layers:
- 241             out.append(final)
- 242         else:
- 243             if len(sinks[i]) != 1:
- 244                 raise RuntimeError(f"decoder layer {i} ran {len(sinks[i])} times; were its layers wrapped by eval_each_layer?")
- 245             out.append(sinks[i][0])
- 246     return out
+ 213 def hidden_states_at(model, token_ids, vision_inputs, indices, num_layers: int) -> list:
+ 214     """transformers' `output_hidden_states=True` entries `indices` of an mlx-vlm Qwen3-VL whose decoder layers went
+ 215     through `eval_each_layer`: 0 is the embedding output, `i` the output of decoder layer `i` (as the layer returns
+ 216     it, before a deepstack add), and `num_layers` the final normed state. `num_layers` is the release's layer count,
+ 217     which the model must hold in full when it is asked for."""
+ 218     kw = {k: mx.array(np.asarray(v)) for k, v in (vision_inputs or {}).items()}
+ 219     ids = mx.array([token_ids])
+ 220     feats = model.get_input_embeddings(ids, kw.pop("pixel_values", None), mask=None, **kw)
+ 221     lm = model.language_model.model
+ 222     built = len(lm.layers)
+ 223     for i in indices:
+ 224         if not 0 <= i <= num_layers or (i == num_layers and built != num_layers) or (0 < i < num_layers and i > built):
+ 225             raise ValueError(f"hidden state {i} is not available from {built} of {num_layers} layers")
+ 226     sinks = {i: [] for i in indices if 0 < i < num_layers}
+ 227     for i, sink in sinks.items():
+ 228         _CAPTURE[id(lm.layers[i - 1])] = sink
+ 229     try:
+ 230         last = max(i for i in indices)
+ 231         final = lm(ids, inputs_embeds=feats.inputs_embeds, mask=None, position_ids=feats.position_ids,
+ 232                    visual_pos_masks=feats.visual_pos_masks, deepstack_visual_embeds=feats.deepstack_visual_embeds,
+ 233                    stop_after_layer=None if last == num_layers else last, apply_final_norm=last == num_layers)
+ 234     finally:
+ 235         for i in sinks:
+ 236             _CAPTURE.pop(id(lm.layers[i - 1]), None)
+ 237     out = []
+ 238     for i in indices:
+ 239         if i == 0:
+ 240             out.append(feats.inputs_embeds)
+ 241         elif i == num_layers:
+ 242             out.append(final)
+ 243         else:
+ 244             if len(sinks[i]) != 1:
+ 245                 raise RuntimeError(f"decoder layer {i} ran {len(sinks[i])} times; were its layers wrapped by eval_each_layer?")
+ 246             out.append(sinks[i][0])
+ 247     return out
 ```
 
 The capture lists live in a module-level dict keyed by the layer's id: an mlx `Module` stores a list attribute as a
@@ -273,7 +273,7 @@ them are deepstack layers and the last is the final norm.
  173         self.set_block_state(state, block_state)
  174         return components, state
 ```
-📍 [`src/h3mlx/image.py:166-168`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L166-L168)
+📍 [`src/h3mlx/image.py:166-168`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L166-L168)
 ```python
  166 def text2image_presentation(c: Components, prompt: str):
  167     ids = c.tokenizer(prompt, add_special_tokens=False)["input_ids"]
@@ -335,14 +335,14 @@ with `subject_definitions:`, the first line of an upsampler brief (§9).
 
 Ours reuses the H3 presentation builder (main guide §5) with image references only:
 
-📍 [`src/h3mlx/image.py:151-154`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L151-L154)
+📍 [`src/h3mlx/image.py:151-154`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L151-L154)
 ```python
  151 def edit_prompt(prompt: str) -> str:
  152     """The instruction as the edit presentation encodes it: `"Edit <Picture 1>. "` in front, unless it already starts
  153     with that or is an upsampler brief."""
  154     return prompt if prompt.lstrip().startswith(EDIT_PREFIXES) else f"Edit <Picture 1>. {prompt}"
 ```
-📍 [`src/h3mlx/image.py:157-163`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L157-L163)
+📍 [`src/h3mlx/image.py:157-163`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L157-L163)
 ```python
  157 def edit_presentation(c: Components, prompt: str, vision_images):
  158     """`PH3ImageEditTextEncoderStep`'s tokens: (ids, tags, vision inputs)."""
@@ -432,7 +432,7 @@ the canvas only; the pictures keep their sizes.
 Ours is the same arithmetic. Python's `round` (half to even) is the same function on both sides, and the resize is
 PIL's Lanczos, which `VaeImageProcessor.resize` uses by default:
 
-📍 [`src/h3mlx/image.py:80-87`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L80-L87)
+📍 [`src/h3mlx/image.py:80-87`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L80-L87)
 ```python
   80 def size_at_area(width: int, height: int, pixels: int, multiple: int) -> tuple[int, int]:
   81     """`_size_at_area`: (width, height) at about `pixels`, own aspect ratio, sides multiples of `multiple`; a size
@@ -443,7 +443,7 @@ PIL's Lanczos, which `VaeImageProcessor.resize` uses by default:
   86     return (max(multiple, round(math.sqrt(pixels * ratio) / multiple) * multiple),
   87             max(multiple, round(math.sqrt(pixels / ratio) / multiple) * multiple))
 ```
-📍 [`src/h3mlx/image.py:90-94`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L90-L94)
+📍 [`src/h3mlx/image.py:90-94`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L90-L94)
 ```python
   90 def size_in_area_range(width: int, height: int, min_pixels: int, max_pixels: int, multiple: int) -> tuple[int, int]:
   91     """`_size_in_area_range`: own size, or scaled to the nearer bound when outside it; sides rounded to `multiple`."""
@@ -451,7 +451,7 @@ PIL's Lanczos, which `VaeImageProcessor.resize` uses by default:
   93     scale = math.sqrt(min(max(area, min_pixels), max_pixels) / area)
   94     return tuple(max(multiple, round(side * scale / multiple) * multiple) for side in (width, height))
 ```
-📍 [`src/h3mlx/image.py:115-134`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L115-L134)
+📍 [`src/h3mlx/image.py:115-134`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L115-L134)
 ```python
  115 def prepare_edit(c: Components, images, height=None, width=None):
  116     """`PH3ImageEditResizeStep`: -> (height, width, reference_images for the VAE, vision_images for the encoder)."""
@@ -523,7 +523,7 @@ the VAE's tiled spatial encoder alone, as an H3 image reference does.
   64     latents = latents.to(torch.float16).float().cpu()
   65     return (latents - latents_mean) / latents_std
 ```
-📍 [`src/h3mlx/image.py:182-194`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L182-L194)
+📍 [`src/h3mlx/image.py:182-194`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L182-L194)
 ```python
  182 def encode_pictures(c: Components, reference_images) -> list:
  183     """`PH3ImageEditVaeEncoderStep`: H3's conditioning recipe per picture, a fresh seed-42 generator each."""
@@ -598,7 +598,7 @@ Both layouts are H3's. Text-to-image is the t2va layout for one latent frame and
  379         self.set_block_state(state, block_state)
  380         return components, state
 ```
-📍 [`src/h3mlx/image.py:105-107`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L105-L107)
+📍 [`src/h3mlx/image.py:105-107`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L105-L107)
 ```python
  105 def text2image_size(height, width, multiple: int) -> tuple[int, int]:
  106     """`PH3ImagePrepareLayoutStep`: each side defaults to 2912 on its own, then both are rounded to the multiple."""
@@ -701,7 +701,7 @@ the generated image rows share the slot after the last picture (the two audio la
 
 Ours calls the two packers the video pipeline uses (main guide §1), so no layout code is new:
 
-📍 [`src/h3mlx/image.py:284-289`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L284-L289)
+📍 [`src/h3mlx/image.py:284-289`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L284-L289)
 ```python
  284     if edit:
  285         layout = build_ref2va_packed_sequence(np.asarray(tags), [Ref("image")] * len(cond),
@@ -779,7 +779,7 @@ then the target image, then the audio rows.
  760         self.set_block_state(state, block_state)
  761         return components, state
 ```
-📍 [`src/h3mlx/image.py:293-303`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L293-L303)
+📍 [`src/h3mlx/image.py:293-303`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L293-L303)
 ```python
  293     gen = Noise(seed)
  294     rows = []
@@ -901,7 +901,7 @@ Both schedulers get the checkpoint's own 9-point grid. The released scheduler co
 
 Ours builds H3's `Schedules` from the grid for both modalities, so the denoise loop is the H3 one, single-time:
 
-📍 [`src/h3mlx/image.py:174-179`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L174-L179)
+📍 [`src/h3mlx/image.py:174-179`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L174-L179)
 ```python
  174 def schedules(sigmas=None) -> Schedules:
  175     """Both modalities on the same explicit grid, used verbatim (the scheduler's `shift_provided_sigmas: false`)."""
@@ -1028,7 +1028,7 @@ Ours adds both differences to H3's decoder as parameters, so the blocks, attenti
 coordinate replaces the time axis of the position grid; `_decoder` passes a temporal patch of 1 and the coordinate when
 the VAE is single-frame:
 
-📍 [`src/h3mlx/vae_ops.py:121-132`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/vae_ops.py#L121-L132)
+📍 [`src/h3mlx/vae_ops.py:121-132`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/vae_ops.py#L121-L132)
 ```python
  121 def vit_positions(frames: int, height: int, width: int, extra: int, frame_position: float | None = None) -> mx.array:
  122     """Voxel centres normalised to [-1, 1) per axis, (t, h, w) in raster order, then `extra` zero rows. With
@@ -1043,11 +1043,11 @@ the VAE is single-frame:
  131     grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3).astype(np.float32)
  132     return mx.array(np.concatenate([grid, np.zeros((extra, 3), dtype=np.float32)]))
 ```
-📍 [`src/h3mlx/vae.py:16`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/vae.py#L16)
+📍 [`src/h3mlx/vae.py:16`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/vae.py#L16)
 ```python
   16 IMAGE_FRAME_POSITION = 2.0 * (0.5 / 7) - 1.0
 ```
-📍 [`src/h3mlx/vae.py:191-197`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/vae.py#L191-L197)
+📍 [`src/h3mlx/vae.py:191-197`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/vae.py#L191-L197)
 ```python
  191     def _decoder(self, z):
  192         c = self.cfg
@@ -1057,7 +1057,7 @@ the VAE is single-frame:
  196                              int(c.decoder_attention_head_dim * c.decoder_rope_dim_ratio), c.decoder_rope_theta,
  197                              c.decoder_norm_eps, IMAGE_FRAME_POSITION if c.single_frame else None)
 ```
-📍 [`src/h3mlx/vae.py:210-244`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/vae.py#L210-L244)
+📍 [`src/h3mlx/vae.py:210-244`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/vae.py#L210-L244)
 ```python
  210     def decode(self, z):
  211         """Latents (B, F, H, W, latent) -> pixels (B, frames, H*r, W*r, 3), chunked and cross-faded like `_decode`.
@@ -1138,33 +1138,33 @@ layer scales for H3's. The release stores the image decoder in bf16 (its `proj_o
 
 Ours applies the same rule per class:
 
-📍 [`src/h3mlx/load.py:95-98`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/load.py#L95-L98)
+📍 [`src/h3mlx/load.py:96-99`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/load.py#L96-L99)
 ```python
-  95 VAE_KEEP_F32 = {
-  96     "AutoencoderKLMiniMaxH3": ("encoder", "quant_conv", "norm1", "norm2", "norm_out", "scale1", "scale2"),
-  97     "AutoencoderKLPH3Image": ("encoder", "quant_conv", "proj_out"),
-  98 }
+  96 VAE_KEEP_F32 = {
+  97     "AutoencoderKLMiniMaxH3": ("encoder", "quant_conv", "norm1", "norm2", "norm_out", "scale1", "scale2"),
+  98     "AutoencoderKLPH3Image": ("encoder", "quant_conv", "proj_out"),
+  99 }
 ```
-📍 [`src/h3mlx/load.py:101-104`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/load.py#L101-L104)
+📍 [`src/h3mlx/load.py:102-105`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/load.py#L102-L105)
 ```python
- 101 def vae_dtypes(names, class_name: str, dtype) -> dict:
- 102     """The dtype each parameter loads in under `dtype`, by diffusers' rule for `class_name`."""
- 103     keep = VAE_KEEP_F32.get(class_name, ())
- 104     return {k: mx.float32 if any(m in k.split(".") for m in keep) else dtype for k in names}
+ 102 def vae_dtypes(names, class_name: str, dtype) -> dict:
+ 103     """The dtype each parameter loads in under `dtype`, by diffusers' rule for `class_name`."""
+ 104     keep = VAE_KEEP_F32.get(class_name, ())
+ 105     return {k: mx.float32 if any(m in k.split(".") for m in keep) else dtype for k in names}
 ```
-📍 [`src/h3mlx/load.py:107-117`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/load.py#L107-L117)
+📍 [`src/h3mlx/load.py:108-118`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/load.py#L108-L118)
 ```python
- 107 def load_vae(d, dtype=None, **tiling) -> tuple[VideoVAE, tuple, tuple]:
- 108     """`dtype=None` keeps the stored dtypes (the H3 release is float32). With a dtype, floating weights load the way
- 109     diffusers' `from_pretrained(torch_dtype=dtype)` loads them: the class's float32 modules stay float32, the rest is
- 110     cast (P-H3-Image stores its decoder in bf16 with `proj_out` among the float32 modules)."""
- 111     cfg = _config(d)
- 112     # contiguous once: a transposed view would be copied again inside every tile's graph (121-209 tiles per reference)
- 113     p = {k: (mx.contiguous(V.conv3d_weight(v)) if v.ndim == 5 else v) for k, v in load_safetensors(d).items()}
- 114     if dtype is not None:
- 115         want = vae_dtypes(p, cfg.get("_class_name", ""), dtype)
- 116         p = {k: v.astype(want[k]) if mx.issubdtype(v.dtype, mx.floating) else v for k, v in p.items()}
- 117     return VideoVAE(p, VaeConfig.from_diffusers(cfg, **tiling)), tuple(cfg["latents_mean"]), tuple(cfg["latents_std"])
+ 108 def load_vae(d, dtype=None, **tiling) -> tuple[VideoVAE, tuple, tuple]:
+ 109     """`dtype=None` keeps the stored dtypes (the H3 release is float32). With a dtype, floating weights load the way
+ 110     diffusers' `from_pretrained(torch_dtype=dtype)` loads them: the class's float32 modules stay float32, the rest is
+ 111     cast (P-H3-Image stores its decoder in bf16 with `proj_out` among the float32 modules)."""
+ 112     cfg = _config(d)
+ 113     # contiguous once: a transposed view would be copied again inside every tile's graph (121-209 tiles per reference)
+ 114     p = {k: (mx.contiguous(V.conv3d_weight(v)) if v.ndim == 5 else v) for k, v in load_safetensors(d).items()}
+ 115     if dtype is not None:
+ 116         want = vae_dtypes(p, cfg.get("_class_name", ""), dtype)
+ 117         p = {k: v.astype(want[k]) if mx.issubdtype(v.dtype, mx.floating) else v for k, v in p.items()}
+ 118     return VideoVAE(p, VaeConfig.from_diffusers(cfg, **tiling)), tuple(cfg["latents_mean"]), tuple(cfg["latents_std"])
 ```
 
 The run script loads the image VAE in float32 by default, as h3mlx decodes H3; `--vae-dtype bfloat16` loads its
@@ -1201,7 +1201,7 @@ The pixels are then un-normalised and clamped, and rounded to 8 bits the way `Va
  186         self.set_block_state(state, block_state)
  187         return components, state
 ```
-📍 [`src/h3mlx/image.py:197-205`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L197-L205)
+📍 [`src/h3mlx/image.py:197-205`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L197-L205)
 ```python
  197 def decode(c: Components, video_rows: mx.array, ncv: int, lh: int, lw: int) -> np.ndarray:
  198     """Final packed rows -> float32 (H, W, 3) in [0, 1]: conditioning rows dropped, latents de-normalised, decoded,
@@ -1213,7 +1213,7 @@ The pixels are then un-normalised and clamped, and rounded to 8 bits the way `Va
  204     mx.eval(img)
  205     return np.array(img)
 ```
-📍 [`src/h3mlx/image.py:221-223`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L221-L223)
+📍 [`src/h3mlx/image.py:221-223`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L221-L223)
 ```python
  221 def to_uint8(image: np.ndarray) -> np.ndarray:
  222     """`VaeImageProcessor.numpy_to_pil`'s rounding."""
@@ -1306,7 +1306,7 @@ An edit's answer must be a brief in six sections or a one-paragraph instruction 
 Ours builds the same request with the same processor and runs the model in mlx-vlm, whose `generate_step` decodes
 greedily at temperature 0:
 
-📍 [`src/h3mlx/upsampler.py:58-67`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/upsampler.py#L58-L67)
+📍 [`src/h3mlx/upsampler.py:58-67`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/upsampler.py#L58-L67)
 ```python
   58 def chat_text(tokenizer, request: str, n_images: int = 0, aspect_ratio: str = "1:1") -> str:
   59     if n_images:
@@ -1319,7 +1319,7 @@ greedily at temperature 0:
   66     return tokenizer.apply_chat_template([{"role": "user", "content": content}], tokenize=False,
   67                                          add_generation_prompt=True)
 ```
-📍 [`src/h3mlx/upsampler.py:78-93`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/upsampler.py#L78-L93)
+📍 [`src/h3mlx/upsampler.py:78-93`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/upsampler.py#L78-L93)
 ```python
   78 def generate_ids(model, inputs: dict, end_id: int, max_new_tokens: int) -> list[int]:
   79     """Greedy tokens after the prompt, up to and including `end_id` or `max_new_tokens`."""
@@ -1338,7 +1338,7 @@ greedily at temperature 0:
   92             break
   93     return out
 ```
-📍 [`src/h3mlx/upsampler.py:96-123`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/upsampler.py#L96-L123)
+📍 [`src/h3mlx/upsampler.py:96-123`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/upsampler.py#L96-L123)
 ```python
   96 def upsample(model, processor, request: str, images=None, aspect_ratio: str = "1:1", max_new_tokens: int | None = None,
   97              on_answer=None) -> str:
@@ -1385,7 +1385,7 @@ tokens (its reasoning, the brief and the end token) in 14 s, and the brief it wr
 
 ## 10. End to end
 
-📍 [`src/h3mlx/image.py:226-334`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L226-L334)
+📍 [`src/h3mlx/image.py:226-334`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L226-L334)
 ```python
  226 def generate(c: Components, prompt: str, images=None, height=None, width=None, seed=0, sigmas=None, on_step=None,
  227              debug: dict | None = None, check_finite: bool = False, on_denoised=None, free_transformer: bool = False,
@@ -1404,9 +1404,9 @@ tokens (its reasoning, the brief and the end token) in 14 s, and the brief it wr
  240
  241     `modulation_cache` computes every block's AdaLN modulation up front, for each of the run's 8 calls
  242     (`ops.ModulationCache`), instead of projecting it inside the call: the same tables, bit for bit. With
- 243     `free_transformer` the 13B `adaln_proj` parameters (~26 GB in bf16) are dropped from `c.dit_params` block by block as the tables are
- 244     built, so at most one block's projection is resident beside the rest of the transformer (which, quantized, is
- 245     already loaded)."""
+ 243     `free_transformer` the 13B `adaln_proj` parameters (~26 GB in bf16) are dropped from `c.dit_params` block by block
+ 244     as the tables are built; with lazily loaded weights and no other reference to them, at most one block's projection
+ 245     is then resident beside the rest of the transformer (which, quantized, is already loaded)."""
  246     dbg = debug if debug is not None else {}
  247     stage = on_stage or (lambda name: None)
  248     m = c.canvas_multiple
@@ -1516,7 +1516,7 @@ edit adds 0.999 for its pictures, so 9). `generate(modulation_cache=True)` build
 for each of the 8 calls and, with `free_transformer`, drops each block's projection as soon as its tables are built
 (the weights load lazily, so at most one is resident). The run script does this by default:
 
-📍 [`src/h3mlx/image.py:314-318`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/image.py#L314-L318)
+📍 [`src/h3mlx/image.py:314-318`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/image.py#L314-L318)
 ```python
  314     if modulation_cache:
  315         cache = ops.ModulationCache(c.dit_params, c.dit_cfg, schedule_calls(layout, sched), drop=free_transformer)
@@ -1534,19 +1534,18 @@ exact values.
 
 **Measured on an M3 Ultra (60-core GPU, 256 GB)** with the release, 8 calls, bf16 transformer, float32 decode. The
 first two rows ran at commits `fcf379a` (text-to-image) and `ac3da69` (edit), before `generate` dropped the connector
-and encoder after use; the last two at the commits shown. The total includes loading; the peak is MLX's active
-allocations, in decimal GB:
+and encoder after use; the last two at the commits shown. The total includes loading; the peak is the largest of MLX's
+per-stage peaks of active allocations over the whole run, in decimal GB:
 
 | request | size | rows | warm call (mean after the first) | total | MLX peak (GB) |
 | --- | --- | --- | --- | --- | --- |
 | text-to-image, prompt as written | 2912 × 2912 | 8,395 | 26.0 s | 4.2 min | 69 GB |
 | edit, one 8.5 MP picture, upsampled | 2912 × 2912 | 17,749 | 69.4 s | 10.5 min | 72 GB |
 | edit, one 1.6 MP picture, upsampled (`96d5198`) | 2368 × 1760 | 9,382 | 29.8 s | 4.7 min | 69.3 GB |
-| the same request, with the modulation cache (`e3b94ef`) | 2368 × 1760 | 9,320 | 29.3 s | 4.6 min | 43.3 GB |
+| text-to-image, prompt as written, modulation cache (`d38be3d`) | 2912 × 2912 | 8,395 | 25.7 s | 4.1 min | 43.0 GB |
 
-The cache's saving is the 26 GB of projections; the speed is unchanged (reading them cost about 30 ms a call). The
-cache doesn't change the sequence: the second run's upsampled prompt came out 62 tokens shorter, and that run used the
-first, batched cache (same saving, a different picture).
+The last row is the first's request with the per-call cache: the same image, bit for bit, 26 GB less (the
+projections) and the same speed.
 
 **Quantized weights (ours).** `generate(quantize=8)` or `4` replaces the 312 attention and feed-forward matrices of the
 50 blocks and the token refiner (40 GB of the transformer's 66 GB) with MLX affine-quantized ones, after the text and
@@ -1557,20 +1556,21 @@ pictures. Neither the release nor diffusers does this, so there is nothing to co
 `tests/test_quantize.py` checks each product against its dequantized matrix and the tiny transformer's whole forward
 against the unquantized one.
 
-📍 [`src/h3mlx/load.py:73-84`](https://github.com/sublimator/minimax-h3-mlx/blob/36f2a23cf1fd192ce861b0d5be8620431db6b08a/src/h3mlx/load.py#L73-L84)
+📍 [`src/h3mlx/load.py:73-85`](https://github.com/sublimator/minimax-h3-mlx/blob/9fe4421b4ca37fbe4b5c9db7f7d9199135890faa/src/h3mlx/load.py#L73-L85)
 ```python
   73 def quantize_transformer(p: dict, bits: int, group_size: int = 64) -> dict:
   74     """Quantize the block and refiner linears in place (`ops.QuantizedWeight`, `bits` per weight plus a bf16 scale and
   75     bias per `group_size` inputs); everything else stays as loaded. Every target must quantize (`check_quantizable`):
-  76     none is left at full precision quietly. Each weight is read, quantized and evaluated in turn and its original
-  77     dropped, so the full-precision copy is never resident at once. Returns `p`."""
-  78     from .ops import QuantizedWeight
-  79
-  80     for k in check_quantizable(p, group_size):
-  81         q = QuantizedWeight(p[k], bits, group_size)
-  82         mx.eval(q.wq, q.scales, q.biases)
-  83         p[k] = q
-  84     return p
+  76     none is left at full precision quietly. Each weight is read, quantized and evaluated in turn and its entry replaced,
+  77     so with lazily loaded weights (`load_transformer`) and no other reference to them, the full-precision matrices are
+  78     never resident together. Returns `p`."""
+  79     from .ops import QuantizedWeight
+  80
+  81     for k in check_quantizable(p, group_size):
+  82         q = QuantizedWeight(p[k], bits, group_size)
+  83         mx.eval(q.wq, q.scales, q.biases)
+  84         p[k] = q
+  85     return p
 ```
 
 ## 11. Not done, and open

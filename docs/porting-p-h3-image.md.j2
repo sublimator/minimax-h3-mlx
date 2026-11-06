@@ -320,19 +320,18 @@ exact values.
 
 **Measured on an M3 Ultra (60-core GPU, 256 GB)** with the release, 8 calls, bf16 transformer, float32 decode. The
 first two rows ran at commits `fcf379a` (text-to-image) and `ac3da69` (edit), before `generate` dropped the connector
-and encoder after use; the last two at the commits shown. The total includes loading; the peak is MLX's active
-allocations, in decimal GB:
+and encoder after use; the last two at the commits shown. The total includes loading; the peak is the largest of MLX's
+per-stage peaks of active allocations over the whole run, in decimal GB:
 
 | request | size | rows | warm call (mean after the first) | total | MLX peak (GB) |
 | --- | --- | --- | --- | --- | --- |
 | text-to-image, prompt as written | 2912 × 2912 | 8,395 | 26.0 s | 4.2 min | 69 GB |
 | edit, one 8.5 MP picture, upsampled | 2912 × 2912 | 17,749 | 69.4 s | 10.5 min | 72 GB |
 | edit, one 1.6 MP picture, upsampled (`96d5198`) | 2368 × 1760 | 9,382 | 29.8 s | 4.7 min | 69.3 GB |
-| the same request, with the modulation cache (`e3b94ef`) | 2368 × 1760 | 9,320 | 29.3 s | 4.6 min | 43.3 GB |
+| text-to-image, prompt as written, modulation cache (`d38be3d`) | 2912 × 2912 | 8,395 | 25.7 s | 4.1 min | 43.0 GB |
 
-The cache's saving is the 26 GB of projections; the speed is unchanged (reading them cost about 30 ms a call). The
-cache doesn't change the sequence: the second run's upsampled prompt came out 62 tokens shorter, and that run used the
-first, batched cache (same saving, a different picture).
+The last row is the first's request with the per-call cache: the same image, bit for bit, 26 GB less (the
+projections) and the same speed.
 
 **Quantized weights (ours).** `generate(quantize=8)` or `4` replaces the 312 attention and feed-forward matrices of the
 50 blocks and the token refiner (40 GB of the transformer's 66 GB) with MLX affine-quantized ones, after the text and
