@@ -10,8 +10,8 @@ front unless it starts with it. `--upsample` first runs the release's prompt ups
 before the image model loads) on the request, as the diffusers pipeline does by default; the prompt it wrote is saved
 as `prompt.txt` and logged.
 
-Order: text encoder (Qwen3-VL-4B, ~9 GB, freed after) -> pictures through the VAE encoder (edits) -> 8 transformer
-calls (66 GB, read on first use) -> save `final_rows.npz`, free the transformer -> decode -> `image.png`. `run.json`
+Order: text encoder (Qwen3-VL-4B, ~9 GB, freed after) -> pictures through the VAE encoder (edits) -> `--quantize`, if
+given -> 8 transformer calls (66 GB, read on first use) -> save `final_rows.npz`, free the transformer -> decode -> `image.png`. `run.json`
 logs every stage. `--plan-only` reads configs, the tokenizer and the processor only and prints the sizes (with
 `--upsample`, of the request before it is expanded). `--decode-from <final_rows.npz>` re-decodes saved latents on their
 own: no prompt or sampling options, the rows checked, and the request that made them (saved in the file) logged as the
@@ -110,7 +110,8 @@ def main(argv=None) -> int:
                     help="float32 (as h3mlx decodes H3), or bfloat16 with the pipeline's float32 modules kept")
     ap.add_argument("--upsample", action="store_true", help="expand the request with the release's prompt upsampler")
     ap.add_argument("--quantize", type=int, choices=[8, 4],
-                    help="quantize the transformer's block weights to 8 or 4 bits (groups of 64) after loading")
+                    help="quantize the transformer's attention and feed-forward matrices to 8 or 4 bits (groups of "
+                         "64) once the text and pictures are encoded")
     ap.add_argument("--modulation-cache", action=argparse.BooleanOptionalAction, default=True,
                     help="compute each call's AdaLN modulation up front and drop adaln_proj (~26 GB); bit-identical "
                          "results; on by default")
@@ -235,17 +236,16 @@ def main(argv=None) -> int:
         c.connector = load.load_safetensors(weights / "text_connector")
         c.dit_params, _ = load.load_transformer(weights / "transformer")
         if args.quantize:
-            event("quantize_start", bits=args.quantize)
-            load.quantize_transformer(c.dit_params, args.quantize)
-            n = sum(1 for v in c.dit_params.values() if hasattr(v, "wq"))
-            gb = sum(v.nbytes for v in c.dit_params.values() if hasattr(v, "wq")) / 1e9
-            event("quantized", bits=args.quantize, weights=n, quantized_gb=round(gb, 2))
+            load.check_quantizable(c.dit_params)  # shapes only: refuse now, not after the text encoder
         per_call = dit_tflop_per_call(log["plan"]["sequence_rows"], c.dit_cfg)
         clock = {"prev": None}
 
         def stage(name):
             if name == "denoise":
                 clock["denoise_start"] = time.time()
+                if args.quantize:  # generate quantized the transformer in the stage before this one
+                    q = [v for v in c.dit_params.values() if hasattr(v, "wq")]
+                    event("quantized", bits=args.quantize, weights=len(q), quantized_gb=round(sum(v.nbytes for v in q) / 1e9, 2))
             event(f"stage_{name}")
 
         def on_step(i, t):
@@ -268,7 +268,8 @@ def main(argv=None) -> int:
         event("start")
         img = I.generate(c, prompt, images=images or None, height=args.height, width=args.width, seed=args.seed,
                          sigmas=sigmas, on_step=on_step, check_finite=True, on_denoised=on_denoised,
-                         free_transformer=True, on_stage=stage, modulation_cache=args.modulation_cache)
+                         free_transformer=True, on_stage=stage, modulation_cache=args.modulation_cache,
+                         quantize=args.quantize)
         write(img, prompt)
         steps = [e for e in log["events"] if e["event"] == "step"]
         log["summary"] = {"total_s": log["events"][-1]["t"],

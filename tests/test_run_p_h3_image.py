@@ -152,6 +152,17 @@ def test_cli_redecode_refuses_generation_options(tiny, tmp_path, extra):
         _run(["--weights", rel, "--out", tmp_path / "x", "--decode-from", tmp_path / "rows.npz", *extra])
 
 
+def test_cli_quantize_refuses_on_the_shapes_before_the_text_encoder(tiny, tmp_path):
+    """The tiny release's widths aren't multiples of 64, so `--quantize` can't quantize them whole: the run fails
+    right after the weights are opened (shapes only), never after encoding, and never with matrices left in bf16."""
+    _, rel, _ = tiny
+    out = tmp_path / "q"
+    with pytest.raises(ValueError, match="groups of 64"):
+        _run(["--weights", rel, "--prompt-file", _prompt(tmp_path, T2I), "--out", out, "--quantize", "8"])
+    log = _log(out)
+    assert log["status"] == "error" and not any(e["event"].startswith(("text", "stage_")) for e in log["events"])
+
+
 def test_cli_refuses_early(tiny, tmp_path):
     """Nine pictures or a bad grid fail at the argument check, before any model (the upsampler included) loads."""
     _, rel, pics = tiny

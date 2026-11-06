@@ -51,20 +51,36 @@ def _config(d: Path) -> dict:
 QUANT_TARGETS = re.compile(r"\.(attn\.(to_q|to_k|to_v|to_out\.0)|ff\.net\.(0\.proj|2))\.weight$")
 
 
-def quantize_transformer(p: dict, bits: int, group_size: int = 64) -> dict:
-    """Quantize the block and refiner linears in place (`ops.QuantizedWeight`, `bits` per weight plus a bf16 scale and
-    bias per `group_size` inputs); everything else stays as loaded. Each weight is read, quantized and evaluated in
-    turn and its original dropped, so the full-precision copy is never resident at once. Returns `p`."""
+def check_quantizable(p: dict, group_size: int = 64) -> list[str]:
+    """The `QUANT_TARGETS` keys of `p`, after checking each is a 2-D matrix whose input width is a multiple of
+    `group_size` (MLX quantizes whole groups). Raises ValueError otherwise, or when there are none or they are already
+    quantized. Reads only shapes, so it is free on lazily loaded weights."""
     from .ops import QuantizedWeight
 
-    for k in [k for k in p if QUANT_TARGETS.search(k)]:
-        w = p[k]
-        if w.ndim != 2 or w.shape[-1] % group_size:
-            continue
-        q = QuantizedWeight(w, bits, group_size)
+    targets = [k for k in p if QUANT_TARGETS.search(k)]
+    if not targets:
+        raise ValueError("no attention or feed-forward matrices to quantize")
+    done = [k for k in targets if isinstance(p[k], QuantizedWeight)]
+    if done:
+        raise ValueError(f"{len(done)} of {len(targets)} matrices are already quantized, e.g. {done[0]}")
+    bad = [k for k in targets if p[k].ndim != 2 or p[k].shape[-1] % group_size]
+    if bad:
+        raise ValueError(f"{len(bad)} of {len(targets)} matrices can't be quantized in groups of {group_size} (input "
+                         f"width not a multiple), e.g. {bad[0]} {tuple(p[bad[0]].shape)}")
+    return targets
+
+
+def quantize_transformer(p: dict, bits: int, group_size: int = 64) -> dict:
+    """Quantize the block and refiner linears in place (`ops.QuantizedWeight`, `bits` per weight plus a bf16 scale and
+    bias per `group_size` inputs); everything else stays as loaded. Every target must quantize (`check_quantizable`):
+    none is left at full precision quietly. Each weight is read, quantized and evaluated in turn and its original
+    dropped, so the full-precision copy is never resident at once. Returns `p`."""
+    from .ops import QuantizedWeight
+
+    for k in check_quantizable(p, group_size):
+        q = QuantizedWeight(p[k], bits, group_size)
         mx.eval(q.wq, q.scales, q.biases)
         p[k] = q
-        del w
     return p
 
 

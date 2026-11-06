@@ -72,9 +72,23 @@ class QuantizedWeight:
         return self.wq.nbytes + self.scales.nbytes + self.biases.nbytes
 
     def apply(self, x: mx.array) -> mx.array:
-        y = mx.quantized_matmul(x.astype(self.dtype), self.wq, self.scales, self.biases, transpose=True,
-                                group_size=self.group_size, bits=self.bits)
-        return y.astype(mx.float32) if x.dtype == mx.float32 else y  # promote like `x @ w.T`
+        """`x @ w.T` with the dequantized matrix, computed in the dtype the dense product would promote to: the input,
+        scales and biases are cast together (nothing at all when they already match, as in the release's bf16 path),
+        so a wider input is never narrowed first and the result's dtype is the dense one's."""
+        ct = _promoted(x.dtype, self.dtype)
+        s, b = (self.scales, self.biases) if ct == self.dtype else (self.scales.astype(ct), self.biases.astype(ct))
+        return mx.quantized_matmul(x.astype(ct), self.wq, s, b, transpose=True, group_size=self.group_size,
+                                   bits=self.bits)
+
+
+_PROMOTED: dict = {}
+
+
+def _promoted(a, b):
+    """The dtype MLX gives `a op b` (MLX has no public promote_types); memoised, so it costs one tiny op per pair."""
+    if (a, b) not in _PROMOTED:
+        _PROMOTED[(a, b)] = (mx.zeros((1,), dtype=a) + mx.zeros((1,), dtype=b)).dtype
+    return _PROMOTED[(a, b)]
 
 
 def linear(x: mx.array, w, b: mx.array | None = None) -> mx.array:
@@ -439,10 +453,11 @@ class ModulationCache:
         if "endpoint_time_embedder.linear_1.weight" in p:
             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
         arrays = {}
-        for u in calls:  # distinct calls, in first-seen order; the array as the call passes it
-            arrays.setdefault(self.key(u), np.asarray(u))
+        for u in calls:  # distinct calls, in first-seen order; float32, as `denoise` passes them
+            a = self.row(u)
+            arrays.setdefault(tuple(a.tolist()), a)
         self._index = {k: c for c, k in enumerate(arrays)}
-        self.t = np.unique(np.concatenate([a.astype(np.float32) for a in arrays.values()])) if arrays else np.zeros(0)
+        self.t = np.unique(np.concatenate(list(arrays.values()))) if arrays else np.zeros(0, np.float32)
         tembs = [timestep_embedding(mx.array(a), _sub(p, "time_embedder."), cfg["freq_dim"]) for a in arrays.values()]
         mx.eval(tembs)
         hidden = cfg["hidden_size"]
@@ -462,12 +477,19 @@ class ModulationCache:
             del p["norm_out.linear.weight"], p["norm_out.linear.bias"]
 
     @staticmethod
-    def key(timestep) -> tuple:
-        return tuple(float(v) for v in np.asarray(timestep).reshape(-1))
+    def row(timestep) -> np.ndarray:
+        """A call's distinct timesteps as one row of float32 (what `row_timesteps` returns and `dit_forward` embeds),
+        from a list, a numpy array or an mx.array of any float dtype."""
+        if isinstance(timestep, mx.array):
+            timestep = np.array(timestep.astype(mx.float32))
+        a = np.asarray(timestep, dtype=np.float32)
+        if a.ndim != 1:
+            raise ValueError(f"a call's timesteps are one row of distinct values, got shape {a.shape}")
+        return a
 
     def call(self, timestep: mx.array) -> tuple[list, list]:
         """(each block's six tables, norm_out's [shift, scale]) for the call with these distinct timesteps."""
-        k = self.key(np.array(timestep))
+        k = tuple(self.row(timestep).tolist())
         if k not in self._index:
             raise KeyError(f"timesteps {k} are not one of the {len(self._index)} calls the cache was built for")
         c = self._index[k]

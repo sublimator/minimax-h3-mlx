@@ -46,6 +46,29 @@ def test_cache_drops_the_adaln_weights_and_rejects_unknown_calls():
             cache.call(mx.array(unknown))
 
 
+def test_cache_keys_are_one_row_of_float32_whatever_the_caller_passes():
+    """`denoise` passes float32 arrays; a list, a float64 array or an mx.array of the same values is the same call and
+    embeds the same float32 values; a bf16 mx.array is read too (0.5 and 1.0 are exact in bf16); anything but one row
+    is refused."""
+    model = MiniMaxH3Transformer3DModel(**TINY).eval()
+    p, cfg = state_mx(model), dict(model.config)
+    a = ops.ModulationCache(p, cfg, [[0.6, 0.999], [0.5, 1.0]])
+    b = ops.ModulationCache(p, cfg, [np.float32([0.6, 0.999]), np.float64([0.5, 1.0])])
+
+    def tables(cache, t):
+        blocks, out = cache.call(t)
+        return [x for tab in blocks for x in tab] + list(out)
+
+    for t in ([0.6, 0.999], np.array([0.6, 0.999]), mx.array(np.float32([0.6, 0.999])),
+              mx.array([0.5, 1.0]).astype(mx.bfloat16)):
+        for x, y in zip(tables(a, t), tables(b, t)):
+            assert bool(mx.array_equal(x, y))
+    with pytest.raises(ValueError, match="one row"):
+        ops.ModulationCache(p, cfg, [np.float32([[0.6, 0.999]])])
+    with pytest.raises(ValueError, match="one row"):
+        a.call(mx.array([[0.6, 0.999]]))
+
+
 def test_cache_with_drop_pops_the_same_weights_in_place_and_builds_the_same_tables():
     model = MiniMaxH3Transformer3DModel(**TINY).eval()
     p, cfg = state_mx(model), dict(model.config)

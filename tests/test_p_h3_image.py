@@ -449,6 +449,20 @@ def test_modulation_cache_matches_diffusers_and_drops_adaln(workflow):
     assert not any("adaln_proj" in k or k.startswith("norm_out.linear") for k in dbg["components"].dit_params)
 
 
+@NEEDS_PROCESSOR
+def test_generate_quantizes_after_the_text_and_pictures(monkeypatch):
+    """`generate(quantize=)` quantizes at its own stage, after the text encoder and the picture encoder have run (so
+    neither is resident beside the quantized matrices) and before the modulation cache and the first call."""
+    seen = []
+    monkeypatch.setattr(I.load, "quantize_transformer", lambda p, bits, group_size=64: seen.append(f"q{bits}") or p)
+    rng = np.random.default_rng(11)
+    images = [Image.fromarray(rng.integers(0, 256, (h, w, 3), dtype=np.uint8)) for h, w in ((40, 48), (56, 32))]
+    with _quiet():
+        I.generate(components(build()), EDIT_PROMPT, images=images, seed=7, on_stage=seen.append, quantize=8,
+                   free_transformer=True, modulation_cache=True)
+    assert seen == ["text", "pictures", "layout", "quantize", "q8", "denoise", "decode"]
+
+
 def test_text2image_sides_default_on_their_own():
     from diffusers.modular_pipelines.p_h3_image.before_denoise import PH3ImagePrepareLayoutStep
     from diffusers.modular_pipelines.p_h3_image.before_encoder import round_canvas

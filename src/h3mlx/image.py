@@ -21,7 +21,7 @@ import mlx.core as mx
 import numpy as np
 from PIL import Image
 
-from . import ops
+from . import load, ops
 from .denoise import Schedules, assert_finite, denoise, schedule_calls
 from .packing import Ref, build_packed_sequence, build_ref2va_packed_sequence
 from .pipeline import ENCODE_SEED, NOISE_AUG, PIXEL_MEAN, PIXEL_STD, Noise
@@ -225,14 +225,18 @@ def to_uint8(image: np.ndarray) -> np.ndarray:
 
 def generate(c: Components, prompt: str, images=None, height=None, width=None, seed=0, sigmas=None, on_step=None,
              debug: dict | None = None, check_finite: bool = False, on_denoised=None, free_transformer: bool = False,
-             on_stage=None, modulation_cache: bool = False) -> np.ndarray:
+             on_stage=None, modulation_cache: bool = False, quantize: int | None = None) -> np.ndarray:
     """One P-H3-Image request: text-to-image without `images`, an edit with them. Returns float32 (H, W, 3) in
     [0, 1]. The prompt is rendered as given (run the prompt upsampler first to expand a short request).
 
     `debug` collects intermediates under diffusers' state names; `on_denoised(video_rows, meta)` runs before decoding;
     `free_transformer` makes the components single-use: the connector is dropped once the prompt is encoded, the VAE
     encoder once the pictures are, and `c.dit_params` before decoding. `on_stage(name)`: text, pictures, layout,
-    denoise, decode.
+    quantize, denoise, decode.
+
+    `quantize` (8 or 4) quantizes the transformer's attention and feed-forward matrices (`load.quantize_transformer`)
+    once the text and pictures are encoded, so the text encoder and the quantized transformer are never resident
+    together.
 
     `modulation_cache` computes every block's AdaLN modulation up front, for each of the run's 8 calls
     (`ops.ModulationCache`), instead of projecting it inside the call: the same tables, bit for bit. With
@@ -300,6 +304,9 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
     #@@end noise-draws
     dbg.update(layout=layout, initial_video_rows=video_rows, initial_audio_rows=audio_rows)
 
+    if quantize:
+        stage("quantize")
+        load.quantize_transformer(c.dit_params, quantize)
     stage("denoise")
     sched = schedules(sigmas if sigmas is not None else c.settings.sample_sigmas)
     cache = None
@@ -318,6 +325,7 @@ def generate(c: Components, prompt: str, images=None, height=None, width=None, s
         on_denoised(v, meta)
     if free_transformer:
         c.dit_params.clear()
+        cache = None  # its tables too, before the decoder runs
         mx.clear_cache()
     stage("decode")
     image = decode(c, v, **meta)
