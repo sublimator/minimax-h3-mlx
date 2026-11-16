@@ -70,9 +70,22 @@ def block_modules(cfg: dict, targets=BLOCK_TARGETS) -> list[str]:
     return out + [f"token_refiner.refiner_blocks.{i}.{t}" for i in range(cfg["num_refiner_layers"]) for t in targets]
 
 
+def check_alpha(what: str, alpha) -> None:
+    """An alpha is a positive, finite number. PEFT takes any: zero leaves an adapter that does nothing and cannot
+    train, a negative one flips the delta's sign, and NaN or infinity poison the forward and are written to the file's
+    header as `NaN` / `Infinity`, which is not JSON. Refused wherever an alpha comes in or goes out."""
+    try:
+        ok = math.isfinite(alpha) and alpha > 0
+    except TypeError:
+        ok = False
+    if not ok:
+        raise ValueError(f"{what}: lora_alpha is {alpha!r}; it must be a positive, finite number")
+
+
 def check(adapter: Adapter, cfg: dict) -> None:
     """Every module is a Linear the forward applies a LoRA to (PEFT would wrap any `nn.Linear` a file names; a LoRA on
-    `proj_in` or `adaln_proj` would be silently ignored here, so it is refused), and each pair fits it."""
+    `proj_in` or `adaln_proj` would be silently ignored here, so it is refused), each pair fits it, and each alpha is a
+    positive, finite number."""
     if not adapter.alpha:
         raise ValueError("no LoRA tensors in this adapter")
     wired = wired_shapes(cfg)
@@ -88,6 +101,7 @@ def check(adapter: Adapter, cfg: dict) -> None:
             raise ValueError(f"{module}: lora_A {a} / lora_B {b} do not fit the Linear ({out_f}, {in_f})")
         if a[0] <= 0:
             raise ValueError(f"{module}: LoRA rank must be positive, got {a[0]}")
+        check_alpha(module, adapter.alpha[module])
 
 
 # --- initialisation (PEFT's `reset_lora_parameters`) -----------------------------------------------------------------
@@ -116,6 +130,8 @@ def init(cfg: dict, rank: int, alpha: float | None = None, modules=None, seed: i
 
     if rank <= 0:
         raise ValueError(f"`rank` should be a positive integer value but the value passed is {rank}")
+    if alpha is not None:
+        check_alpha("init", alpha)
     wired = wired_shapes(cfg)
     modules = sorted(block_modules(cfg) if modules is None else modules)
     generator = torch.Generator().manual_seed(seed)
@@ -391,7 +407,7 @@ def read(tensors: dict, header: dict | None = None, prefix: str | None = None, h
     Alpha, per module: from the `lora_adapter_metadata` diffusers writes (`r`, `lora_alpha`, `rank_pattern`,
     `alpha_pattern`, resolved as PEFT resolves them); else from a plain `alpha` entry in the header, taken as one
     network alpha for every module; else the module's own rank (scaling 1), which is `get_peft_kwargs`' rule. DoRA,
-    rsLoRA, a LoRA bias and `fan_in_fan_out` are refused, not ignored."""
+    rsLoRA, a LoRA bias, `fan_in_fan_out` and an alpha that is not positive and finite are refused, not ignored."""
     header = dict(header or {})
     tensors = dict(tensors)
     if any("dora_scale" in k or "lora_magnitude_vector" in k for k in tensors):
@@ -432,6 +448,7 @@ def read(tensors: dict, header: dict | None = None, prefix: str | None = None, h
             if r != rank:
                 raise ValueError(f"{module}: the metadata says rank {r} but lora_B has rank {rank}")
             alpha[module] = alpha_pattern.get(pattern_key(alpha_pattern, module), config["lora_alpha"])
+            check_alpha(f"{module} (the file's {METADATA_KEY})", alpha[module])
         return Adapter(tensors, alpha)
 
     network_alpha = None
@@ -440,6 +457,8 @@ def read(tensors: dict, header: dict | None = None, prefix: str | None = None, h
             network_alpha = float(header["alpha"])
         except ValueError:  # diffusers warns and loads with alpha == rank
             network_alpha = None
+        else:
+            check_alpha("the file header's `alpha`", network_alpha)
     return Adapter(tensors, {m: (rank if network_alpha is None else network_alpha) for m, rank in ranks.items()})
 
 
@@ -481,13 +500,17 @@ def save(path, adapter: Adapter, prefix: str | None = "transformer") -> None:
     """Write the adapter as diffusers does: `<prefix>.<module>.lora_A/B.weight` tensors and, in the safetensors header,
     `format: pt` plus the `LoraConfig` arguments as JSON under `lora_adapter_metadata` (each key prefixed too). That is
     `save_lora_weights`' file, which `load_lora_adapter` reads by default. `prefix=None` writes `save_lora_adapter`'s:
-    no prefixes, read back with `load_lora_adapter(..., prefix=None)`. Tensors keep their dtype."""
+    no prefixes, read back with `load_lora_adapter(..., prefix=None)`. Tensors keep their dtype. Nothing is written
+    for an adapter with an alpha that is not positive and finite."""
     path = Path(path)
     if path.suffix != ".safetensors":
         raise ValueError(f"expected a .safetensors path, got {path}")
     if not adapter.alpha:
         raise ValueError("no LoRA tensors in this adapter")
+    for module in adapter.modules:
+        check_alpha(module, adapter.alpha[module])
     lead = "" if prefix is None else prefix + "."
     tensors = {lead + k: v for k, v in adapter.tensors.items()}
     meta = {lead + k: v for k, v in config(adapter).items()}
-    mx.save_safetensors(str(path), tensors, metadata={"format": "pt", METADATA_KEY: json.dumps(meta, indent=2, sort_keys=True)})
+    described = json.dumps(meta, indent=2, sort_keys=True, allow_nan=False)  # strict JSON: no NaN or Infinity tokens
+    mx.save_safetensors(str(path), tensors, metadata={"format": "pt", METADATA_KEY: described})

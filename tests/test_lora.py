@@ -593,6 +593,54 @@ def test_delta_weight_and_merge_are_pefts(base_dtype, lora_dtype, r, alpha):
 # --- what is refused ---------------------------------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("bad", [0.0, -4.0, float("nan"), float("inf")])
+def test_alpha_must_be_positive_and_finite(tmp_path, bad):
+    """PEFT takes any number as alpha: its layer's scaling is then zero, negative, NaN or infinite, and its config
+    writes NaN or Infinity into the header, which a strict JSON reader refuses. Ours refuses such an alpha wherever
+    one comes in (`init`, `read` from the metadata or the header) or goes out (`attach`, `merge`, `save`)."""
+    layer = PeftLinear(torch.nn.Linear(4, 4), "default", LoraConfig(r=4, lora_alpha=bad), r=4, lora_alpha=bad)
+    scaling = layer.scaling["default"]
+    assert scaling == bad / 4 or (math.isnan(scaling) and math.isnan(bad)), "PEFT accepts it"
+    if not math.isfinite(bad):
+        written = json.dumps(LoraConfig(r=4, lora_alpha=bad).to_dict()["lora_alpha"])  # what diffusers' save writes
+        with pytest.raises(ValueError, match="not JSON"):
+            json.loads(written, parse_constant=not_json)
+
+    model = randomised(TINY, 0)
+    cfg, base = dict(model.config), state_mx(model)
+    good = random_adapter(cfg, {m: 4 for m in MODULES}, {m: 10 for m in MODULES})
+    one_bad = lora.Adapter(good.tensors, {**good.alpha, MODULES[3]: bad})
+    with pytest.raises(ValueError, match="positive, finite"):
+        lora.init(cfg, rank=4, alpha=bad)
+    for use in (lambda: lora.check(one_bad, cfg), lambda: lora.attach(base, cfg, one_bad), lambda: lora.merge(base, cfg, one_bad),
+                lambda: lora.save(tmp_path / "bad.safetensors", one_bad)):
+        with pytest.raises(ValueError, match=f"{MODULES[3]}.*positive, finite"):
+            use()
+    assert not (tmp_path / "bad.safetensors").exists(), "nothing written"
+    described = lora.config(good)
+    for header in ({"alpha": str(bad)}, {lora.METADATA_KEY: json.dumps({**described, "lora_alpha": bad})},
+                   {lora.METADATA_KEY: json.dumps({**described, "alpha_pattern": {"attn.to_q": bad}})}):
+        with pytest.raises(ValueError, match="positive, finite"):
+            lora.read(good.tensors, header)
+
+
+def not_json(token):
+    raise ValueError(f"{token} is not JSON")
+
+
+def test_saved_metadata_is_strict_json(tmp_path, monkeypatch):
+    adapter = random_adapter(dict(TINY), {m: 4 for m in MODULES}, {m: (2.5 if "to_v" in m else 10) for m in MODULES})
+    lora.save(tmp_path / FILE, adapter)
+    header, _ = header_of(tmp_path / FILE)
+    parsed = json.loads(header[lora.METADATA_KEY], parse_constant=not_json)
+    assert parsed["transformer.lora_alpha"] == 10 and set(parsed["transformer.alpha_pattern"].values()) == {2.5}
+    # the writer itself refuses a token that is not JSON, even with the alpha check out of the way
+    monkeypatch.setattr(lora, "check_alpha", lambda what, alpha: None)
+    with pytest.raises(ValueError, match="JSON"):
+        lora.save(tmp_path / "nan.safetensors", lora.Adapter(adapter.tensors, {m: float("nan") for m in MODULES}))
+    assert not (tmp_path / "nan.safetensors").exists()
+
+
 def test_refusals(tmp_path):
     model = randomised(TINY, 0)
     cfg = dict(model.config)
