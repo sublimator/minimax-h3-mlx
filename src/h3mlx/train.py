@@ -225,23 +225,65 @@ def check_inputs(trainable: dict, frozen: dict, cfg: dict, example: Example, tex
                          f"{tuple(text.shape) if hasattr(text, 'shape') else type(text).__name__}")
 
 
+class ExampleForward:
+    """The transformer's forward on one example, for differentiating, in three stages: `start` (the projections, the
+    token refiner, the scatter and the time embedding), `block` (one transformer block) and `finish` (the final norm,
+    the heads and the loss). Each stage takes its weights as a dict, so a caller chooses which of them are arguments
+    of a transform.
+
+    These are `ops.dit_forward`'s operations in its order, and the loss is the same bit for bit. Two things differ,
+    and neither changes a value. Nothing is evaluated between the stages: the sampling forward evaluates after every
+    block, and an array evaluated while it is being traced keeps its graph. And the modulation tables' rows are
+    gathered with `ops.take_rows_for_training`, whose gradient over a half-precision table is the sum torch's is."""
+
+    def __init__(self, cfg: dict, example: Example, text: mx.array, weight=None):
+        lay = example.layout
+        self.cfg, self.example, self.text, self.weight = cfg, example, text, weight
+        self.video, self.audio = example.video_rows[None], example.audio_rows[None]
+        self.timestep, self.t_rows = mx.array(example.timestep), mx.array(example.timestep_indices)
+        self.video_indices, self.audio_indices = mx.array(lay.video_indices), mx.array(lay.audio_indices)
+        self.text_indices = mx.array(lay.text_indices)
+        self.seq = len(lay.token_tags)
+        self.adaln_indices = self.t_rows * ops.MODALITY_NUM + mx.array(lay.token_tags)
+        self.rotary = ops.rope_cos_sin(mx.array(lay.position_ids.astype(np.float32)),
+                                       ops.rope_inv_freq(cfg["rope_freq_dim"], cfg["rope_theta"]))
+
+    def start(self, p: dict) -> tuple[mx.array, mx.array]:
+        """(the packed rows before the first block, the time embedding) from the whole dict of weights."""
+        x = ops.dit_inputs(p, self.cfg, self.video, self.audio, self.text, self.seq, self.video_indices,
+                           self.audio_indices, self.text_indices)
+        return x, ops.two_time_embedding(self.timestep, None, p, self.cfg)
+
+    def block(self, x: mx.array, temb: mx.array, block_p: dict) -> mx.array:
+        """One block on its own weights (the keys under `transformer_blocks.<i>.`, without that prefix)."""
+        cfg = self.cfg
+        return ops.dit_block(x, temb, self.adaln_indices, self.rotary, block_p, cfg["num_attention_heads"],
+                             cfg["hidden_size"], cfg["norm_eps"], cfg["qk_norm_eps"], take=ops.take_rows_for_training)
+
+    def finish(self, x: mx.array, temb: mx.array, p: dict) -> mx.array:
+        """The loss from the last block's output, from the whole dict of weights."""
+        shift, scale = ops.norm_out_tables(temb, p)
+        video_pred, _ = ops.dit_outputs(x, p, self.cfg, shift, scale, self.t_rows, self.video_indices,
+                                        self.audio_indices, take=ops.take_rows_for_training)
+        return flow_match_loss(self.example.generated(video_pred), self.example.target[None], self.weight)
+
+
 def example_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None) -> mx.array:
-    """One example's loss: the transformer's forward on the example's rows with the weights `{**frozen, **trainable}`,
-    then `flow_match_loss` of the generated video rows against the example's target. Nothing is taken from the audio
-    output or from the condition rows.
+    """One example's loss: the transformer's forward on the example's rows with the weights `{**frozen, **trainable}`
+    (`ExampleForward`), then `flow_match_loss` of the generated video rows against the example's target. Nothing is
+    taken from the audio output or from the condition rows.
 
     The weights come in as two arguments, the trainable matrices first (`lora.split`), so the function can be
     differentiated with respect to them and to nothing else; `check_inputs` refuses a `trainable` the forward would
     not use and a `text` that is not (1, text rows, text dim), the prompt's embeddings. Products with float32 LoRA
     matrices are float32 whatever the base's dtype (`ops.plinear`), and the loss is float32."""
     check_inputs(trainable, frozen, cfg, example, text)
-    lay = example.layout
-    video_pred, _ = ops.dit_forward(
-        {**frozen, **trainable}, cfg, example.video_rows[None], example.audio_rows[None], text,
-        mx.array(example.timestep), mx.array(example.timestep_indices), token_tags=mx.array(lay.token_tags),
-        position_ids=mx.array(lay.position_ids.astype(np.float32)), video_indices=mx.array(lay.video_indices),
-        audio_indices=mx.array(lay.audio_indices), text_indices=mx.array(lay.text_indices))
-    return flow_match_loss(example.generated(video_pred), example.target[None], weight)
+    p = {**frozen, **trainable}
+    forward = ExampleForward(cfg, example, text, weight)
+    x, temb = forward.start(p)
+    for i in range(cfg["num_layers"]):
+        x = forward.block(x, temb, ops._sub(p, f"transformer_blocks.{i}."))
+    return forward.finish(x, temb, p)
 
 
 def loss_and_gradients(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None):

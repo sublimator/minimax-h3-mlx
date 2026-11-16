@@ -23,6 +23,7 @@ from test_lora_stack import ASSISTANT_MODULES, SUBJECT_MODULES, activate, peft_s
 from test_train_example import TAGS, latents_of, ours, theirs
 
 from h3mlx import lora, ops, train
+from h3mlx.pipeline import Noise
 
 
 def setup(n_refs=1, sigma=0.5, seed=2, cfg=TINY, std=0.3, subject_modules=SUBJECT_MODULES, subject=None):
@@ -40,12 +41,19 @@ def setup(n_refs=1, sigma=0.5, seed=2, cfg=TINY, std=0.3, subject_modules=SUBJEC
 
 def torch_side(s, tmp_path, base=None, stacked=True, target=None):
     """(loss, {parameter name: gradient or None}, the PEFT model): the subject's parameters trainable and float32,
-    everything else frozen."""
+    everything else frozen. Loading an adapter into a bf16 model rounds its matrices to bf16, and
+    `cast_training_params` widens the dtype without bringing the values back; a trainer's matrices are not on that
+    grid after their first step, so the subject's float32 values are put back, the ones our side holds."""
     names = ("assistant", "subject") if stacked else ("subject",)
     m = activate(peft_stack(s["model"] if base is None else base, tmp_path, s["assistant"], s["subject"]), names)
     for name, prm in m.named_parameters():
         prm.requires_grad_(".lora_" in name and ".subject." in name)
     cast_training_params(m, dtype=torch.float32)
+    exact = lora.runtime_tensors(s["subject"], "subject")
+    parameters = dict(m.named_parameters())
+    with torch.no_grad():
+        for name, value in exact.items():
+            parameters[name].copy_(torch.from_numpy(to_np(value.astype(mx.float32))))
     w = s["want"]
     video_pred, _ = m(w["video_rows"][None], w["audio_rows"][None], s["text"], w["timestep"], w["indices"],
                       token_tags=w["token_tags"], position_ids=w["position_ids"], video_indices=w["video_indices"],
@@ -68,6 +76,27 @@ def mlx_groups(s, base=None, stacked=True):
 
 def flat(grads, keys):
     return np.concatenate([to_np(grads[k]).ravel() for k in keys])
+
+
+TABLE_FED = ("time_embedder.", "adaln_proj.linear", "norm_out.linear")  # modules a modulation table's gradient reaches
+
+
+def cancelling_adapter(cfg, modules, half, delta, seed, std=0.1):
+    """An adapter that only float32 products get right. lora_A's second half is minus its first half plus
+    `delta` * N, lora_B's second half repeats its first, and the scaling is 1 / delta: the update is B1 (N x), the
+    difference of two products `1 / delta` times its size. With delta = 2**-10, float32 keeps 14 bits of it and bf16
+    none."""
+    g = torch.Generator().manual_seed(seed)
+    shapes = lora.wired_shapes(cfg)
+    tensors, alpha = {}, {}
+    for m in modules:
+        out_f, in_f = shapes[m]
+        a1, n = torch.randn(half, in_f, generator=g) * std, torch.randn(half, in_f, generator=g) * std
+        b1 = torch.randn(out_f, half, generator=g) * std
+        tensors[m + ".lora_A.weight"] = to_mx(torch.cat([a1, -a1 + delta * n]))
+        tensors[m + ".lora_B.weight"] = to_mx(torch.cat([b1, b1], dim=1))
+        alpha[m] = 2 * half / delta
+    return lora.Adapter(tensors, alpha)
 
 
 def sampling_forward_loss(params, cfg, example, text, weight=None):
@@ -229,6 +258,159 @@ def test_gradients_over_a_bf16_base_track_torchs(tmp_path, seed):
     assert 1e-4 < e_torch < 0.1, "bf16 is visible in torch's own gradient, and small"
     assert e_mlx <= 1.5 * e_torch + 1e-3
     assert abs(torch_loss - truth_loss) < 0.01 * truth_loss and abs(float(loss) - truth_loss) < 0.01 * truth_loss
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_products_with_float32_matrices_are_float32_over_a_bf16_base(tmp_path, seed):
+    """The test above cannot tell float32 products from bf16 ones: with ordinary matrices either is within bf16's
+    noise of the float32 run. This adapter can (`cancelling_adapter`): its update is the small difference of two
+    large products. Torch with PEFT's float32 matrices over the bf16 base stays as close to the float32 run as it
+    does with any adapter, and so does ours. The same matrices held in bf16, which is what products in the base's
+    dtype would compute, are tens of percent away."""
+    cfg = dict(TINY, num_layers=4)
+    modules = lora.block_modules(cfg)
+    subject = cancelling_adapter(cfg, modules, half=2, delta=2.0 ** -10, seed=seed + 70)
+    s = setup(seed % 3, (0.5, 0.9, 0.2)[seed % 3], seed=seed, cfg=cfg, std=0.1, subject_modules=modules, subject=subject)
+    truth_loss, truth, _ = torch_side(s, tmp_path)
+    mixed = to_mixed(s["model"])
+    torch_loss, torch_grads, peft_model = torch_side(s, tmp_path, base=mixed)
+    name = "transformer_blocks.0.attn.to_q.lora_A.subject.weight"
+    assert np.array_equal(dict(peft_model.named_parameters())[name].detach().numpy(), to_np(subject.tensors[name.replace(".subject", "")]))
+
+    frozen, trainable = mlx_groups(s, base=mixed)
+    args = (s["cfg"], s["example"], to_mx(s["text"]))
+    loss, grads = train.loss_and_gradients(trainable, frozen, *args)
+    in_bf16 = {k: v.astype(mx.bfloat16) for k, v in trainable.items()}
+    assert any(not np.array_equal(to_np(in_bf16[k].astype(mx.float32)), to_np(v)) for k, v in trainable.items())
+    half_loss, half_grads = train.loss_and_gradients(in_bf16, frozen, *args)
+    keys = sorted(grads)
+    reference = flat(truth, keys)
+    e_torch, e_mlx, e_half = (rel_err(flat(g, keys), reference) for g in (torch_grads, grads, half_grads))
+    print(f"seed {seed}: gradient error against float32, torch {e_torch:.4f}, mlx {e_mlx:.4f}, mlx with bf16 matrices {e_half:.4f}; "
+          f"loss {truth_loss:.4f}, torch {torch_loss:.4f}, mlx {float(loss):.4f}, bf16 matrices {float(half_loss):.4f}")
+    assert 1e-4 < e_torch < 0.05, "torch's float32 products keep the difference"
+    assert e_mlx <= 1.5 * e_torch + 1e-3
+    assert abs(float(loss) - truth_loss) < 0.01 * truth_loss
+    assert e_half > 0.25 and e_half > 10 * e_mlx, "bf16 products do not: the test can tell the two apart"
+
+
+# --- the forward that is differentiated ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mixed", [False, True], ids=["float32", "bf16 base"])
+@pytest.mark.parametrize("n_refs,sigma", [(0, 0.9), (1, 0.5), (2, 0.0005)])
+def test_the_training_forward_is_the_sampling_forward(mixed, n_refs, sigma):
+    """`train.example_loss` runs the forward in stages with nothing evaluated between them and gathers the modulation
+    tables' rows through float32; `ops.dit_forward`, which sampling runs and which is tested against diffusers,
+    evaluates after every block and gathers in the table's dtype. Neither difference changes a value: the loss is the
+    same bit for bit, in float32 and over a bf16 base, with adapters on every Linear."""
+    s = setup(n_refs, sigma, subject_modules=sorted(lora.wired_shapes(TINY)), std=0.1)
+    frozen, trainable = mlx_groups(s, base=to_mixed(s["model"]) if mixed else None)
+    cfg, example, text = s["cfg"], s["example"], to_mx(s["text"])
+    for weight in (None, 2.5):
+        want = sampling_forward_loss(lora.join(frozen, trainable), cfg, example, text, weight)
+        got = train.example_loss(trainable, frozen, cfg, example, text, weight)
+        assert got.dtype == want.dtype == mx.float32 and float(got) == float(want)
+    without_adapter = sampling_forward_loss(lora.set_active(lora.join(frozen, trainable), ()), cfg, example, text)
+    assert abs(float(without_adapter) - float(want) / 2.5) > 1e-3, "the adapters count in the loss compared"
+
+
+# --- the gradient of a modulation table ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype,torch_dtype", [(mx.bfloat16, torch.bfloat16), (mx.float16, torch.float16), (mx.float32, torch.float32)])
+def test_the_training_gathers_gradient_is_torchs_index_select(dtype, torch_dtype):
+    """Six table rows gathered into 6,000 sequence rows, each multiplied by its own factor and summed: the gradient
+    with respect to the table is, per table row, the sum of about a thousand factors.
+
+    The reference module gathers with `index_select`, whose backward returns that sum rounded once to the table's
+    dtype. `ops.take_rows_for_training` returns the same bits for a bf16 and a float16 table (on the CPU stream, where
+    MLX's sum has a fixed order; on the default device nearly every element). `ops.take_rows`, the sampling
+    forward's gather, sums in the table's dtype: over a bf16 table it is about 3% from the exact sum and mostly not
+    torch's bits. In the forward the two gathers are the same bit for bit."""
+    rng = np.random.default_rng(0)
+    rows = rng.integers(0, 6, 6000)
+    factors = mx.array((rng.standard_normal((6000, 64)) + 0.25).astype(np.float32)).astype(dtype)
+    table = mx.array(rng.standard_normal((6, 64)).astype(np.float32)).astype(dtype)
+    special = mx.array(np.float32([0.0, -0.0, np.inf, -np.inf, np.nan, 1e-40, 3.4e38, -1.0])).astype(dtype)[:, None]
+    for t in (table, special):
+        a, b = ops.take_rows_for_training(t, mx.array(rows)), ops.take_rows(t, mx.array(rows))
+        assert a.dtype == b.dtype == dtype and a.shape == b.shape
+        assert np.array_equal(to_np(a.astype(mx.float32)).view(np.uint32), to_np(b.astype(mx.float32)).view(np.uint32))
+
+    factors_np = to_np(factors.astype(mx.float32))
+    exact = np.zeros((6, 64))
+    np.add.at(exact, rows, factors_np.astype(np.float64))
+    theirs = torch.from_numpy(to_np(table.astype(mx.float32))).to(torch_dtype).requires_grad_(True)
+    (theirs.index_select(0, torch.from_numpy(rows)) * torch.from_numpy(factors_np).to(torch_dtype)).float().sum().backward()
+    theirs = theirs.grad.float().numpy()
+
+    def gradient(take, device=None):
+        f = mx.grad(lambda t: (take(t, mx.array(rows)) * factors).astype(mx.float32).sum())
+        if device is None:
+            g = f(table)
+        else:
+            with mx.stream(device):
+                g = f(table)
+                mx.eval(g)
+        assert g.dtype == dtype
+        return to_np(g.astype(mx.float32))
+
+    error = lambda g: float(np.linalg.norm(g - exact) / np.linalg.norm(exact))  # noqa: E731
+    ours, ours_default, plain = gradient(ops.take_rows_for_training, mx.cpu), gradient(ops.take_rows_for_training), gradient(ops.take_rows, mx.cpu)
+    print(f"{dtype}: against the exact sum, torch {error(theirs):.5f}, training gather {error(ours):.5f}, plain gather "
+          f"{error(plain):.5f}; equal to torch's bits: {np.mean(ours == theirs):.3f}, {np.mean(ours_default == theirs):.3f} "
+          f"on the default device, plain {np.mean(plain == theirs):.3f}")
+    assert np.array_equal(ours, theirs), "torch's bits"
+    assert error(ours_default) < 1.2 * error(theirs) + 1e-6
+    if dtype != mx.float32:  # the default device's float32 sum has no fixed order; rounded to half precision it is theirs
+        assert np.mean(ours_default == theirs) > 0.99
+    if dtype == mx.bfloat16:
+        assert error(theirs) < 0.003 and error(plain) > 0.02 and np.mean(plain == theirs) < 0.5
+    if dtype == mx.float16:
+        assert error(plain) > 5 * error(theirs) and np.mean(plain == theirs) < 0.5
+
+
+def test_a_tables_gradient_over_a_bf16_base_is_the_rows_sum():
+    """The whole gradient, over a bf16 base, for adapters on the Linears a modulation table's gradient reaches (the
+    time embedder, each block's AdaLN projection, the final norm's projection), on an example of about 2,300 rows.
+
+    The reference is the same example with a timestep entry of its own for every row. The tables then have a row per
+    sequence row, each used once, so their gather's backward sums nothing: the rows' cotangents are summed later, in
+    float32, by the product with the float32 matrices. The values in the forward are the same and so is the loss, bit
+    for bit. With shared tables `train.loss_and_gradients` is within 1% of that reference (one rounding of each sum
+    to bf16 apart). Through the sampling forward's gather, which sums in bf16, the same gradients are more than 5%
+    away. Every other tensor's gradient is identical three times. On the CPU stream, for a fixed order of sums."""
+    cfg = dict(TINY)
+    torch.manual_seed(0)
+    model = to_mixed(randomised(cfg, 0))
+    g = torch.Generator().manual_seed(1)
+    modules = sorted(lora.wired_shapes(cfg))
+    subject = random_adapter(cfg, {m: 4 for m in modules}, {m: 4 for m in modules}, seed=3, std=0.1)
+    frozen, trainable = lora.split(lora.attach(state_mx(model), cfg, subject, keep_dtype=True, name="subject"), "subject")
+    latents = to_mx(torch.randn(1, 1, 96, 96, cfg["in_channels"], generator=g))
+    shared = train.build_example(cfg, np.array([1] * 8), latents, 0.5, Noise(0), condition_t=0.999)
+    text = to_mx(torch.randn(1, 8, cfg["text_dim"], generator=g))
+    rows = len(shared.layout.token_tags)
+    assert rows > 2000 and len(shared.timestep) == 1
+    own_row = dataclasses.replace(shared, timestep=shared.timestep[shared.timestep_indices], timestep_indices=np.arange(rows))
+    with mx.stream(mx.cpu):
+        want_loss, want = train.loss_and_gradients(trainable, frozen, cfg, own_row, text)
+        loss, grads = train.loss_and_gradients(trainable, frozen, cfg, shared, text)
+        in_bf16 = mx.grad(lambda t: sampling_forward_loss({**frozen, **t}, cfg, shared, text))(trainable)
+        mx.eval(want_loss, want, loss, grads, in_bf16)
+    assert float(loss) == float(want_loss)
+    fed = [k for k in grads if any(part in k for part in TABLE_FED)]
+    rest = [k for k in grads if k not in fed and not k.startswith("audio_proj_out.")]
+    assert len(fed) == 2 * (2 + cfg["num_layers"] + 1) and len(rest) > 30
+    for k in rest:
+        assert np.array_equal(to_np(grads[k]), to_np(want[k])) and np.array_equal(to_np(in_bf16[k]), to_np(want[k])), k
+    ours = {k: rel_err(grads[k], want[k]) for k in fed}
+    summed_in_bf16 = {k: rel_err(in_bf16[k], want[k]) for k in fed}
+    print(f"{rows} rows: table-fed gradients against the one-row-per-row reference, ours {max(ours.values()):.4f} at "
+          f"worst, summed in bf16 {min(summed_in_bf16.values()):.3f} to {max(summed_in_bf16.values()):.3f}")
+    assert max(ours.values()) < 0.01
+    assert min(summed_in_bf16.values()) > 0.05, "the reference tells the two sums apart"
 
 
 # --- what a loss refuses, and a quantized base ----------------------------------------------------------------------------

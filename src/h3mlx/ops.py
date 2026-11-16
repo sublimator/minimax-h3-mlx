@@ -163,9 +163,29 @@ def adaln_tables(temb: mx.array, p: dict, hidden_size: int, name: str = "adaln_p
     return mx.split(out, 6, axis=-1)
 
 
-def modulate(x: mx.array, shift: mx.array, scale: mx.array, rows: mx.array) -> mx.array:
+def take_rows(table: mx.array, rows: mx.array) -> mx.array:
+    """table[rows] along the first axis: each sequence row's entry of a (t, modality) table."""
+    return mx.take(table, rows, axis=0)
+
+
+def take_rows_for_training(table: mx.array, rows: mx.array) -> mx.array:
+    """`take_rows` for a forward that is differentiated: the same values bit for bit, with a half-precision table
+    gathered through float32.
+
+    The gather's backward adds every sequence row's cotangent into the table row it came from. `mx.take` does that
+    sum in the table's dtype, and a bf16 running sum stops taking in what is added once it is a few hundred times
+    the addends: the error grows with the rows per table row, from 1% at a hundred to tens of percent at thousands.
+    torch's `index_select`, which the reference module gathers with, returns the sum rounded to bf16 once. Gathered
+    through float32 the sum is taken in float32 and rounded once, as torch's. The cost is a float32 copy of the
+    gathered rows, so sampling, which has no backward, keeps `take_rows`."""
+    if table.dtype in (mx.float16, mx.bfloat16):
+        return mx.take(table.astype(mx.float32), rows, axis=0).astype(table.dtype)
+    return mx.take(table, rows, axis=0)
+
+
+def modulate(x: mx.array, shift: mx.array, scale: mx.array, rows: mx.array, take=take_rows) -> mx.array:
     """x * (1 + scale[rows]) + shift[rows]; x is (batch, seq, hidden), rows (seq,) index the AdaLN table."""
-    return x * (1.0 + mx.take(scale, rows, axis=0)) + mx.take(shift, rows, axis=0)
+    return x * (1.0 + take(scale, rows)) + take(shift, rows)
 
 
 def norm_out(
@@ -387,17 +407,19 @@ def dit_block(
     norm_eps: float = 1e-5,
     qk_eps: float = 1e-5,
     modulation: list[mx.array] | None = None,
+    take=take_rows,
 ) -> mx.array:
     """Pre-norm attention and SwiGLU FF, each shift/scale-modulated and gated per row from the (t, modality) table.
-    `modulation`: the six precomputed tables (from `ModulationCache`) instead of projecting `temb` here."""
+    `modulation`: the six precomputed tables (from `ModulationCache`) instead of projecting `temb` here. `take`: the
+    gather of a table's rows, `take_rows_for_training` in a forward that is differentiated."""
     if modulation is None:
         modulation = adaln_tables(temb, p, hidden_size)
     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation
     sub = lambda prefix: {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}  # noqa: E731
-    h = modulate(rms_norm(x, p["norm1.weight"], norm_eps), shift_msa, scale_msa, adaln_indices)
-    x = x + mx.take(gate_msa, adaln_indices, axis=0) * attn_block(h, sub("attn."), heads, qk_eps, rotary)
-    h = modulate(rms_norm(x, p["norm2.weight"], norm_eps), shift_mlp, scale_mlp, adaln_indices)
-    return x + mx.take(gate_mlp, adaln_indices, axis=0) * swiglu_ff(h, sub("ff."))
+    h = modulate(rms_norm(x, p["norm1.weight"], norm_eps), shift_msa, scale_msa, adaln_indices, take)
+    x = x + take(gate_msa, adaln_indices) * attn_block(h, sub("attn."), heads, qk_eps, rotary)
+    h = modulate(rms_norm(x, p["norm2.weight"], norm_eps), shift_mlp, scale_mlp, adaln_indices, take)
+    return x + take(gate_mlp, adaln_indices) * swiglu_ff(h, sub("ff."))
 
 
 # --- token refiner and the whole forward (MiniMaxH3TokenRefiner, MiniMaxH3Transformer3DModel.forward) ---------------
@@ -414,6 +436,40 @@ def token_refiner(x: mx.array, p: dict, num_layers: int, heads: int, norm_eps: f
         x = x + attn_block(rms_norm(x, b["norm1.weight"], norm_eps), _sub(b, "attn."), heads, qk_eps, None)
         x = x + swiglu_ff(rms_norm(x, b["norm2.weight"], norm_eps), _sub(b, "ff."))
     return rms_norm(x, p["final_norm.weight"], final_eps)
+
+
+def dit_inputs(p: dict, cfg: dict, video: mx.array, audio: mx.array, text: mx.array, seq: int,
+               video_indices: mx.array, audio_indices: mx.array, text_indices: mx.array) -> mx.array:
+    """The start of the forward: each modality projected at its own weights' dtype, the text through the token
+    refiner, and the rows scattered into the packed (batch, seq, hidden) buffer the blocks work on."""
+    heads = cfg["num_attention_heads"]
+    eps, qk_eps, final_eps = cfg["norm_eps"], cfg["qk_norm_eps"], cfg["final_norm_eps"]
+    #@@start project-and-scatter
+    v = plinear(video.astype(p["proj_in.weight"].dtype), p, "proj_in", bias=True)
+    a = plinear(audio.astype(p["audio_proj_in.weight"].dtype), p, "audio_proj_in", bias=True)
+    t = plinear(text.astype(p["context_embedder.weight"].dtype), p, "context_embedder", bias=True)
+    t = token_refiner(t, _sub(p, "token_refiner."), cfg["num_refiner_layers"], heads, eps, qk_eps, final_eps)
+
+    x = mx.zeros((t.shape[0], seq, t.shape[-1]), dtype=t.dtype)
+    x[:, text_indices] = t
+    x[:, video_indices] = v.astype(t.dtype)
+    x[:, audio_indices] = a.astype(t.dtype)
+    #@@end project-and-scatter
+    return x
+
+
+def dit_outputs(x: mx.array, p: dict, cfg: dict, shift: mx.array, scale: mx.array, t_rows: mx.array,
+                video_indices: mx.array, audio_indices: mx.array, take=take_rows) -> tuple[mx.array, mx.array]:
+    """The end of the forward: the final norm with its per-row shift and scale (`norm_out_tables`, or a cache's), the
+    cast to the heads' dtype, and the video and audio rows gathered from the two heads. `take` as in `dit_block`."""
+    #@@start norm-out-and-heads
+    h = rms_norm(x, p["norm_out.norm.weight"], cfg["final_norm_eps"])
+    x = h * (1.0 + take(scale, t_rows)) + take(shift, t_rows)
+    x = x.astype(p["proj_out.weight"].dtype)
+    vid = plinear(x, p, "proj_out", bias=True)[:, video_indices]
+    aud = plinear(x, p, "audio_proj_out", bias=True)[:, audio_indices]
+    #@@end norm-out-and-heads
+    return vid, aud
 
 
 def dit_forward(
@@ -438,21 +494,9 @@ def dit_forward(
     With HyperFlow attached (`hyperflow.attach`), `endpoint` holds each distinct timestep's endpoint r, aligned with
     `timestep` (the distinct (t, r) pairs)."""
     hidden, heads = cfg["hidden_size"], cfg["num_attention_heads"]
-    eps, qk_eps, final_eps = cfg["norm_eps"], cfg["qk_norm_eps"], cfg["final_norm_eps"]
-    seq = position_ids.shape[0]
+    eps, qk_eps = cfg["norm_eps"], cfg["qk_norm_eps"]
     rotary = rope_cos_sin(position_ids, rope_inv_freq(cfg["rope_freq_dim"], cfg["rope_theta"]))
-
-    #@@start project-and-scatter
-    v = plinear(video.astype(p["proj_in.weight"].dtype), p, "proj_in", bias=True)
-    a = plinear(audio.astype(p["audio_proj_in.weight"].dtype), p, "audio_proj_in", bias=True)
-    t = plinear(text.astype(p["context_embedder.weight"].dtype), p, "context_embedder", bias=True)
-    t = token_refiner(t, _sub(p, "token_refiner."), cfg["num_refiner_layers"], heads, eps, qk_eps, final_eps)
-
-    x = mx.zeros((t.shape[0], seq, t.shape[-1]), dtype=t.dtype)
-    x[:, text_indices] = t
-    x[:, video_indices] = v.astype(t.dtype)
-    x[:, audio_indices] = a.astype(t.dtype)
-    #@@end project-and-scatter
+    x = dit_inputs(p, cfg, video, audio, text, position_ids.shape[0], video_indices, audio_indices, text_indices)
 
     #@@start adaln-rows-and-blocks
     mx.eval(x)  # projections + refiner + scatter as their own graph, before the first block
@@ -472,15 +516,8 @@ def dit_forward(
         mx.eval(x)  # one block's graph at a time: bounds activation memory at 20-50k rows
     #@@end adaln-rows-and-blocks
 
-    #@@start norm-out-and-heads
     shift, scale = norm_out_tables(temb, p) if cache is None else call_out
-    h = rms_norm(x, p["norm_out.norm.weight"], final_eps)
-    x = h * (1.0 + mx.take(scale, t_rows, axis=0)) + mx.take(shift, t_rows, axis=0)
-    x = x.astype(p["proj_out.weight"].dtype)
-    vid = plinear(x, p, "proj_out", bias=True)[:, video_indices]
-    aud = plinear(x, p, "audio_proj_out", bias=True)[:, audio_indices]
-    #@@end norm-out-and-heads
-    return vid, aud
+    return dit_outputs(x, p, cfg, shift, scale, t_rows, video_indices, audio_indices)
 
 
 # --- AdaLN modulation cache ---------------------------------------------------------------------------------------
