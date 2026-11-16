@@ -282,7 +282,7 @@ def write(directory, request: dict, tensors: dict, wait: float = 30.0) -> str:
     * Once the record's rename has happened the entry is published, and it stands. The one thing that can still
       fail is flushing the directory afterwards (`files.NotDurable`): that error is raised as it is and nothing is
       removed. Readers do not take the lock, so an entry that has been visible cannot be taken back without a
-      reader finding half of it; and what a cache loses when a write turns out not to have been durable is one
+      reader seeing half of it; and what a cache loses when a write turns out not to have been durable is one
       entry, which is encoded again. The tensors' own rename is flushed before the record is written, so a record
       that is on disk has its tensors on disk.
     * When the lock stays held for `wait` seconds the write is refused with `files.Busy`, which says who holds it."""

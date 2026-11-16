@@ -1384,7 +1384,7 @@ No argument of `request` has a default.
 - **Once the record is in place, the entry stands.** One failure can come after publication: the record has been
   renamed into place and flushing the directory afterwards fails. Cleaning up as for an earlier failure would delete
   the tensors under a published record. Rolling both back was the other choice, and the worse one: readers do not
-  take the lock, so an entry that has been visible cannot be withdrawn without a reader finding half of it, and
+  take the lock, so an entry that has been visible cannot be withdrawn without a reader seeing half of it, and
   what a cache risks by keeping an entry whose durability is in doubt is one entry, encoded again after a power
   loss. So nothing is removed, and the error is its own kind, `files.NotDurable`, which says the file is there.
   The tensors' own rename is flushed before the record is written, so a record on disk has its tensors on disk
