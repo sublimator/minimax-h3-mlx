@@ -16,9 +16,16 @@ The MiniMax H3 transformer, scheduler, modular pipeline and autoencoders
 (`src/diffusers/modular_pipelines/p_h3_image/`, `src/diffusers/models/autoencoders/autoencoder_kl_p_h3_image.py`,
 `src/diffusers/models/condition_embedders/condition_embedder_p_h3_image.py`), is the source of `src/h3mlx/image.py`,
 `src/h3mlx/upsampler.py` and the single-frame decoder in `src/h3mlx/vae.py` and `vae_ops.py`, and is quoted in
-`docs/porting-p-h3-image.md`. Those files carry these notices:
+`docs/porting-p-h3-image.md`. Its LoRA loading and saving (`src/diffusers/loaders/peft.py`, `loaders/lora_pipeline.py`,
+`loaders/lora_base.py`, `utils/peft_utils.py`), its MiniMax H3 LoRA converter (`loaders/lora_conversion_utils.py`) and
+its training utilities (`training_utils.py`), at the same commit, are the source of `src/h3mlx/lora.py` and
+`src/h3mlx/train.py`, and are quoted in `docs/porting-lora-training.md`, which also quotes seven lines of
+`schedulers/scheduling_flow_match_euler_discrete.py`. Those files carry these notices:
 
 ```
+Copyright 2025 The HuggingFace Inc. team.
+Copyright 2026 The HuggingFace Team. All rights reserved.
+Copyright 2025 Stability AI, Katherine Crowson and The HuggingFace Team. All rights reserved.
 Copyright 2025 The MiniMax Team and The HuggingFace Team. All rights reserved.
 Copyright 2025 The MiniMax authors and The HuggingFace Team. All rights reserved.
 Copyright 2026 The MiniMax and HuggingFace Teams. All rights reserved.
@@ -65,7 +72,11 @@ limitations under the License.
 ## PEFT (Hugging Face)
 
 https://github.com/huggingface/peft, v0.21.2. Apache License 2.0. `docs/porting-hyperflow.md` quotes LoRA
-`Linear.forward` (`src/peft/tuners/lora/layer.py`).
+`Linear.forward` (`src/peft/tuners/lora/layer.py`). The scaling, the initialisation, `Linear.get_delta_weight`,
+`Linear.merge` and `Linear.forward` of that file, the rank and alpha pattern lookup of `src/peft/tuners/lora/model.py`
+and `get_pattern_key` (`src/peft/utils/other.py`) are translated in `src/h3mlx/lora.py` and `ops.py`, and quoted in
+`docs/porting-lora-training.md`. `layer.py` notes that its `Linear` is based on Microsoft's loralib
+(https://github.com/microsoft/LoRA, MIT License, Copyright (c) Microsoft Corporation).
 
 ```
 Copyright 2023-present the HuggingFace Inc. team.

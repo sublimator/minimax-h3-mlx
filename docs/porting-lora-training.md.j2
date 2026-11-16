@@ -1,0 +1,498 @@
+{# Porting guide: the first pieces of LoRA training (PEFT + diffusers -> h3mlx).
+   Render from the repo root:  projected-source render --no-header docs/porting-lora-training.md.j2 docs/porting-lora-training.md
+   The original sides are checkouts beside this repo, so their extracts carry GitHub permalinks:
+     ../peft            huggingface/peft at tag v0.21.2 (eaa35c7), sparse: src/peft/tuners/lora/ only
+     ../diffusers-main  huggingface/diffusers at main commit d3d8af89, sparse: src/, tests/, docs/ (no examples/)
+   No markers were added upstream: passages inside their long functions are quoted by line range, which is stable
+   because both checkouts are pinned. Our src/h3mlx/lora.py carries three markers (`alpha-fold`, `qkv-split`,
+   `fc1-swap`). #}
+{% set PEFT = '../peft' %}
+{% set LAYER = 'src/peft/tuners/lora/layer.py' %}
+{% set DM = '../diffusers-main' %}
+{% set DPEFT = 'src/diffusers/loaders/peft.py' %}
+{% set PIPE = 'src/diffusers/loaders/lora_pipeline.py' %}
+{% set CONV = 'src/diffusers/loaders/lora_conversion_utils.py' %}
+{% set TU = 'src/diffusers/training_utils.py' %}
+{% set SCH = 'src/diffusers/schedulers/scheduling_minimax_h3.py' %}
+# Porting LoRA training to MLX, part 1: PEFT and diffusers → `h3mlx`
+
+This guide covers the first pieces a LoRA trainer for the MLX transformer needs, each ported op by op and tested
+against the PyTorch original on small random tensors:
+
+1. **LoRA adapters:** PEFT's scaling and initialisation, attaching and merging, and the files diffusers reads and
+   writes (§1).
+2. **A converter** for adapters saved under the original checkpoint's key names (§2).
+3. **The forward process, the training target and the loss** (§3).
+4. **Sampling the noise level and weighting the loss** (§4).
+
+In each section the original comes first, then the port, then what changed and which test ties them together. It
+assumes the main guide (`docs/porting.md`) for the transformer and the scheduler, and the HyperFlow guide
+(`docs/porting-hyperflow.md`) for how a LoRA reaches the forward (`ops.plinear`).
+
+**Nothing here trains yet.** There is no training loop, no gradient test, no optimizer and no run on real weights;
+§6 lists what is missing. Everything below is weight-free.
+
+**Sources, pinned.**
+
+| what | where | pin |
+| --- | --- | --- |
+| LoRA layer, scaling, init, merge (Apache-2.0) | `huggingface/peft`, `src/peft/tuners/lora/` | tag `v0.21.2` (`eaa35c7`), the version the tests import |
+| LoRA files, the original-layout converter, the scheduler, `training_utils` (Apache-2.0) | `huggingface/diffusers` main | `d3d8af89e5b08a352cf47bba3a451c5fed9a49b1`, the commit the tests import |
+
+**The oracle, and what it is not.** The tests compare against PEFT, diffusers and torch run on tiny models and random
+tensors. diffusers' example training scripts are not part of the checkout these guides read, and no trainer for this
+model was run or read here. So this guide claims parity with the library functions it quotes and with nothing else:
+where a trainer has to make a choice (the shift, the number of noise levels, the density, the weighting), the port
+takes an argument and has no default.
+
+| piece | ours | original | tests |
+| --- | --- | --- | --- |
+| scaling, init, attach, merge, files | `src/h3mlx/lora.py`, `ops.plinear` | PEFT `layer.py`; diffusers `loaders/peft.py`, `utils/peft_utils.py`, `loaders/lora_pipeline.py` | `tests/test_lora.py` (57) |
+| original-layout converter | `lora.convert_original` | diffusers `loaders/lora_conversion_utils.py` | `tests/test_lora_convert.py` (47) |
+| forward process, target, loss | `src/h3mlx/train.py` | diffusers `scheduling_minimax_h3.py`; torch `mse_loss` | `tests/test_train.py` (34) |
+| noise-level sampling, loss weighting | `src/h3mlx/train.py` | diffusers `training_utils.py`, its two schedulers | `tests/test_train_sampling.py` (30) |
+
+## 1. LoRA adapters
+
+An adapter is two matrices per `Linear`, `lora_A` (rank × in) and `lora_B` (out × rank), and a number, alpha. The
+layer then computes `W x + (alpha / rank) · B (A x)`.
+
+### 1.1 The scaling
+
+PEFT sets the scaling when it builds the layer, and applies it in the forward:
+
+{{ code(LAYER, lines=(278, 281), root=PEFT) }}
+{{ code(LAYER, lines=(1088, 1113), root=PEFT) }}
+
+`scaling` is a Python float. The HyperFlow port left the multiplication out, because HyperFlow's alpha equals its
+rank and `hyperflow.attach` refuses anything else. A general adapter needs it, so `plinear` now multiplies when the
+weights carry a scaling, and is unchanged when they don't:
+
+{{ code('src/h3mlx/ops.py', function='times_scalar') }}
+{{ code('src/h3mlx/ops.py', function='plinear') }}
+
+- **Where the scaling lives.** `lora.attach` adds `<module>.lora_scaling`, a 0-d float32 array, beside the two
+  matrices, and only when the scaling is not 1. Without it the old expression runs, so HyperFlow's path and its tests
+  are untouched.
+- **How torch rounds it.** `tensor * python_float` on a bf16 or float16 tensor multiplies in float32 by the float32
+  scalar and rounds once. MLX's own `bf16_array * 0.7` first rounds the scalar to bf16, which makes it 0.69921875: a
+  relative error of 1.1e-3 in every adapter with such a scaling. `times_scalar` does what torch does. On float32
+  tensors the two agree anyway.
+
+`test_plinear_scaling_matches_peft_linear` checks one `Linear` against PEFT's layer at four (rank, alpha) pairs, and
+that leaving the scaling out is visible. `test_half_precision_scaling_rounds_as_torch` isolates the rounding: with
+selection matrices for A and B and a zero base weight every other step is exact, so the output is the scaled delta
+alone and must equal PEFT's bit for bit in bf16 and float16; it also checks that MLX's plain product does not.
+
+### 1.2 The initialisation
+
+{{ code(LAYER, lines=(332, 345), root=PEFT) }}
+
+`kaiming_uniform_(a=sqrt(5))` is a uniform draw in ±bound with bound = √3 · gain / √fan_in and gain = √(2 / (1 + a²)),
+which comes to 1 / √in. `lora_B` is zero, so a new adapter does nothing until it is trained.
+
+{{ code('src/h3mlx/lora.py', function='kaiming_uniform') }}
+{{ code('src/h3mlx/lora.py', function='init') }}
+
+- **The draw is torch's.** The values come from a torch generator, as the sampling noise does, and the bound is
+  computed in the same order in Python floats, so one matrix equals `torch.nn.init.kaiming_uniform_` bit for bit
+  (`test_kaiming_uniform_is_torchs`).
+- **Against PEFT itself.** A PEFT layer built after `torch.manual_seed(s)` first constructs two `nn.Linear`s, whose
+  own constructors draw `lora_A`'s and `lora_B`'s default values, and only then redraws `lora_A`. Skip those two draws
+  on a generator seeded the same and ours is PEFT's `lora_A` bit for bit (`test_init_draw_is_pefts`).
+- **A whole adapter is not PEFT's for the same seed.** `init` draws the modules in sorted order from its own
+  generator. PEFT draws in the model's module order from the global generator, with the two extra draws per layer.
+  Tests that need equal adapters on both sides copy the tensors across.
+- **float32, always.** The matrices are float32 whatever the base weights are. `alpha` defaults to the rank.
+- **Which modules.** The default is the attention and feed-forward matrices of every block and refiner block
+  (`block_modules`). The time embedder's two linears can be named explicitly. Nothing else can (§1.3).
+
+`test_init_is_a_float32_no_op` checks the shapes, the dtype over a bf16 base, the bound, the zero `lora_B`, the
+order of the draws, and that the forward with a fresh adapter is the base model's bit for bit.
+
+### 1.3 Attaching, and the dtype
+
+{{ code('src/h3mlx/lora.py', struct='Adapter') }}
+{{ code('src/h3mlx/lora.py', function='wired_shapes') }}
+{{ code('src/h3mlx/lora.py', function='check') }}
+{{ code('src/h3mlx/lora.py', function='attach') }}
+
+- **Only wired linears.** PEFT wraps any `nn.Linear` a file names. Our forward applies a LoRA only where it calls
+  `plinear`: the six matrices of each block and refiner block and the time embedder's two. A LoRA on `proj_in`, on an
+  `adaln_proj` or on the output heads would be silently ignored, so it is refused, as in the HyperFlow loader.
+- **One adapter per `Linear`.** Attaching to weights that already carry a LoRA, HyperFlow's included, is refused.
+  Stacking two adapters is a later piece.
+- **The dtype has two answers in the original, and so here.** PEFT creates an adapter in its base layer's dtype, and
+  `load_lora_adapter` copies a file's values into it: bf16 on the blocks, float32 on the time embedder. That is the
+  default (and what `hyperflow.attach` does). A trainer then casts the trainable parameters up:
+
+{{ code(TU, function='cast_training_params', root=DM) }}
+
+  `keep_dtype=True` is that state: float32 factors over a bf16 base. `plinear` needs no change for it. The input is
+  cast to the adapter's dtype, the delta is float32, the sum with the bf16 base result promotes to float32 and is cast
+  back, which is PEFT's forward line for line.
+
+`test_adapter_dtypes_follow_peft` asserts the dtypes on both sides in both states, on a model in the release's mixed
+precision, and holds each forward to the bound the base model's mixed-precision test uses (MLX's error against the
+float32 run at most 1.5× torch's own, plus 1e-3). Measured relative errors, torch then MLX:
+
+| adapter | video | audio |
+| --- | --- | --- |
+| cast to the base dtype (bf16 blocks) | 0.0117, 0.0109 | 0.0083, 0.0096 |
+| kept float32 over bf16 blocks | 0.0099, 0.0102 | 0.0099, 0.0067 |
+
+### 1.4 Merging
+
+{{ code(LAYER, function='Linear.get_delta_weight', root=PEFT) }}
+{{ code(LAYER, lines=(1005, 1008), root=PEFT) }}
+
+{{ code('src/h3mlx/lora.py', function='delta_weight') }}
+{{ code('src/h3mlx/lora.py', function='merge') }}
+
+`delta_weight` takes PEFT's CPU path: half-precision factors are multiplied in float32 and the product is cast back.
+`merge` returns new weights with no LoRA keys, and refuses a quantized weight. `test_merged_equals_unmerged` checks
+the merged forward against the unmerged one, against PEFT's unmerged forward, and against PEFT's own merge
+(`fuse_lora`), weights and forward. `test_delta_weight_and_merge_are_pefts` checks one layer for float32, for bf16,
+and for a float32 adapter over a bf16 weight; the bf16 results are held to one bf16 step, because the float32
+product's last bit depends on the matmul's order.
+
+The HyperFlow guide's reasons for not merging at inference still stand (bf16 rounding differs from the unmerged path).
+Merging is here for a trained adapter's user, not for the run scripts.
+
+### 1.5 The files
+
+diffusers writes two layouts, and reads both:
+
+| written by | keys | `lora_adapter_metadata` keys | read by |
+| --- | --- | --- | --- |
+| `save_lora_adapter` (the model) | `<module>.lora_A.weight` | `r`, `lora_alpha`, … | `load_lora_adapter(..., prefix=None)` |
+| `save_lora_weights` (the pipeline mixin) | `transformer.<module>.lora_A.weight` | `transformer.r`, `transformer.lora_alpha`, … | `load_lora_adapter(...)`, whose default prefix is `transformer` |
+
+The second is also the layout of HyperFlow's file. The metadata is PEFT's whole `LoraConfig` as JSON, in the
+safetensors header beside `format: pt`:
+
+{{ code(DPEFT, lines=(425, 444), root=DM) }}
+{{ code(PIPE, function='MiniMaxH3LoraLoaderMixin.save_lora_weights', root=DM) }}
+
+On loading, diffusers filters the keys and the metadata by the prefix, reads each module's rank off `lora_B`, and
+builds a `LoraConfig` from the metadata if there is any, or else derives one:
+
+{{ code(DPEFT, lines=(209, 212), root=DM) }}
+{{ code(DPEFT, lines=(250, 275), root=DM) }}
+{{ code('src/diffusers/utils/peft_utils.py', function='_create_lora_config', root=DM) }}
+{{ code('src/diffusers/utils/peft_utils.py', function='get_peft_kwargs', root=DM) }}
+
+Two things follow, and the port copies both:
+
+- **Alpha travels only in the metadata.** A file without it loads with alpha equal to each module's own rank, so
+  scaling 1, even when the ranks are mixed.
+- **Ranks and alphas can differ per module.** PEFT resolves them from `rank_pattern` and `alpha_pattern`:
+
+{{ code('src/peft/tuners/lora/model.py', lines=(308, 312), root=PEFT) }}
+
+  `get_pattern_key` (in PEFT's `utils/other.py`, which the sparse checkout here does not hold) returns the first
+  pattern key that matches the module name as the regular expression `(.*\.)?(<key>)$`, or the name itself.
+  `test_pattern_key_is_pefts` compares ours with the installed function on nine cases.
+
+The pipeline mixin adds three more rules before any of that, which matter for files not written by diffusers:
+
+{{ code(PIPE, lines=(7204, 7228), root=DM) }}
+{{ code(PIPE, lines=(7230, 7249), root=DM) }}
+
+Ours is one reader for all of it, and one writer:
+
+{{ code('src/h3mlx/lora.py', function='pattern_key') }}
+{{ code('src/h3mlx/lora.py', function='_component') }}
+{{ code('src/h3mlx/lora.py', function='read') }}
+{{ code('src/h3mlx/lora.py', function='config') }}
+{{ code('src/h3mlx/lora.py', function='save') }}
+
+What differs from the original, on purpose:
+
+- **The metadata we write is a subset.** `config` writes the eleven `LoraConfig` arguments that describe the adapter
+  and state what the port implements. PEFT 0.21.2's `to_dict()` has 41 entries, and `LoraConfig(**metadata)` raises on
+  one it does not know, so a full dump from one PEFT version can fail to load in another.
+  `test_config_is_a_subset_of_pefts` checks every entry we write equals PEFT's for the same adapter, and that PEFT
+  builds the same config back from ours.
+- **Refused, not ignored:** DoRA (diffusers drops `dora_scale` with a warning), rsLoRA, a LoRA bias,
+  `fan_in_fan_out`, any key that is not a `lora_A` / `lora_B` weight, half a pair, a rank in the metadata that is not
+  the tensors', and a file holding both `transformer.` and `transformer_ref.` adapters unless told which.
+- **Not read:** PEFT's own folder format (`adapter_config.json` beside `adapter_model.safetensors`), and the older
+  diffusers `lora.down` / `lora.up` key style.
+
+The file tests go both ways. diffusers writes and we read: `test_diffusers_file_loads_in_mlx` (both layouts, two
+(rank, alpha) pairs) and `test_rank_and_alpha_patterns_from_diffusers`. We write and diffusers reads:
+`test_mlx_file_loads_in_diffusers` (both layouts) and `test_mixed_ranks_and_alphas_to_diffusers`, which also check
+that every PEFT layer ends up with our rank, alpha and scaling. Each compares the tiny transformer's forward and has
+guards: the adapter must move the output, and so must its scaling.
+
+## 2. Adapters in the original checkpoint's key names
+
+LoRAs trained outside diffusers name the original checkpoint's modules, which differ from diffusers' in names and in
+two layouts: the original fuses q, k and v into one projection, and orders the two halves of the feed-forward's first
+projection the other way round. diffusers converts such a file on loading. Its docstring lists the producers it
+knows:
+
+{{ code(CONV, lines=(3342, 3360), root=DM) }}
+
+`lora.convert_original` is that function, branch for branch. `lora.read` calls it when a key carries one of the
+original names (`is_original_layout`, the mixin's test in §1.5).
+
+### 2.1 Prefixes and flattened names
+
+{{ code(CONV, lines=(3361, 3403), root=DM) }}
+
+{{ code('src/h3mlx/lora.py', var='_FLATTENED') }}
+
+Ours is the same sequence: drop `diffusion_model.`, note and strip DiffSynth's `.default.` infix, and match
+musubi-tuner's flattened names against the same ten patterns.
+
+### 2.2 The alpha fold
+
+{{ code(CONV, lines=(3405, 3424), root=DM) }}
+
+A kohya-style file stores an `.alpha` scalar beside each pair. The converter multiplies `alpha / rank` into the two
+matrices, balancing the factor between them, and drops the scalar. The result therefore has scaling 1.
+
+{{ code('src/h3mlx/lora.py', function='convert_original', marker='alpha-fold') }}
+
+- **The products round as torch's.** The fold multiplies each matrix by a Python float, so it uses `times_scalar`
+  (§1.1). With bf16 or float16 matrices and a rank that is not a power of two, MLX's plain product gives other bits;
+  `test_converts_to_diffusers_dicts` runs rank 6 for that reason.
+- **A bad alpha is refused. This differs from diffusers on purpose.** Their loop halves `scale_up` while
+  `scale_down * 2 < scale_up`, with no check on alpha. With alpha 0 it runs until `scale_up` underflows, 1,075 turns,
+  and both matrices come out zero. With a negative alpha `scale_down` falls to −∞, `scale_up` to 0, and the condition
+  stays true: it never returns. A NaN skips the loop and writes NaNs. Ours raises on an alpha that is zero, negative
+  or not finite. `test_bad_alpha_is_refused` runs their converter on alpha 0 and shows the zeros; it does not run it
+  on a negative alpha, and uses a transcription of the loop with a cap on its turns instead.
+- **The alpha is applied once.** A converted adapter has no metadata, so `read` gives every module alpha equal to its
+  rank. A plain `alpha` entry in the file's header is one network alpha for a file with no `.alpha` tensors, and is
+  ignored when the file has them, as in the mixin (§1.5). `test_converted_adapter_gives_the_same_forward` checks the
+  scaling is 1 and that no `lora_scaling` key is attached, and that applying `alpha / rank` again would move the
+  output; `test_header_alpha_with_a_converted_file` checks both header cases against diffusers.
+
+### 2.3 The fused QKV projection
+
+{{ code(CONV, lines=(3464, 3495), root=DM) }}
+
+{{ code('src/h3mlx/lora.py', function='convert_original', marker='qkv-split') }}
+
+`lora_A` is shared by the three projections and `lora_B` is cut in thirds. A DiffSynth-Studio file keeps the raw
+checkpoint's row order, q, k and v interleaved per head, and is reordered first.
+
+- **The head width is an argument. This differs from diffusers on purpose.** Theirs is fixed at 128, the width of
+  every released partition, and reads the head count off the row count. Ours takes `head_dim`, 128 by default, so a
+  model with another width can be converted by passing its config's `attention_head_dim`.
+  `test_diffsynth_rows_by_head_width` ties an index formula to their result at 128, then checks ours against the same
+  formula at the tiny model's width of 32, where theirs refuses the file.
+
+### 2.4 The feed-forward halves, and the rest
+
+{{ code(CONV, lines=(3497, 3532), root=DM) }}
+
+{{ code('src/h3mlx/lora.py', function='convert_original', marker='fc1-swap') }}
+{{ code('src/h3mlx/lora.py', var='_STANDALONE') }}
+
+The original computes `fc2(silu(gate) * value)` from a fused `[gate; value]`, diffusers' SwiGLU `value * silu(gate)`
+from `[value; gate]`, so `lora_B`'s two halves swap and `lora_A` is untouched. Leftover keys are an error on both
+sides.
+
+- **Converted, then refused at attach.** The converter also maps LoRAs on the AdaLN projections and on the patch,
+  condition and final projections, as theirs does. Our forward runs no LoRA there (§1.3), so `attach` refuses such an
+  adapter instead of dropping part of it. The mixin's comment in §1.5 says published H3 LoRAs carry rank-16 LoRAs on
+  the AdaLN projections: those files convert here but do not attach. Wiring `adaln_proj` through `plinear`, and through
+  the modulation cache, is not done.
+
+### 2.5 The tests
+
+`tests/test_lora_convert.py` writes random adapters in five layouts: `diffusion_model.`-prefixed, bare, kohya
+(`lora_down` / `lora_up` / `.alpha`), musubi-tuner's flattened names, and DiffSynth's.
+
+| test | pins |
+| --- | --- |
+| `test_converts_to_diffusers_dicts` (5 layouts × 3 dtypes × 2 ranks) | every module the converter knows: the same keys in the same order and the same tensors as diffusers', bit for bit, in float32, bf16 and float16 |
+| `test_what_the_conversion_does` | without diffusers: q, k and v share `lora_A`; `lora_B` in thirds; the swapped halves; `B·A` scaled by `alpha / rank` |
+| `test_diffsynth_rows_by_head_width` (×2) | the de-interleave at head width 128 (theirs) and 32 (ours, by formula) |
+| `test_converted_adapter_gives_the_same_forward` (×5) | the tiny transformer's forward against the mixin's `lora_state_dict` + `load_lora_adapter`; guards per layout |
+| `test_header_alpha_with_a_converted_file` (×2) | a header `alpha` used, and ignored beside `.alpha` tensors |
+| `test_refusals_shared_with_diffusers`, `test_bad_alpha_is_refused` (×4), `test_unwired_converted_modules_are_refused_at_attach`, `test_layout_detection` | the errors both sides raise; ours alone; attach's refusal; which keys count as original |
+
+## 3. The forward process, the target and the loss
+
+The scheduler works in `t = 1 − sigma`, with `t = 1` clean. Its own notes state the sign:
+
+{{ code(SCH, lines=(20, 24), root=DM) }}
+
+### 3.1 The forward process
+
+{{ code(SCH, function='MiniMaxH3Scheduler.scale_noise', root=DM) }}
+
+{{ code('src/h3mlx/train.py', function='scale_noise') }}
+
+The two branches are different arithmetic, and the port keeps both:
+
+- **A Python float** keeps `1 − t` in double precision until it meets the noise. In half precision each product is
+  torch's `tensor * python_float`, so `times_scalar` again.
+- **An array** is cast to the sample's dtype first, so `1 − t` is taken in float32 (or bf16). This is the expression
+  `image.generate` already noises its pictures with; `test_float_and_array_timesteps_differ_as_in_the_scheduler`
+  checks that, and that the two branches really differ.
+
+`test_scale_noise_with_a_float_is_the_schedulers` (5 timesteps × float32, bf16, float16) and
+`test_scale_noise_with_an_array_is_the_schedulers` (a 0-d timestep, one per example, one shaped for the rows) are bit
+for bit against the scheduler.
+
+### 3.2 The target
+
+diffusers has no function for the training target of this model. It is fixed by the scheduler's step:
+
+{{ code(SCH, lines=(313, 329), root=DM) }}
+{{ code('src/h3mlx/ops.py', function='flow_step') }}
+
+With `x_t = t·x_0 + (1 − t)·noise` and `x_0 = x_t + (1 − t)·v`, the model's output must satisfy
+`(1 − t)·v = (1 − t)·(x_0 − noise)`. So the target is `x_0 − noise` at every `t`.
+
+{{ code('src/h3mlx/train.py', function='velocity_target') }}
+
+Under the usual convention the notes above quote, `x_0 = x_t − sigma·v`, the target is `noise − x_0`: the same
+velocity with the other sign, and the wrong one for this model. Three tests fail if the sign is flipped:
+
+- `test_one_euler_step_along_the_target_lands_on_x0` (4 timesteps): noise a sample, take the target as the model's
+  output, step to sigma 0 with the scheduler's `step` and with our `flow_step`. Both return `x_0` within 4e-6. The
+  test also runs the flipped target and checks it lands at `2·x_t − x_0`, more than a thousand tolerances away.
+- `test_target_is_the_velocity_the_step_equation_implies`: solves the step equation for `v` in float64 without our
+  function and compares.
+- `test_loss_sees_the_sign_of_the_target`: a prediction that satisfies the step equation has a loss below 1e-10
+  against our target, and `4·mean((x_0 − noise)²)` against the flipped one.
+
+### 3.3 The loss
+
+{{ code('src/h3mlx/train.py', function='flow_match_loss') }}
+
+- **The oracle is torch's `mse_loss`,** on float32 casts of both inputs (`test_loss_is_torchs_mse`, including a bf16
+  prediction against a bf16 target, where squaring in bf16 would be wrong in the third digit). The weighted form, each
+  example's mean of `w · err²` and then the mean over examples, is written out in torch in `test_weighted_loss`; it is
+  not taken from a trainer. `test_loss_gradient_is_torchs` compares the gradient with respect to the prediction.
+- **Which rows.** The loss averages whatever it is given, so the caller passes the generated video rows and nothing
+  else. They are picked by the layout, as `denoise` picks them, and not by timestep. The table of distinct timesteps
+  shrinks as `t` rises: on the tests' ref2va layout it is `[0.5, 0.999, 1.0]` at `t = 0.5`, two values at
+  `t = 0.9995`, where the generated rows and the condition rows (held at `max(t, 0.999)`) share one, and a single
+  value at `t = 1`. Building the example and its rows is a later piece.
+
+## 4. Sampling the noise level and weighting the loss
+
+### 4.1 The density
+
+{{ code(TU, function='compute_density_for_timestep_sampling', root=DM) }}
+
+{{ code('src/h3mlx/train.py', function='density_for_timestep_sampling') }}
+
+The draw is torch's own call on a torch generator, so the stream is theirs. The arithmetic after it is numpy float32
+in their order. What that gives, over 40 seeds and batch sizes from 1 to 1,000 (`test_density_matches_diffusers`):
+
+| scheme | against torch | why |
+| --- | --- | --- |
+| uniform (the default branch) | bit for bit | the draw and nothing else |
+| `logit_normal` | within 2 float32 steps (the test allows 4) | numpy's `exp` in the sigmoid is not torch's |
+| `mode` | within 6 float32 steps (the test allows 12) | numpy's `cos` is not torch's, and the subtraction that follows magnifies it |
+
+`test_density_guards` checks that swapped arguments and a wrong scheme are far outside those allowances, that two
+calls on one generator continue its stream, and that no generator means torch's global one.
+
+### 4.2 The loss weighting
+
+{{ code(TU, function='compute_loss_weighting_for_sd3', root=DM) }}
+
+{{ code('src/h3mlx/train.py', function='loss_weighting_for_sd3') }}
+
+Bit for bit, for float32 and float64 input (`test_loss_weighting_is_diffusers`). Two details carry that: torch
+computes `sigma ** -2.0` as `1 / (sigma * sigma)`, which `np.power` does not match in the last bit, and `sigma_sqrt`
+returns float32 even from float64 while `cosmap` keeps the input's dtype. `sigma` means the noise level in SD3's
+convention and in this model's, so the functions apply as they are.
+
+### 4.3 The grid and the lookup
+
+MiniMax H3's scheduler has a sampling grid and no training grid. The port builds the levels to train at from its own
+`ops.flow_sigmas`, which is that scheduler's `linspace` branch, bit for bit (main guide):
+
+{{ code(SCH, lines=(168, 179), root=DM) }}
+{{ code('src/h3mlx/ops.py', function='flow_sigmas') }}
+
+{{ code('src/h3mlx/train.py', function='training_sigmas') }}
+{{ code('src/h3mlx/train.py', function='sample_sigmas') }}
+
+- **The grid** is `flow_sigmas(num_points + 1, shift)` without its terminal 0: `num_points` levels from 1.0 (pure
+  noise) down to the shifted `1 / num_points`. At sigma 0 the sample is clean and there is nothing to predict.
+  `test_training_sigmas_are_the_schedulers` checks it is `MiniMaxH3Scheduler`'s grid bit for bit at six sizes and
+  shifts, and that `1 − sigma` is the scheduler's `timesteps`.
+- **Against the generic flow-match scheduler.** `FlowMatchEulerDiscreteScheduler` builds its training sigmas as
+  `k / n` shifted by the same formula:
+
+{{ code('src/diffusers/schedulers/scheduling_flow_match_euler_discrete.py', lines=(127, 133), root=DM) }}
+
+  They are the same levels by other arithmetic: within 3 float32 steps of ours at 1,000 points and shift 12, and not
+  equal. The test asserts both.
+- **No defaults.** The shift and the number of points are arguments. This module does not choose them.
+- **The lookup** is `grid[floor(u · n)]` with the product in float32. diffusers has no library function for it; the
+  tests write it in torch (`(u * n).long()`). The float32 product matters: `float32(0.005) · 1000` rounds up to 5.0,
+  where a float64 product gives 4 (`test_sample_sigmas_lookup`).
+- **`u = 1.0` is kept on the last level. This differs from the torch lookup,** which indexes one past the end and
+  raises. It can happen: the sigmoid rounds to 1.0 for a large normal draw, and `mode` maps a draw of 0 to 1.0.
+- **A million levels don't fit.** At shift 12 the float32 grid merges neighbours somewhere between 100,000 and
+  1,000,000 points; `training_sigmas` raises instead of returning fewer levels than asked.
+
+From a seed to sigmas, against the torch chain (diffusers' density, the scheduler's grid, the lookup):
+
+| density | result |
+| --- | --- |
+| uniform | the same sigmas, bit for bit (`test_same_seed_same_sigmas_uniform`, 40 seeds × 3 grids) |
+| `logit_normal`, `mode` | the same level except when `u` sits within a step or two of a boundary: at most 1 of 40,000 draws moved, to the neighbouring level, in each of five cases (`test_same_seed_nearly_same_sigmas_otherwise` allows 20) |
+
+## 5. What each test would catch
+
+Each wrong implementation below was made on a copy of the sources and run against the tests; the named test failed.
+
+| wrong implementation | caught by |
+| --- | --- |
+| `plinear` ignores the scaling; the scaling inverted | `test_plinear_scaling_matches_peft_linear`, `test_diffusers_file_loads_in_mlx` |
+| the scaling applied with MLX's own half-precision product | `test_half_precision_scaling_rounds_as_torch` |
+| Kaiming fan taken from the rank; gain for `a = 0` | `test_kaiming_uniform_is_torchs` |
+| `lora_B` not zero; adapter created in bf16 | `test_init_is_a_float32_no_op` |
+| `keep_dtype` ignored | `test_adapter_dtypes_follow_peft` |
+| no metadata: one rank's alpha for every module | `test_no_metadata_is_scaling_one` |
+| pattern keys matched as plain suffixes; alpha pattern ignored on read or dropped on write | `test_pattern_key_is_pefts`, `test_rank_and_alpha_patterns_from_diffusers`, `test_mixed_ranks_and_alphas_to_diffusers` |
+| metadata keys written without the prefix | `test_mlx_file_loads_in_diffusers` |
+| header `alpha` ignored | `test_header_alpha_is_one_network_alpha` |
+| delta weight unscaled; merge with the wrong sign | `test_merged_equals_unmerged` |
+| unwired targets accepted | `test_refusals` |
+| feed-forward halves not swapped; q, k, v in another order; no de-interleave; a wrong rename | `test_converts_to_diffusers_dicts` |
+| alpha not folded, or all of it put on `lora_A`; folded with MLX's half-precision product | `test_converts_to_diffusers_dicts` (the last at rank 6) |
+| alpha applied again after the fold | `test_header_alpha_with_a_converted_file` |
+| a NaN or negative alpha accepted; leftover keys ignored | `test_bad_alpha_is_refused`, `test_refusals_shared_with_diffusers` |
+| target `noise − x_0` | `test_one_euler_step_along_the_target_lands_on_x0` |
+| sample and noise swapped; `1 − t` of a float taken in float32; a half-precision product done MLX's way | `test_scale_noise_with_a_float_is_the_schedulers` |
+| loss summed, computed in bf16, weight ignored, weights on the wrong examples | `test_loss_is_torchs_mse`, `test_weighted_loss` |
+| logit-normal's mean and std swapped, or drawn as `randn * std + mean`; `mode` without `− 1 + u` or with `cos(pi·u)`; the generator ignored | `test_density_matches_diffusers` |
+| `sigma_sqrt` as `1 / sigma` or by `np.power`; `cosmap` without the square | `test_loss_weighting_is_diffusers` |
+| grid one point short, with its terminal 0, or ascending | `test_training_sigmas_are_the_schedulers` |
+| lookup rounded instead of floored, in float64, or unclipped | `test_same_seed_same_sigmas_uniform`, `test_sample_sigmas_lookup` |
+
+One change made no test fail and is not a defect: taking an array timestep's `1 − t` in float64 and rounding gives
+the float32 result, because that subtraction is a single correctly rounded operation either way.
+
+## 6. Not done, and open
+
+- **No training.** No loop, no gradient test against torch, no memory-bounded backward pass, no optimizer step, no
+  latent or text caches, no script, and no run on real weights. The pieces here have not been used together.
+- **Two adapters on one `Linear`** (a frozen one beside a trainable one) are refused. PEFT's forward casts the input
+  inside its loop over active adapters (§1.1's extract), which will matter then.
+- **The example builder.** Which rows are noised, at which timesteps, what the audio rows hold during image training,
+  and how condition rows are treated are not decided here. §3.3 says only what the loss needs from it.
+- **A step-distilled base.** P-H3-Image samples in 8 steps without guidance. Whether a plain flow-matching loss on it
+  keeps that behaviour is untested here.
+- **LoRAs on the AdaLN projections** convert but do not attach (§2.4).
+- **Density and weighting defaults.** None are chosen. The tests cover the functions, not which settings suit this
+  model.
+- **bf16.** Every forward test of an adapter here is float32, except `test_adapter_dtypes_follow_peft`, which is one
+  forward on four tiny layers. Gradients in bf16 are untested.
+- **Real files.** No published adapter was read by this code; the tests write their own. Layout details of real
+  files that the converter's docstring does not mention would not be caught.

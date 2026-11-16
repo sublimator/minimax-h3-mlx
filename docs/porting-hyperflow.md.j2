@@ -131,8 +131,10 @@ Two facts set the port's arithmetic:
    match. The two products each round in that dtype, the scaled delta is added to the base result, and the sum is
    cast back to the base result's dtype.
 
-`plinear` does the same. The `* scaling` is left out because `check_plan` refuses any file whose alpha/rank isn't
-exactly 1, and multiplying by 1.0 is exact.
+`plinear` does the same. For HyperFlow the `* scaling` is left out because `check_plan` refuses any file whose
+alpha/rank isn't exactly 1, and multiplying by 1.0 is exact. (`plinear` multiplies only when the weights carry a
+`lora_scaling` entry, which the general adapter loader adds for other scalings: `docs/porting-lora-training.md`, §1.1.
+`hyperflow.attach` never adds one.)
 
 {{ code('src/h3mlx/ops.py', function='plinear') }}
 

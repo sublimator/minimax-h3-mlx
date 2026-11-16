@@ -8,7 +8,8 @@ Two models in [MLX](https://github.com/ml-explore/mlx), for Apple silicon:
 
 Both were built op by op and tested against their implementations in
 [diffusers](https://github.com/huggingface/diffusers) (`transformer_minimax_h3.py`, `scheduling_minimax_h3.py`,
-`modular_pipelines/minimax_h3/`, `modular_pipelines/p_h3_image/` and the autoencoders) on small random tensors.
+`modular_pipelines/minimax_h3/`, `modular_pipelines/p_h3_image/` and the autoencoders) on small random tensors. The
+LoRA code is tested the same way against [PEFT](https://github.com/huggingface/peft) and diffusers.
 
 ## What's here
 
@@ -21,21 +22,26 @@ Both were built op by op and tested against their implementations in
   transformer calls instead of 49.
 - **P-H3-Image:** both workflows end to end, its text connector, the single-frame image decoder, and its prompt
   upsampler (Qwen3.5-9B, via mlx-vlm). It reuses H3's transformer, packing and denoise loop unchanged.
+- **LoRA adapters, and the first pieces of training:** `h3mlx.lora` reads and writes adapters in diffusers' format
+  (any rank and alpha), converts ones saved under the original checkpoint's key names, and attaches or merges them;
+  `h3mlx.train` has the forward process, the training target, the loss and the noise-level sampling. There is no
+  training loop yet, and nothing has been trained with it.
 - **Porting guides:** [`docs/porting.md`](docs/porting.md) (diffusers -> h3mlx),
-  [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md) and
-  [`docs/porting-p-h3-image.md`](docs/porting-p-h3-image.md), side by side, with permalinks to the originals. Each
-  is rendered from its `.md.j2` template with [projected-source](https://github.com/sublimator/projected-source); the
-  template's header says which upstream checkouts it reads.
+  [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md),
+  [`docs/porting-p-h3-image.md`](docs/porting-p-h3-image.md) and
+  [`docs/porting-lora-training.md`](docs/porting-lora-training.md), side by side, with permalinks to the originals.
+  Each is rendered from its `.md.j2` template with [projected-source](https://github.com/sublimator/projected-source);
+  the template's header says which upstream checkouts it reads.
 
 ## Tests
 
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 228 tests and skips 70. Those 70 need the releases' tokenizers, processors,
+No weights are needed. A plain clone runs 396 tests and skips 70. Those 70 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header. These files aren't shipped here because they
 belong to MiniMax, Video Rebirth and Pruna. Fetch them from Hugging Face at pinned revisions (about 50 MB, no weights)
-and all 298 run:
+and all 466 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest

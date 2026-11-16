@@ -266,6 +266,7 @@ def convert_original(state_dict: dict, head_dim: int = HEAD_DIM) -> dict:
             return None
         down = sd.pop(base + down_suffix)
         up = sd.pop(base + up_suffix)
+        #@@start alpha-fold
         alpha = sd.pop(base + ".alpha", None)
         if alpha is not None:
             if not alpha.item() > 0 or math.isinf(alpha.item()):
@@ -276,6 +277,7 @@ def convert_original(state_dict: dict, head_dim: int = HEAD_DIM) -> dict:
                 scale_down *= 2
                 scale_up /= 2
             down, up = ops.times_scalar(down, scale_down), ops.times_scalar(up, scale_up)
+        #@@end alpha-fold
         return down, up
 
     out = {}
@@ -294,6 +296,7 @@ def convert_original(state_dict: dict, head_dim: int = HEAD_DIM) -> dict:
         for i in range(num_layers):
             source, target = f"{source_prefix}.{i}", f"{target_prefix}.{i}"
 
+            #@@start qkv-split
             qkv = pull(f"{source}.attn.qkv_proj")
             if qkv is not None:
                 down, up = qkv
@@ -313,7 +316,9 @@ def convert_original(state_dict: dict, head_dim: int = HEAD_DIM) -> dict:
                 for proj, up_proj in zip(("to_q", "to_k", "to_v"), mx.split(up, 3, axis=0)):
                     out[f"{target}.attn.{proj}.lora_A.weight"] = down
                     out[f"{target}.attn.{proj}.lora_B.weight"] = up_proj
+            #@@end qkv-split
 
+            #@@start fc1-swap
             fc1 = pull(f"{source}.mlp.fc1")
             if fc1 is not None:
                 down, up = fc1
@@ -323,6 +328,7 @@ def convert_original(state_dict: dict, head_dim: int = HEAD_DIM) -> dict:
                 up_gate, up_value = mx.split(up, 2, axis=0)
                 out[f"{target}.ff.net.0.proj.lora_A.weight"] = down
                 out[f"{target}.ff.net.0.proj.lora_B.weight"] = mx.concatenate([up_value, up_gate], axis=0)
+            #@@end fc1-swap
 
             for source_module, target_module in (("attn.out_proj", "attn.to_out.0"), ("mlp.fc2", "ff.net.2"),
                                                  ("adaln_proj.linear", "adaln_proj.linear")):
