@@ -306,12 +306,20 @@ def torch_linspace_f32(start: float, end: float, steps: int) -> np.ndarray:
     return out.astype(np.float32)
 
 
+def usable_shift(shift) -> bool:
+    """Whether a sigma shift is a positive, finite number, as a float32 too (1e39 overflows it, 1e-50 becomes 0).
+    The scheduler tests `shift <= 0` alone, which a NaN passes, and then returns a grid of NaNs; so did this port."""
+    with np.errstate(over="ignore"):
+        shift32 = np.float32(shift)
+    return bool(np.isfinite(shift32) and shift32 > 0)
+
+
 def flow_sigmas(num_inference_steps: int, shift: float) -> np.ndarray:
     """linspace(1, 0, n) in float32, exponential shift, consecutive duplicates collapsed. Terminal 0 included."""
     if num_inference_steps is None or num_inference_steps < 2:
         raise ValueError(f"num_inference_steps must be >= 2, got {num_inference_steps}")
-    if shift <= 0:
-        raise ValueError(f"shift must be positive, got {shift}")
+    if not usable_shift(shift):
+        raise ValueError(f"shift must be positive and finite, got {shift}")
     base = torch_linspace_f32(1.0, 0.0, num_inference_steps)
     shift32 = np.float32(shift)
     sig = (shift32 * base / (np.float32(1) + (shift32 - np.float32(1)) * base)).astype(np.float32)

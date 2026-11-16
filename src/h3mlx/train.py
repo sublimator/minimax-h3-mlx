@@ -174,10 +174,12 @@ def sample_sigmas(u, grid) -> tuple[np.ndarray, np.ndarray]:
     those as `mx.array(1 - sigmas)`.
 
     Every `u` must lie in [0, 1], which a NaN does not: cast to an index a NaN is 0 on this hardware, pure noise for
-    every such draw, here and in the torch lookup. The grid must be one non-empty row of levels."""
+    every such draw, here and in the torch lookup. The grid must be one non-empty row of finite levels."""
     grid = np.asarray(grid)
     if grid.ndim != 1 or grid.size == 0:
         raise ValueError(f"the grid must be one non-empty row of noise levels, got shape {grid.shape}")
+    if not np.isfinite(grid).all():
+        raise ValueError("the grid holds levels that are not finite")
     u = np.asarray(u, dtype=np.float32)
     inside = (u >= 0) & (u <= 1)
     if not inside.all():

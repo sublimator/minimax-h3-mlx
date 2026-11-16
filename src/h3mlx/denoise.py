@@ -20,8 +20,8 @@ KEYFRAME_NOISE_AUG = 0.999
 def shift_grid(raw, shift: float) -> np.ndarray:
     """A raw sigma grid through the exponential shift, `s * sigma / (1 + (s - 1) * sigma)` in float32: HyperFlow's
     `validate_sigmas` + `shift_sigmas` (the formula of `MiniMaxH3Scheduler.set_timesteps`)."""
-    if shift <= 0:
-        raise ValueError(f"`shift` must be positive, got {shift}")
+    if not ops.usable_shift(shift):
+        raise ValueError(f"`shift` must be positive and finite, got {shift}")
     base = np.asarray(raw, dtype=np.float32).reshape(-1)
     if base.size < 2 or not (base[1:] < base[:-1]).all() or base[0] > 1.0 or base[-1] != 0.0:
         raise ValueError(f"a sigma grid must be strictly decreasing from at most 1.0 to exactly 0.0, got {base.tolist()}")

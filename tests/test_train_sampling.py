@@ -164,11 +164,31 @@ def test_training_sigmas_are_the_schedulers(n, shift):
         assert not np.array_equal(grid, generic), "close, and not the same arithmetic"
 
 
+@pytest.mark.parametrize("shift", [float("nan"), float("inf"), 1e39, 1e-50])
+def test_a_shift_that_is_not_a_positive_finite_float32_is_refused(shift):
+    """NaN and infinity pass a `shift <= 0` test, 1e39 is infinite as a float32 and 1e-50 is zero. diffusers' scheduler
+    takes each and returns a grid with NaN in it, and so did the port's grid functions, on the sampling path too.
+    They raise now; valid shifts are untouched (the grid tests above and the scheduler's own are bit for bit)."""
+    from h3mlx import ops
+    from h3mlx.denoise import Schedules, shift_grid
+
+    theirs = h3_sigmas(4, shift).sigmas
+    assert torch.isnan(theirs).any(), "theirs: a grid with NaN, and no error"
+    for build in (lambda: ops.flow_sigmas(5, shift), lambda: train.training_sigmas(4, shift),
+                  lambda: shift_grid([1.0, 0.5, 0.0], shift), lambda: Schedules.make(5, video_shift=shift),
+                  lambda: Schedules.make(5, audio_shift=shift)):
+        with pytest.raises(ValueError, match="must be positive and finite"):
+            build()
+    assert not ops.usable_shift(shift) and ops.usable_shift(12.0) and ops.usable_shift(1e-30)
+
+
 def test_training_sigmas_refusals():
     with pytest.raises(ValueError, match="merges neighbouring"):
         train.training_sigmas(1_000_000, 12.0)  # float32 can't hold a million distinct levels at this shift
     with pytest.raises(ValueError, match="shift must be positive"):
         train.training_sigmas(1000, 0.0)
+    with pytest.raises(ValueError, match="shift must be positive"):
+        train.training_sigmas(1000, -3.0)
     with pytest.raises(ValueError):
         train.training_sigmas(0, 12.0)
     assert not np.array_equal(train.training_sigmas(1000, 12.0), train.training_sigmas(1000, 3.0))
@@ -228,6 +248,9 @@ def test_sample_sigmas_refuses_nan_and_a_bad_grid():
             train.sample_sigmas(u, grid)
     for bad in ([], np.zeros((0,), np.float32), grid.reshape(10, 100), np.float32(0.5)):
         with pytest.raises(ValueError, match="one non-empty row"):
+            train.sample_sigmas([0.5], bad)
+    for bad in (np.float32([1.0, nan, 0.2]), np.float32([float("inf"), 0.5])):  # a level that is not a number
+        with pytest.raises(ValueError, match="not finite"):
             train.sample_sigmas([0.5], bad)
 
 
