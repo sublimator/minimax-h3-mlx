@@ -27,8 +27,11 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
   names, attaches or merges them, and stacks named adapters, a frozen one beside a trainable one. `h3mlx.train` has
   the forward process, the training target, the loss, the noise-level sampling, a training example for one picture
   with or without reference pictures, its loss and gradient, and the optimizer step; `h3mlx.backward` has two ways to
-  take that gradient without holding every block's graph at once. There is no training loop yet, and nothing has been
-  trained with it beyond twelve steps on a tiny random model in the tests.
+  take that gradient without holding every block's graph at once; `h3mlx.cache` keeps encoded examples on disk under
+  keys that change with every input, encode choice and code version. `scripts/train_lora.py` puts them together:
+  every training argument required, a `--plan-only` that opens no weights, limits that stop a run, a run record, and
+  checkpoints it resumes from. **It has run on a tiny random transformer in the tests and never on real weights;**
+  `docs/porting-lora-training.md` §13 lists what a first real run would still need.
 - **Porting guides:** [`docs/porting.md`](docs/porting.md) (diffusers -> h3mlx),
   [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md),
   [`docs/porting-p-h3-image.md`](docs/porting-p-h3-image.md) and
@@ -41,15 +44,15 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 562 tests and skips 71. Those 71 need the releases' tokenizers, processors,
+No weights are needed. A plain clone runs 760 tests and skips 74. Those 74 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header and a public training adapter's header. These
 files aren't shipped here because they belong to MiniMax, Video Rebirth, Pruna and the adapter's publisher. Fetch them
-from Hugging Face at pinned revisions (about 50 MB, no weights) and all 633 run:
+from Hugging Face at pinned revisions (about 50 MB, no weights) and all 834 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest
 
-Or point `H3MLX_FIXTURES` at a copy. Seven of the 71 also need `ffmpeg` and `ffprobe` on the `PATH`.
+Or point `H3MLX_FIXTURES` at a copy. Seven of the 74 also need `ffmpeg` and `ffprobe` on the `PATH`.
 
 The oracle is diffusers main at `d3d8af89` (P-H3-Image isn't in a diffusers release yet); its H3 code is 0.42.1's plus a
 tensor-parallel plan, and the H3 tests pass against both.

@@ -9,7 +9,8 @@
    The training example's recipe (section 6) is a third-party trainer, ostris/ai-toolkit at d6a18ad7 (MIT). It is cited
    by file and line and not quoted: no checkout of it is read by this template.
    Sections 8 and 9 have no library original to quote: their oracles are the plain gradient of section 7 and torch's
-   optimizer, run in the tests. #}
+   optimizer, run in the tests. Sections 10 and 11 (the cache and the training script) are this port's own; what
+   they take from the recipe is cited by file and line, as in section 6. #}
 {% set PEFT = '../peft' %}
 {% set LAYER = 'src/peft/tuners/lora/layer.py' %}
 {% set DM = '../diffusers-main' %}
@@ -35,14 +36,17 @@ against the PyTorch original on small random tensors:
 7. **The example's loss and its gradient** on the transformer (§7).
 8. **A backward pass that does not hold every block at once,** two ways (§8).
 9. **The optimizer step** (§9).
+10. **A cache of encoded examples,** and how reference pictures are sized (§10).
+11. **The training script:** `scripts/train_lora.py`, its plan, limits, record and checkpoints (§11).
 
 In each section the original comes first, then the port, then what changed and which test ties them together. It
 assumes the main guide (`docs/porting.md`) for the transformer and the scheduler, and the HyperFlow guide
 (`docs/porting-hyperflow.md`) for how a LoRA reaches the forward (`ops.plinear`).
 
-**Nothing here trains a real model yet.** There is no training loop, no script and no run on real weights; §11 lists
-what is missing. The pieces have been run together for twelve optimizer steps on a tiny random model (§9), and no
-further. Everything below is weight-free.
+**Nothing here has trained a real model.** There is a training script now (§11), and it has run only on a tiny random
+transformer: it overfits one synthetic example there, stops at its limits and resumes to the same weights. No real
+weights have been loaded by it, no real picture encoded, and §13 lists what a first real run would still need.
+Everything below is weight-free.
 
 **Sources, pinned.**
 
@@ -66,11 +70,13 @@ port takes an argument and has no default.
 | original-layout converter | `lora.convert_original` | diffusers `loaders/lora_conversion_utils.py` | `tests/test_lora_convert.py` (53) |
 | forward process, target, loss | `src/h3mlx/train.py` | diffusers `scheduling_minimax_h3.py`; torch `mse_loss` | `tests/test_train.py` (47) |
 | noise-level sampling, loss weighting | `src/h3mlx/train.py` | diffusers `training_utils.py`, its two schedulers | `tests/test_train_sampling.py` (37) |
-| named adapters on one `Linear` | `src/h3mlx/lora.py`, `ops.plinear` | PEFT `layer.py`; diffusers `load_lora_adapter`, `set_adapters` | `tests/test_lora_stack.py` (12, one of them on a release fixture) |
+| named adapters on one `Linear` | `src/h3mlx/lora.py`, `ops.plinear` | PEFT `layer.py`; diffusers `load_lora_adapter`, `set_adapters` | `tests/test_lora_stack.py` (14, one of them on a release fixture) |
 | one training example | `train.build_example` | diffusers `p_h3_image/before_denoise.py`, `scheduling_minimax_h3.py`; the recipe | `tests/test_train_example.py` (33) |
 | the example's loss and gradient | `train.example_loss`, `train.loss_and_gradients` | torch autograd on diffusers' transformer with PEFT's layers | `tests/test_train_gradients.py` (31) |
-| a bounded backward pass | `src/h3mlx/backward.py` | the plain gradient of the row above | `tests/test_backward.py` (37) |
-| the optimizer step | `train.adamw`, `train.optimizer_step` | `torch.optim.AdamW`, `clip_grad_norm_` | `tests/test_train_optimizer.py` (13) |
+| a bounded backward pass | `src/h3mlx/backward.py` | the plain gradient of the row above | `tests/test_backward.py` (39) |
+| the optimizer step | `train.adamw`, `train.optimizer_step` | `torch.optim.AdamW`, `clip_grad_norm_` | `tests/test_train_optimizer.py` (32) |
+| the cache of encoded examples | `src/h3mlx/cache.py`, `src/h3mlx/files.py` | diffusers `p_h3_image/before_encoder.py` for one sizing rule; the recipe for the other | `tests/test_cache.py` (89, two of them on release fixtures) |
+| the training script | `scripts/train_lora.py`, `src/h3mlx/trainer.py` | none: the pieces above, in order | `tests/test_train_lora.py` (89, one of them on release fixtures) |
 
 ## 1. LoRA adapters
 
@@ -683,6 +689,22 @@ adapter switched off) is merged into the weights and then ignored: the forward r
 exactly zero with no error. PEFT has no such state to get into, because there the trainable parameters are the
 module's own. `test_check_trainable` covers each case.
 
+It also looks at the pair as a whole (`test_the_two_groups_share_nothing_and_make_a_whole_model`):
+
+- **No key in both groups.** Merged, the trainable one wins, so a frozen adapter's matrices handed in beside the
+  trained ones would be trained too.
+- **The two make a model.** Every adapter a `Linear` lists has its matrices in one group or the other. A trainable
+  group that holds only some of the split adapter's modules is refused here, not part of the way through a forward.
+  (The rest of the adapter moved to the frozen side is fine: that is training some modules and freezing the others.)
+
+{{ code('src/h3mlx/lora.py', function='check_config') }}
+
+`check_config` is the third thing a loss checks: the weights and the trainable matrices are the config's. The forward
+runs the config's blocks, so a config of two blocks handed weights and matrices for four ran a two-block model and
+returned gradients of exactly zero for blocks 2 and 3. Now the weights must have the config's blocks and no more,
+and every trainable matrix must sit on one of the config's Linears, in its shape (`test_check_config`,
+`test_a_config_of_fewer_blocks_than_the_weights_is_refused`).
+
 ### 5.4 The public training adapter, by its header
 
 The recipe's assistant for P-H3-Image is a public file. Its safetensors header (keys, shapes and dtypes; no tensor
@@ -716,6 +738,8 @@ can only be found out on real weights.
 | `test_stacking_refusals` | a name twice, on the same modules or on others; a named adapter beside an unnamed one (HyperFlow's included); names with dots; merging onto named adapters; unknown names |
 | `test_the_frozen_half_of_a_split_is_not_a_model` | the forward and `attach` refuse the frozen half; `join` gives back the same weights and the same forward, bit for bit; an updated adapter joined is applied once |
 | `test_check_trainable` | an empty group, a file's keys, a name never attached, an adapter switched off, half a pair, a key that is no adapter's |
+| `test_the_two_groups_share_nothing_and_make_a_whole_model` | a key in both groups; an adapter held in part; the rest of it frozen is allowed and is the same forward |
+| `test_check_config` | weights with more or fewer blocks than the config; a matrix on no Linear of the config, or in another shape or rank |
 | `test_training_adapter_header_fits_p_h3_image` (release fixture) | the public adapter's header against the released config |
 
 ## 6. One training example
@@ -876,6 +900,7 @@ both gradients of §8:
   adapter, runtime names for an adapter that was never attached, and an adapter that `set_active` has switched off
   (`test_the_loss_refuses_matrices_the_forward_would_not_read`, which also shows the zeros through the unchecked
   forward);
+- the weights and the matrices are the config's (`lora.check_config`, §5.3);
 - the text is exactly (1, the layout's text rows, text dim). The forward scatters the text rows into the packed
   sequence with an assignment, and an assignment broadcasts: one row of text would fill every text position
   (`test_the_loss_refuses_a_text_of_the_wrong_shape`).
@@ -1074,6 +1099,8 @@ and the time embedding's, summed over the blocks.
 - **What it costs.** Each block's forward runs twice, once on the way up and once inside its product.
 - **What it skips.** With no trainable matrix before the blocks, nothing needs the time embedding's cotangent, and it
   is never evaluated.
+- **A place to stop.** `after_stage`, when given, is called after every evaluation. The training loop looks at MLX's
+  memory counter there and stops by raising (§11.6).
 
 ### 8.3 Both are the plain gradient
 
@@ -1155,6 +1182,8 @@ The checkpointed path is not asserted on the default device.
 | `test_bounded_gradients_at_other_levels_and_layouts` (×2) | text-to-image and two references, a shared timestep, a loss weight |
 | `test_bounded_gradients_over_a_quantized_base` (×2) | quantized weights captured by a checkpoint, and as constants of each product |
 | `test_bounded_gradients_refuse_what_the_loss_refuses` (×3) | `check_inputs` before anything is computed |
+| `test_a_config_of_fewer_blocks_than_the_weights_is_refused` | weights for four blocks under a config of two: refused by all three gradients, and what they returned unchecked |
+| `test_the_blockwise_gradient_reports_after_every_stage` | the hook a trainer's memory limit uses: called after each evaluation, and an exception in it stops the gradient |
 | `test_stages_cover_every_trainable_key_once` | which stage of the forward each trainable matrix belongs to |
 | `test_a_checkpointed_function_gives_no_gradient_to_what_it_captures` | the first fact about `mx.checkpoint` |
 | `test_an_eval_in_the_loop_defeats_the_checkpoint` | the second |
@@ -1170,6 +1199,18 @@ The original is torch's: `torch.optim.AdamW` after `torch.nn.utils.clip_grad_nor
 update; the gradients scaled by `min(1, max_norm / (norm + 1e-6))`), and checks the result against torch over a run
 of steps. **No hyper-parameter has a default.** The learning rate, the betas, epsilon, the weight decay and the bound
 on the gradient's norm are keyword arguments the caller must give; the recipe's values for them were not read.
+
+**The arguments are checked as torch checks them.** torch's constructor refuses a negative or NaN learning rate,
+weight decay or epsilon, and betas outside [0, 1). MLX's refuses none of these, and a NaN learning rate goes straight
+into every weight. `train.adamw` refuses what torch refuses and three things torch takes
+(`test_adamw_checks_its_arguments_as_torch_does_and_eps`):
+
+- an infinite value;
+- a learning rate that is not a number (MLX takes a schedule there; none is built here);
+- **an epsilon of zero.** A gradient element that is exactly zero has both of Adam's moments zero, and its update is
+  0 / (0 + eps). With an epsilon of zero that is NaN, in torch and in MLX alike
+  (`test_an_epsilon_of_zero_divides_zero_by_zero` runs both). Exact zeros are not rare here: from PEFT's
+  initialisation every element of `lora_A` has one on the first step, because `lora_B` is zero.
 
 ### 9.1 Twelve steps against torch
 
@@ -1228,11 +1269,32 @@ float16 the optimizer's own state breaks first.
 
 - matrices that are not float32 (§9.3);
 - gradients whose keys are not the matrices' keys;
+- **gradients that are not float32 arrays of their matrix's shape.** MLX's optimizer would apply both kinds
+  (`test_two_gradients_the_library_would_apply`, `test_why_a_gradient_must_be_float32`):
+  - a gradient of another shape broadcasts. One of shape (4, 2, 3) for a matrix of (2, 3) returns a matrix of
+    (4, 2, 3) and advances the step count; torch refuses to assign such a gradient at all;
+  - a float16 gradient of 0.001 on a float32 matrix, with ordinary settings, has a finite norm and an update of
+    minus infinity: its second moment and the epsilon are both zero in float16;
+  - a bf16 gradient has its norm summed in bf16 by MLX's clip, which widens float16 gradients and not bf16 ones. The
+    sum stalls: 624 matrices' norm comes out as 45.25 for an exact 72.42, so the clip would be that much too weak.
+  With float32 gradients the clip's sum is float32, and stays the library's: on the same 624 matrices it is within
+  7e-6 of the exact norm, and over the twelve steps of §9.1 it is torch's to 1e-5;
 - a bound on the norm that is not a positive number (`math.inf` clips nothing);
 - a gradient norm that is not finite. torch's clip raises for one only under `error_if_nonfinite`, and otherwise
   the NaN goes into the weights. Here it is always an error, raised before the optimizer's state is touched.
 
-### 9.5 The tests
+### 9.5 Saving the optimizer's state
+
+{{ code('src/h3mlx/train.py', function='optimizer_state') }}
+{{ code('src/h3mlx/train.py', function='restore_optimizer') }}
+
+The state is the step count and Adam's two moments for each matrix; the learning rate is an argument, not state.
+`test_a_saved_optimizer_goes_on_where_it_stopped` takes six steps in one go, and three steps, a round trip of the
+state through a safetensors file into a new optimizer, and three more: the same matrices bit for bit. A new optimizer
+without the state does not give them, and neither do the moments with the wrong step count, which sets the bias
+correction.
+
+### 9.6 The tests
 
 | test | pins |
 | --- | --- |
@@ -1242,9 +1304,345 @@ float16 the optimizer's own state breaks first.
 | `test_mlx_adamw_needs_bias_correction_to_be_torchs` | MLX's default against torch's first step; `train.adamw` against five |
 | `test_half_precision_matrices_do_not_take_updates_of_1e_4` | bf16 and float16 under AdamW at 1e-4 |
 | `test_optimizer_step_refusals` | what the step refuses, with the optimizer's state untouched |
+| `test_two_gradients_the_library_would_apply`, `test_why_a_gradient_must_be_float32` | a gradient of another shape, a float16 one and a bf16 one: what MLX does with each, and that the step refuses them |
+| `test_adamw_checks_its_arguments_as_torch_does_and_eps` (×14), `test_an_epsilon_of_zero_divides_zero_by_zero` | torch's refusals, and the three that go further |
+| `test_a_saved_optimizer_goes_on_where_it_stopped`, `test_optimizer_state_refusals` | the state through a file and back; a state that is not these matrices' |
 | `test_no_hyper_parameter_has_a_default` | every hyper-parameter keyword-only and required |
 
-## 10. What each test would catch
+## 10. A cache of encoded examples
+
+Encoding a picture and a prompt takes the VAE and the text encoder; a training step needs neither. So each example
+is encoded once and kept: an entry holds what `build_example` (§6.2) takes, namely the picture's clean latents, each
+reference picture's latents, the prompt's text rows and their tags. There is no library original for this piece.
+What it takes from elsewhere are two rules for sizing a reference picture: diffusers' and the recipe's.
+
+### 10.1 The request is the key
+
+{{ code('src/h3mlx/cache.py', function='request') }}
+{{ code('src/h3mlx/cache.py', function='key') }}
+
+An entry is asked for by a *request*: one JSON value with everything the entry's numbers depend on. Its sha256 is the
+entry's key, and the two files are named by it. So an entry made any other way is under another name:
+
+| part of the request | what it holds |
+| --- | --- |
+| inputs | the sha256 of the picture's file and of each reference's, in order; the prompt as given |
+| target | the size the picture is trained at, the seed of its posterior sample, whether the sample is rounded through float16, the resampling filter |
+| references | the sizing rule (§10.3), the seed and the rounding of their posterior samples, the release's pixel bounds; absent for an example without references, which then does not depend on any of it |
+| text | the dtype the rows are kept in, and whether the prompt is presented as text-to-image or as an edit |
+| VAE | the dtype policy it was loaded with, and the canvas multiple |
+| encoders | an identity for each of the VAE, the text encoder, the connector, the tokenizer and the processor |
+| versions | a digest of this package's source, and the versions of MLX, numpy, torch, Pillow, transformers, tokenizers and safetensors |
+
+No argument of `request` has a default.
+
+- **The code version** is `code_digest`: the name and sha256 of every `.py` file of the package. It is deliberately
+  wide. Any change to the package, a comment included, makes every entry a miss, and encoding again is cheap beside
+  training on entries made by other code. The libraries are there because the encode runs through them: torch draws
+  the posterior's noise, Pillow resizes, the tokenizer tokenizes.
+- **An encoder's identity** is `identity`: each small file by its sha256, each `.safetensors` file by its name and
+  size. **It does not read the weights,** and so it does not see a weight file replaced by a different one of the same
+  name and size. Hashing the weights at every start would see it; that is not done.
+
+{{ code('src/h3mlx/cache.py', function='code_digest') }}
+{{ code('src/h3mlx/cache.py', function='identity') }}
+
+### 10.2 Two files, written whole, read with suspicion
+
+{{ code('src/h3mlx/cache.py', function='write') }}
+{{ code('src/h3mlx/files.py', function='atomic_write') }}
+{{ code('src/h3mlx/cache.py', function='load') }}
+{{ code('src/h3mlx/cache.py', function='read') }}
+
+- **Format.** `<key>.safetensors` holds the arrays, `<key>.json` the record: the request in full, the arrays' names,
+  dtypes and shapes, and the tensors file's sha256. Nothing is pickled, and the reader loads the tensors as
+  safetensors and as nothing else.
+- **Writing.** Each file is written under a temporary name and renamed, the tensors first and the record last, so an
+  entry exists only once it is whole. A write that fails at any of its four steps leaves nothing behind
+  (`test_a_write_that_fails_leaves_no_entry`); what a killed writer leaves is under a temporary name or without a
+  record, and is not an entry. An entry is written once: a key that already has a record is refused.
+- **What is refused before writing:** arrays that are not the request's (names, shapes, dtypes), a picture's latents
+  that are not in the stated height-to-width ratio, tags that are not 0 or 1, and anything not finite.
+- **Reading.** No record under the key is a miss. A record that is there is checked: its request against the request
+  asked, field by field; its key; the tensors file's digest; the arrays against the record's list. Anything that
+  does not hold is a `CacheMismatch` that says what differs. It is never a miss, which would let a trainer encode
+  over the evidence.
+
+`test_a_changed_input_or_choice_is_not_served_the_old_entry` writes one entry and asks for it with one thing changed,
+twenty-two times: the picture, a reference, their order, the prompt, the size, either seed, either rounding, the
+sizing rule, either dtype, a pixel bound, each encoder's identity. Each is a miss, and the old record, handed to the
+reader on purpose, is refused with the field named. `test_a_changed_code_or_library_version_is_another_key` does the
+same for the source digest and for each library.
+
+### 10.3 Sizing a reference picture: two named rules
+
+{{ code('src/diffusers/modular_pipelines/p_h3_image/before_encoder.py', function='_size_in_area_range', root=DM) }}
+{{ code('src/h3mlx/cache.py', function='scale_down_to_area') }}
+{{ code('src/h3mlx/cache.py', function='reference_sizes') }}
+
+diffusers' edit pipeline and the recipe size a reference differently, and a cache has to say which it used:
+
+| | `"pipeline"` (diffusers, at sampling) | `"recipe"` (the trainer, at training) |
+| --- | --- | --- |
+| for the VAE | the picture's own size, brought to the nearer bound when its area is outside 1 to 8 MP | scaled down to the **target's** pixel area when larger, never up (`src/packing.py:112-124`, called at `minimax_h3.py:1292-1307`) |
+| for the text encoder | about 1 MP, up or down (`_size_at_area`) | scaled down to 1 MP when larger, never up (`p_h3_image.py:304-311`) |
+| depends on the target | no | yes |
+| original to test against | diffusers' two functions | none that runs here |
+
+- **`"pipeline"`** is checked against diffusers' `_size_in_area_range` and `_size_at_area` on 400 random sizes
+  (`test_pipeline_sizing_is_diffusers`).
+- **`"recipe"`** has no runnable original: the trainer was read, not run, and its code is not copied. The rule is
+  three lines of arithmetic, and `test_recipe_sizing_scales_down_to_the_target_and_never_up` checks it against values
+  worked by hand and against its stated properties (never larger than the picture, a multiple of 32 a side, the
+  target's area when the picture has more).
+- **For training, the recipe's rule is the one to state as the source,** because it is what a trainer for this model
+  is known to do. Which rule suits the model better is not known here. The rule is an argument with no default.
+
+The two differ whenever a reference is larger than the target or smaller than the pipeline's lower bound: a 4000×3000
+reference beside a 1024×1024 target is encoded at 1184×896 by the recipe and at 3360×2496 by the pipeline.
+
+**One thing the recipe does that the port does not.** The recipe resizes a reference with torch's antialiased
+bicubic filter on values in [0, 1] and hands the VAE the floats (`minimax_h3.py:1309-1315`, `1327`). The port resizes
+with Pillow's Lanczos filter on 8-bit pixels, as diffusers' pipeline does, for either sizing rule. The filter is
+recorded in the request, and it has one value.
+
+### 10.4 The encode
+
+{{ code('src/h3mlx/cache.py', function='target_picture') }}
+{{ code('src/h3mlx/cache.py', function='encode') }}
+
+`encode` is the only function here that needs weights.
+
+- **The picture** is resized to the stated size and encoded as the pipeline encodes a reference (`vae.encode_condition`):
+  one posterior sample, from a generator seeded with the request's seed, rounded through float16 or not. The recipe
+  also takes a posterior sample for its training pictures, from a generator it does not seed (`minimax_h3.py:720`).
+  A picture whose shape is not the stated one, to within one canvas multiple a side, is refused: nothing is cropped
+  or stretched.
+- **Each reference** is sized by the request's rule and encoded the same way, with the references' seed and rounding.
+- **The text** is the pipeline's: the prompt as written for text-to-image; for an edit, a vision block per reference
+  and the instruction with its `Edit <Picture 1>. ` prefix (the recipe prefixes the same way, `p_h3_image.py:313-322`).
+
+What the tests show, and on what:
+
+- **On a tiny VAE with a stub text side** (`test_a_text_to_image_entry_is_the_direct_encode`): the latents are
+  `encode_condition`'s for the seed and rounding asked, bit for bit; the seed and the rounding each change them; a
+  picture of the stated shape at another size is resized first. Written and read back, the entry builds the example
+  that the direct encode builds.
+- **On the tiny release with its text encoder and processor** (`test_an_edit_entry_is_the_pipelines_conditioning`,
+  which needs the release fixtures): under the pipeline's choices an edit entry's reference latents, text rows and
+  tags are exactly the ones the sampling pipeline makes for the same pictures and instruction, and the sampling
+  pipeline is tested against diffusers. Under the recipe's sizing the references are encoded at the recipe's sizes.
+
+**What cannot be tested without weights.** That the real VAE and text encoder, at real sizes, give latents and text
+rows fit to train on; how long encoding takes and what it needs in memory; and anything about the recipe's own
+encode, which was read in part and not run. The cache returns what was put in it. Whether what was put in is right
+is the encoders' business, and they are tested where they live.
+
+### 10.5 The tests
+
+| test | pins |
+| --- | --- |
+| `test_an_entry_comes_back_as_it_went_in` (×4) | bits, dtypes and shapes through the two files; the entry builds the example |
+| `test_a_changed_input_or_choice_is_not_served_the_old_entry` (×22) | one change, another key, a miss; the old record refused by name |
+| `test_a_changed_code_or_library_version_is_another_key` | the source digest and each library's version |
+| `test_an_example_without_references_ignores_the_reference_choices` | a text-to-image key does not move with them |
+| `test_code_digest_follows_the_source`, `test_identity_reads_no_weights` | every source file by name and content; weights by name and size, unopened |
+| `test_an_entry_put_under_another_requests_name_is_refused`, `test_differences_names_what_differs` | a stale entry made by hand, and the comparison it trips |
+| `test_a_damaged_entry_is_an_error_not_a_miss` (×11) | other tensors, a truncated file, no tensors, a bad record, a pickle or an npz with the record's blessing |
+| `test_a_write_that_fails_leaves_no_entry` (×4), `test_files_a_killed_writer_left_are_ignored`, `test_an_entry_is_written_once`, `test_atomic_write_keeps_the_old_file_when_the_new_one_fails` | whole or absent |
+| `test_tensors_that_are_not_an_entry_are_not_written` (×12), `test_request_refusals` (×20), `test_a_request_has_no_defaults` | what is refused going in |
+| `test_pipeline_sizing_is_diffusers`, `test_recipe_sizing_scales_down_to_the_target_and_never_up` | the two rules |
+| `test_a_text_to_image_entry_is_the_direct_encode`, `test_an_edit_entry_is_the_pipelines_conditioning` (×2, release fixtures) | the encode on tiny encoders |
+
+## 11. The training script
+
+`scripts/train_lora.py` trains an adapter on a list of pictures, from the pieces of §1 to §10 in order. Its mechanics
+are in `src/h3mlx/trainer.py`; the script reads the arguments, the configs and the dataset, fills the cache, and
+loads the weights. There is no original for it. **It has run on a tiny random transformer and on nothing else.**
+
+### 11.1 The arguments: nothing that decides the training has a default
+
+Every option is required, except the ones listed below. Leave one out and the command stops and names it, before
+anything is read (`test_a_missing_argument_is_an_error_that_names_it` drops each of 27 in turn):
+
+| group | arguments |
+| --- | --- |
+| where | `--weights`, `--dataset`, `--cache-dir`, `--run-dir` |
+| the adapter | `--rank`, `--alpha`, `--targets` (which attention and feed-forward matrices), `--refiner` or `--no-refiner` |
+| hyper-parameters | `--learning-rate`, `--betas`, `--eps`, `--weight-decay`, `--max-grad-norm`, `--shift`, `--grid`, `--density`, `--weighting`, `--condition-t`, `--seed` |
+| the encode (§10) | `--latent-seed`, `--latent-float16-round` or its `--no-`, `--vae-dtype`, `--text-dtype` |
+| limits | `--max-steps`, `--max-seconds`, `--max-peak-memory-gb`, `--checkpoint-every` |
+
+Not required, each for a reason (`test_only_the_backward_way_has_a_default` lists exactly these):
+
+- `--logit-mean`, `--logit-std` and `--mode-scale` are required by the density that uses them and refused with one
+  that does not;
+- `--reference-sizing`, `--reference-seed` and `--reference-float16-round` are required when the dataset has an
+  example with references;
+- `--assistant`, a frozen adapter kept active while training (§5), is optional;
+- `--backward` chooses how the gradient is taken with bounded memory. It defaults to `blockwise`, the one whose peak
+  measured flat in the number of blocks (§8.4); `checkpointed` is the other. Both train the same weights
+  (`test_the_two_bounded_gradients_train_the_same_weights`), so this is the one default, and it decides no number;
+- `--plan-only` and `--resume` are the two modes.
+
+No learning-rate schedule: the rate is constant. The recipe's schedule and its optimizer settings were not read.
+
+{{ code('src/h3mlx/trainer.py', function='trajectory') }}
+{{ code('src/h3mlx/trainer.py', function='limits') }}
+
+The arguments fall into two groups. The **trajectory** is everything the trained weights depend on: the model's
+identity and config, the examples' cache keys (and so every encode choice), the adapter, the hyper-parameters, the
+seed, the versions. The **limits** say when a session stops and how often it checkpoints. A run is resumed only with
+the same trajectory; its limits may change.
+
+### 11.2 `--plan-only`
+
+{{ code('src/h3mlx/trainer.py', function='plan') }}
+
+`--plan-only` prints what a run would do and stops. It reads the configs, the dataset file, the pictures' bytes (for
+their digests and sizes), the cache's records and the base weights' safetensors headers. It opens no weights and
+writes nothing. What it prints:
+
+- the examples: each one's cache key, whether the cache has it, its size, and its rows (video, condition, audio, and
+  text when the cache knows it);
+- the steps: how many, how many passes over the examples that is, and where the checkpoints fall;
+- the adapter: which modules, how many, how many parameters;
+- sizes it can compute without weights: the adapter's and the optimizer state's bytes, a checkpoint's, the base
+  weights' bytes by dtype (from the headers), and for the block-by-block gradient the bytes of its saved block inputs
+  (blocks × the longest sequence × hidden size × the blocks' dtype);
+- the cache directory, and every path the run would write.
+
+`test_plan_only_opens_no_weights_and_writes_nothing` runs it with every loader made to raise (`mx.load`, the
+loaders of `h3mlx.load`, `lora.load`, the cache's reader and encoder): it prints the plan, creates no run directory
+and leaves the cache as it was. The numbers it printed are then checked against a real run of the same command: the
+parameter count against the trained adapter's elements, the sizes against the files' arrays, each example's rows
+against the example the builder makes.
+
+What the plan cannot say: peak memory and time. Those are measured, not computed.
+
+### 11.3 What a step draws
+
+{{ code('src/h3mlx/trainer.py', function='step_seed') }}
+{{ code('src/h3mlx/trainer.py', function='example_at') }}
+{{ code('src/h3mlx/trainer.py', function='noise_level') }}
+
+No generator is carried from one step to the next. A step's example, its noise level and its noise each come from a
+generator seeded with the run's seed, the step's number and the stream's, mixed by numpy's `SeedSequence`. The
+adapter's initialisation is seeded the same way, and each picture's posterior sample from `--latent-seed` and the
+picture's digest. So the random state of a run at step k is the pair (seed, k), and a run resumed at step k draws what
+an uninterrupted run draws there. Nothing has to be restored, and nothing can be restored wrongly.
+
+The examples are taken in a new random order on every pass, each once a pass.
+
+### 11.4 The loop is the pieces
+
+`trainer.run` is, per step: `example_at`, `noise_level` (§4), `build_example` (§6), a bounded gradient (§8),
+`optimizer_step` (§9). `test_the_loop_is_the_pieces_in_order` runs six steps of the script with every hyper-parameter
+at a value of its own, and the same six steps written out in the test from those pieces, with the plain gradient
+that §7 tests against torch. The trained matrices agree to 1e-7, and the script's recorded losses and gradient norms
+are the hand-written loop's. A hyper-parameter that did not reach the loop, or reached the wrong place, shows there.
+
+`test_the_loop_overfits_one_example` trains on one synthetic example for 150 steps: its loss at three fixed noise
+levels with fixed noise falls from 2.74 to 1.94, and the record's own losses from 2.59 (the first 30 steps) to 1.96
+(the last 30). That is a tiny random model memorising noise. It shows the loop turns the loss down and nothing about
+what a real model learns.
+
+### 11.5 The record
+
+`run.json` in the run directory is written when the session starts and rewritten atomically (§10.2's
+`atomic_write`) after every step. It holds the trajectory (every argument that decides the weights), the limits,
+the versions, the seed, the plan, the step reached, the status and why it stopped, each session's command line and
+span, and a line per step: the example, the noise level, the loss weight, the loss, the gradient's norm before
+clipping, the seconds and MLX's peak memory (`test_the_record_holds_the_run`).
+
+### 11.6 Limits stop the run
+
+| limit | checked | what happens |
+| --- | --- | --- |
+| `--max-steps` | before each step | the run is finished: the final adapter is written, exit code 0 |
+| `--max-seconds` | before each step, against the session's wall clock | the session ends at the last completed step: a checkpoint, status `stopped`, exit code 3 |
+| `--max-peak-memory-gb` | against `mx.get_peak_memory()`, reset when the session starts: before the first step, after every step, and with the block-by-block gradient after every evaluated block | the step in progress is dropped; the session ends at the last completed step: a checkpoint, status `stopped`, exit code 3 |
+
+None of them warns and goes on. `--max-steps` is a limit and not part of the trajectory: a finished run resumed with
+a higher one goes on, to the weights a run given the higher one from the start reaches.
+
+- `test_the_wall_clock_stops_the_session_and_the_run_resumes` uses a clock that advances a second a reading.
+- `test_the_memory_limit_stops_the_session` sets the limit below what loading takes (the run stops before its first
+  step), and then makes the counter go over in the middle of the fourth step's backward pass: the session ends at
+  step 3, and the checkpoint there holds the weights of an uninterrupted run after three steps.
+- The memory limit is MLX's counter and nothing more. It does not see memory outside MLX, and it stops the run after
+  the peak has happened, not before.
+
+### 11.7 Checkpoints, and resuming
+
+{{ code('src/h3mlx/trainer.py', function='write_checkpoint') }}
+{{ code('src/h3mlx/trainer.py', function='read_checkpoint') }}
+
+A checkpoint is a directory, `checkpoints/step-NNNNNNNN/`: the adapter as a diffusers LoRA file (§1.5), the
+optimizer's state (§9.5), and a record with the step, the losses so far, each file's sha256, a digest of the
+trajectory, and the random state, which is the seed and the next step (§11.3). It is written under a temporary name
+and renamed, so a checkpoint directory is there only when it is whole. One is written every `--checkpoint-every`
+steps and when a session ends.
+
+`--resume` goes on from the latest checkpoint:
+
+- **It refuses another run.** The record's trajectory must be this command's, field for field. A changed learning
+  rate, seed, rank, clip, shift, density, target list, gradient method or encode choice is refused with the field
+  named, and so is a changed version of this package or of a library
+  (`test_a_resume_that_is_another_run_is_refused`, `test_a_resume_under_other_code_or_into_nothing_is_refused`).
+- **It refuses a damaged checkpoint.** A file that is not the one the checkpoint describes, a missing record, a
+  checkpoint of another trajectory or under another step's name: the resume stops and says so. It does not fall back
+  to an older checkpoint (`test_a_damaged_checkpoint_is_refused_not_skipped`).
+- **Steps after the last checkpoint are done again.** The record may be ahead of the checkpoint; the resumed session
+  says how many steps it discards, and the losses come from the checkpoint.
+- A new run refuses a directory that already holds a record.
+
+Two tests of the same claim, that a resumed run ends where an uninterrupted one does:
+
+- `test_a_run_that_dies_resumes_to_the_uninterrupted_runs_weights`: a run made to fail in its eighth step, resumed.
+  The final adapter is the uninterrupted run's byte for byte, and so are the optimizer's state at steps 10 and 12 and
+  the loss at every step.
+- `test_a_killed_process_resumes_to_the_same_weights`: the script as a process of its own, sent SIGKILL once its
+  record shows 20 steps, wherever that lands. Resumed, it reaches step 400 with the uninterrupted run's adapter, byte
+  for byte.
+
+`test_checkpoints_are_whole_or_absent` covers the write itself: a rename that fails leaves no checkpoint directory; a
+writer that dies between the checkpoint's two files with no chance to clean up leaves only a temporary directory,
+which is not resumed from and is cleared by the next session.
+
+Byte-for-byte equality here is on one machine, with adapters on attention and feed-forward matrices. On the default
+device a gradient that passes through a bf16 modulation table can differ by a rounding step from run to run (§7.1),
+so an adapter on those modules would resume to weights that close, not to the same bytes.
+
+### 11.8 From pictures
+
+When the cache lacks an example, the script loads the VAE and the text encoder once, encodes what is missing, writes
+the entries and frees both before the transformer is loaded. `test_a_run_from_pictures_encodes_what_the_cache_lacks`
+runs that on the tiny release (it needs the release's tokenizer and processor files): a text-to-image example and an
+edit example from an empty cache, two entries written, three steps trained; a second run finds both entries, loads no
+encoder and trains the same weights.
+
+On real weights this path has never run.
+
+### 11.9 The tests
+
+| test | pins |
+| --- | --- |
+| `test_a_missing_argument_is_an_error_that_names_it` (×27), `test_only_the_backward_way_has_a_default` | no defaults |
+| `test_arguments_that_do_not_make_a_run_are_refused` (×21), `test_a_dataset_that_is_not_one_is_refused` (×8) | what is refused before anything is read |
+| `test_plan_only_opens_no_weights_and_writes_nothing` | the plan with every loader raising, and its numbers against a real run |
+| `test_the_loop_is_the_pieces_in_order` | six steps against the same steps written out from the tested pieces |
+| `test_the_loop_overfits_one_example` | the loss falls on one example; the adapter file |
+| `test_the_record_holds_the_run` | every argument, the versions, the seed, the step, a line per step; each example once a pass |
+| `test_weighting_and_density_reach_the_loop`, `test_the_two_bounded_gradients_train_the_same_weights`, `test_a_frozen_assistant_is_used_and_not_saved`, `test_a_bf16_base_trains` | the options |
+| `test_the_wall_clock_stops_the_session_and_the_run_resumes`, `test_the_memory_limit_stops_the_session`, `test_max_steps_finishes_the_run_and_a_resume_can_extend_it` | each limit stops the run |
+| `test_a_run_that_dies_resumes_to_the_uninterrupted_runs_weights`, `test_a_killed_process_resumes_to_the_same_weights` | resume, after a failure and after a kill |
+| `test_a_resume_that_is_another_run_is_refused` (×9), `test_a_resume_under_other_code_or_into_nothing_is_refused`, `test_a_damaged_checkpoint_is_refused_not_skipped` (×6) | what a resume refuses |
+| `test_checkpoints_are_whole_or_absent` | atomic checkpoints |
+| `test_every_draw_is_a_function_of_the_seed_and_the_step` | the seeds, pinned; the adapter's start; each picture's posterior seed |
+| `test_a_run_from_pictures_encodes_what_the_cache_lacks` (release fixtures) | the encode path on tiny encoders |
+
+## 12. What each test would catch
 
 Each wrong implementation below was made on a copy of the sources and run against the tests; the named test failed.
 
@@ -1318,6 +1716,28 @@ Each wrong implementation below was made on a copy of the sources and run agains
 | AdamW without bias correction; the weight decay dropped; epsilon, a beta or the learning rate fixed | `test_steps_are_torchs` |
 | no clipping; clipping per tensor; clipping to twice the bound; the norm returned after clipping | `test_steps_are_torchs`, `test_clipping_is_torchs` |
 | half-precision matrices accepted; a non-finite norm applied, or checked after the optimizer's state changed; keys unchecked; a zero or boolean bound accepted | `test_optimizer_step_refusals` |
+| a gradient's dtype, shape or type unchecked, the shape checked only up to broadcasting, or the check made after the optimizer was touched | `test_optimizer_step_refusals` |
+| `adamw` taking a negative, NaN or infinite learning rate or weight decay, a schedule, betas outside [0, 1), or an epsilon of zero; refusing a learning rate of zero | `test_adamw_checks_its_arguments_as_torch_does_and_eps`, `test_mlx_adamw_needs_bias_correction_to_be_torchs` |
+| a key in both groups accepted; an adapter held in part accepted; the rest of an adapter on the frozen side counted as missing | `test_the_two_groups_share_nothing_and_make_a_whole_model`, `test_the_frozen_half_of_a_split_is_not_a_model` |
+| the weights' block count unchecked, or only checked for too many; a matrix on no Linear of the config, in another shape or of another rank accepted; the loss not checking the config; a stray block key filed before the blocks | `test_check_config`, `test_bounded_gradients_refuse_what_the_loss_refuses`, `test_a_config_of_fewer_blocks_than_the_weights_is_refused` |
+| the final-norm op ignoring the gather it is given, for one table or both | `test_norm_out_matches` |
+| the cache key leaving out the versions, the encoders, a seed, a rounding choice or the prompt, or sorting the references; reference choices kept in a text-to-image key | `test_a_changed_input_or_choice_is_not_served_the_old_entry`, `test_a_changed_code_or_library_version_is_another_key`, `test_an_example_without_references_ignores_the_reference_choices` |
+| the code digest of one file, by name only, or by content only; an identity that reads the weights, or ignores their sizes | `test_code_digest_follows_the_source`, `test_identity_reads_no_weights` |
+| the cache reader not comparing the request, the record's key, the tensors' digest, the arrays or the format; a damaged record or missing tensors taken for a miss; the tensors loaded by extension; the comparison blind to a 1 for a True | `test_a_changed_input_or_choice_is_not_served_the_old_entry`, `test_an_entry_put_under_another_requests_name_is_refused`, `test_a_damaged_entry_is_an_error_not_a_miss`, `test_no_pickle_in_the_module`, `test_differences_names_what_differs` |
+| the cache writing non-finite arrays, over an existing entry, straight to the final name, or leaving files behind after a failure; tags or the latents' shape unchecked | `test_tensors_that_are_not_an_entry_are_not_written`, `test_an_entry_is_written_once`, `test_a_write_that_fails_leaves_no_entry` |
+| the recipe's sizing scaling up, flooring, ignoring the target, or taking the pipeline's vision size; the pipeline's sizing without its lower bound | `test_recipe_sizing_scales_down_to_the_target_and_never_up`, `test_pipeline_sizing_is_diffusers` |
+| the encode ignoring the latent seed or rounding, the references' seed or rounding, the text dtype, the picture's shape or the resize; references encoded at the vision size | `test_a_text_to_image_entry_is_the_direct_encode`, `test_an_edit_entry_is_the_pipelines_conditioning` |
+| a step's seed ignoring the step or the stream; the same example order every pass; the adapter's start or a picture's posterior seed ignoring its seed | `test_the_record_holds_the_run`, `test_every_draw_is_a_function_of_the_seed_and_the_step`, `test_the_loop_is_the_pieces_in_order` |
+| the weighting, the weight decay, the clip, the conditioning level, the shift or the references not reaching the loop; the assistant not attached | `test_the_loop_is_the_pieces_in_order`, `test_a_frozen_assistant_is_used_and_not_saved` |
+| a resume without the optimizer's state, from a fresh adapter, or keeping the record's later losses; `--resume` ignored | `test_the_wall_clock_stops_the_session_and_the_run_resumes`, `test_a_run_that_dies_resumes_to_the_uninterrupted_runs_weights` |
+| the optimizer's state restored without its step or its moments, or saved with the moments swapped; a state for other matrices or shapes accepted | `test_a_saved_optimizer_goes_on_where_it_stopped`, `test_optimizer_state_refusals` |
+| no wall-clock limit; no memory limit, one looked at between steps only, or one in the wrong unit; the dropped step applied; a stopped session returning 0; one step too many | `test_the_wall_clock_stops_the_session_and_the_run_resumes`, `test_the_memory_limit_stops_the_session`, `test_plan_only_opens_no_weights_and_writes_nothing` |
+| the block-by-block gradient not reporting after a stage, on the way up or back | `test_the_blockwise_gradient_reports_after_every_stage` |
+| no checkpoint when a session ends; checkpoints a step off; a checkpoint written in place; its files, its trajectory or its step unverified | `test_plan_only_opens_no_weights_and_writes_nothing`, `test_the_record_holds_the_run`, `test_checkpoints_are_whole_or_absent`, `test_a_damaged_checkpoint_is_refused_not_skipped` |
+| a resume that does not compare the trajectory; a trajectory without the versions; a new run over an old one; the latent seed left out of the request | `test_a_frozen_assistant_is_used_and_not_saved`, `test_a_resume_under_other_code_or_into_nothing_is_refused`, `test_a_resume_that_is_another_run_is_refused` |
+| the record written only at the end | `test_a_killed_process_resumes_to_the_same_weights` |
+| the plan's parameters counted on one side, its rows without the references, its saved inputs sized for float32 whatever the base; `--plan-only` reading the weights or making the run directory | `test_plan_only_opens_no_weights_and_writes_nothing`, `test_a_bf16_base_trains` |
+| the shift or the rank given a default; unknown dataset keys ignored; the reference choices not required | `test_a_missing_argument_is_an_error_that_names_it`, `test_a_dataset_that_is_not_one_is_refused`, `test_arguments_that_do_not_make_a_run_are_refused` |
 
 One change in this list is caught by a narrow margin. The block-by-block gradient's forward walk evaluates each block
 before the next; without that evaluation the gradients are the same and only the memory differs, on the default
@@ -1330,30 +1750,50 @@ value before its cast is one such: for a float32 sample it rounds to the same fl
 subtraction is a single correctly rounded operation either way, and only the bf16 cases fail, where the timestep
 must be cast to bf16 before the subtraction.
 
-## 11. Not done, and open
+## 13. Not done, and open
 
-- **No training of a real model.** No loop, no latent or text caches, no script, and no run on real weights. On a
-  tiny random model the pieces have been used together for twelve optimizer steps (§9), and no further.
-- **Memory at real size.** §8's measurements are of a synthetic model with hidden size 96. Which of the three
-  gradients fits 50 real blocks, how long a step takes, and whether the float32 copy the training gather makes
-  (§7.1) matters there, are unmeasured.
-- **The optimizer's state.** `optimizer_step` keeps it in MLX's optimizer object. Saving it and resuming from it are
-  not built, and neither is a learning-rate schedule beyond what MLX's optimizer takes as its learning rate.
+**What a first run on real weights would still need.** None of it is built or measured:
+
+- **A run at real size at all.** The script has loaded a tiny random transformer and nothing else. Its first real
+  step is the first time the block-by-block gradient runs over 50 real blocks, and the first time the encode path
+  runs the real VAE and text encoder.
+- **Memory and time, measured.** `--plan-only` gives the sizes that can be computed (weights, adapter, optimizer
+  state, saved block inputs). The peak of a real step, and how long one takes, are unknown; §8's numbers are from a
+  model of hidden size 96. The memory limit stops a run after MLX's counter has gone over, not before the machine is
+  out of memory.
+- **The recipe's settings.** Which density, loss weighting, learning rate, betas, epsilon, weight decay and clip the
+  recipe uses were not read from its source, and neither was its schedule. The script takes them as arguments and
+  suggests none. The values that were read are in §6.1.
+- **Pictures as they come.** The script takes each example's size from the dataset file and refuses a picture of
+  another shape. There is no bucketing by aspect ratio, no cropping, no captioning, no augmentation and no batch
+  larger than one.
+- **A way to look at the result.** There are no sample pictures during training and no validation loss. An adapter
+  from a checkpoint can be attached and sampled with the existing pipeline by hand; the script does not do it.
+- **The assistant adapter on real weights.** `--assistant` attaches a frozen adapter and is tested on random ones.
+  The public training adapter was read by its header only (§5.4), never loaded onto real weights.
+- **A step-distilled base.** P-H3-Image samples in 8 steps without guidance. Whether a plain flow-matching loss on it
+  keeps that behaviour, with or without the assistant, is untested.
+- **The trained file in diffusers.** The adapter is written in diffusers' format, which §1.5 tests in both directions
+  on tiny models. A file trained by this script has not been loaded into diffusers on real weights.
+- **Housekeeping for long runs.** Every checkpoint is kept (the plan prints their total size); there is no pruning.
+  The whole dataset's entries are held in memory. One process trains on one device.
+
+Open, and not specific to a first run:
+
 - **Sums on the GPU have no fixed order.** A gradient over a bf16 base is repeatable on the CPU stream and can
-  differ by a bf16 rounding step from run to run on the default device (§7.1). Nothing here makes a training run
-  bit-reproducible.
+  differ by a bf16 rounding step from run to run on the default device (§7.1). A resumed run is byte-for-byte an
+  uninterrupted one in the tests, with adapters on attention and feed-forward matrices; with adapters on the modules
+  a modulation table feeds it would be close, not identical.
 - **Other sums in half precision.** The modulation tables' gather was the one place found where MLX's backward adds
   many rows in bf16 on the way to a trainable matrix. A trainable matrix placed somewhere else than a `Linear`, or a
   frozen adapter turned trainable in bf16, would need the same look.
+- **The reference resize.** The recipe resizes references with an antialiased bicubic filter on floats; the port uses
+  Lanczos on 8-bit pixels for both sizing rules (§10.3).
+- **An encoder's identity does not read its weights** (§10.1): a weight file swapped for another of the same name and
+  size is not noticed by the cache or by a resume.
 - **The recipe's unread parts.** How the trainer mixes the picture with noise, how it samples timesteps, its density,
   its loss weighting and its optimizer settings were not read (§6.1). No preset is defined.
-- **A step-distilled base.** P-H3-Image samples in 8 steps without guidance. Whether a plain flow-matching loss on it
-  keeps that behaviour, with or without the assistant adapter, is untested here.
 - **The assistant adapter's values.** Only its header was read (§5.4).
-- **Reference pictures' sizes.** The builder takes latents. Which sizing rule a trainer uses for references is not
-  decided (§6.4).
-- **Density and weighting defaults.** None are chosen. The tests cover the functions, not which settings suit this
-  model.
 - **bf16.** Gradients over a bf16 base are tested on four tiny layers against torch's own error (§7.3), and a run of
   optimizer steps over one only loosely (§9.1). A bf16 product path for the trainable matrices is not built.
 - **Real files.** No published adapter's tensors were read by this code; the tests write their own. Layout details of
