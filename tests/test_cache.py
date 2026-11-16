@@ -10,6 +10,10 @@ import inspect
 import json
 import os
 import shutil
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,7 +63,8 @@ def same(a, b) -> bool:
 
 
 def listing(directory) -> list[str]:
-    return sorted(p.name for p in Path(directory).iterdir())
+    """What is in a cache directory, but for its lock file (which is always there once anything was written)."""
+    return sorted(p.name for p in Path(directory).iterdir() if p.name != cache.LOCK)
 
 
 # --- round trip --------------------------------------------------------------------------------------------------------
@@ -141,6 +146,11 @@ def test_a_changed_code_or_library_version_is_another_key(tmp_path, monkeypatch)
     cache.write(tmp_path, request, arrays_for(request))
     assert request["versions"]["h3mlx"] == cache.code_digest() and request["versions"]["packages"]["mlx"]
     assert set(request["versions"]["packages"]) == set(cache.PACKAGES)
+    # the libraries the encode path computes with: MLX and its vision-language package (the text encoder), torch (the
+    # posterior's noise), Pillow (opening and resizing), transformers with tokenizers and torchvision (the tokenizer
+    # and the processor), numpy, safetensors. Each is installed here, so each has a version in the request.
+    assert set(cache.PACKAGES) == {"mlx", "mlx-vlm", "numpy", "torch", "torchvision", "pillow", "transformers", "tokenizers", "safetensors"}
+    assert all(request["versions"]["packages"][name] for name in cache.PACKAGES)
 
     with monkeypatch.context() as patch:
         patch.setattr(cache, "code_digest", lambda package=None: "0" * 64)
@@ -215,6 +225,19 @@ def test_identity_reads_no_weights(tmp_path):
     weights.write_bytes(b"\0" * 1001)
     assert cache.identity(component) != first
     weights.write_bytes(b"\0" * 1000)
+    # a download tool's bookkeeping, in a hidden folder inside the component: not the component's, and it changes
+    for hidden in (".cache/huggingface/download/config.json.metadata", ".cache/huggingface/.gitignore", ".DS_Store",
+                   ".git/index"):
+        (component / hidden).parent.mkdir(parents=True, exist_ok=True)
+        (component / hidden).write_text("etag-1")
+        assert cache.identity(component) == first, hidden
+        (component / hidden).write_text("etag-2")
+        assert cache.identity(component) == first, hidden
+    (component / "nested").mkdir()
+    (component / "nested" / "config.json").write_text("{}")
+    assert cache.identity(component) != first, "a file in an ordinary folder is the component's"
+    shutil.rmtree(component / "nested")
+    assert cache.identity(component) == first
     weights.rename(component / "model.safetensors")
     assert cache.identity(component) != first
     (component / "model.safetensors").rename(weights)
@@ -389,6 +412,160 @@ def test_files_a_killed_writer_left_are_ignored(tmp_path):
     assert cache.read(tmp_path, request) is None
     cache.write(tmp_path, request, tensors)
     assert same(cache.read(tmp_path, request).text, tensors["text"])
+
+
+# --- one writer publishes at a time ------------------------------------------------------------------------------------
+
+
+def test_a_writer_that_fails_cannot_break_another_writers_entry(tmp_path, monkeypatch):
+    """Two writers of the same key, interleaved as badly as can be arranged: the second starts while the first is
+    in the middle of publishing, between its tensors and its record. Without ownership of the publication the second
+    one committed an entry, and the first one's failure then deleted the tensors under it. Now the first holds the
+    directory's lock while it publishes: the second is refused, told who holds it, and writes nothing; the first
+    one's failure removes its own files and no others; and the key can be written afterwards."""
+    request = ask()
+    tensors = arrays_for(request)
+    real, events = files.atomic_json, []
+
+    def publish_while_another_writer_tries(path, value):
+        if not events:
+            events.append("the first is publishing")
+            assert files.lock_holder(tmp_path / cache.LOCK)["what"].startswith("publishing cache entry")
+            with pytest.raises(files.Busy, match=f"held by process {os.getpid()} .publishing cache entry"):
+                cache.write(tmp_path, request, tensors, wait=0.05)
+            events.append("the second was refused")
+            assert listing(tmp_path) == [f"{cache.key(request)}.safetensors"], "and left nothing of its own"
+            raise OSError("the first one's record write failed")
+        return real(path, value)
+
+    monkeypatch.setattr(files, "atomic_json", publish_while_another_writer_tries)
+    with pytest.raises(OSError, match="record write failed"):
+        cache.write(tmp_path, request, tensors)
+    monkeypatch.undo()
+    assert events == ["the first is publishing", "the second was refused"]
+    assert listing(tmp_path) == [] and cache.read(tmp_path, request) is None
+    assert files.lock_holder(tmp_path / cache.LOCK) is None
+    cache.write(tmp_path, request, tensors)
+    assert same(cache.read(tmp_path, request).latents, tensors["latents"])
+
+
+def test_an_entry_published_meanwhile_is_left_alone(tmp_path, monkeypatch):
+    """The other order: a writer stages its tensors, and before it takes the lock another writer publishes the same
+    key. Under the lock the first finds the record there and stops (`FileExistsError`). It removes its own staged
+    file and nothing of the committed entry, which reads back whole."""
+    request = ask()
+    first, second = arrays_for(request, seed=1), arrays_for(request, seed=2)
+    real = files.exclusive
+    committed = []
+
+    def exclusive_after_another_writer(path, what, wait=0.0):
+        if not committed:
+            committed.append(True)
+            cache.write(tmp_path, request, second)
+        return real(path, what, wait)
+
+    monkeypatch.setattr(files, "exclusive", exclusive_after_another_writer)
+    with pytest.raises(FileExistsError, match="already has an entry"):
+        cache.write(tmp_path, request, first)
+    monkeypatch.undo()
+    assert listing(tmp_path) == [f"{cache.key(request)}.json", f"{cache.key(request)}.safetensors"]
+    assert same(cache.read(tmp_path, request).latents, second["latents"])
+
+
+HOLDING_WRITER = """
+import sys, time, pathlib
+sys.path[:0] = [{src!r}, {tests!r}]
+from h3mlx import cache, files
+from test_cache import ask, arrays_for
+directory = pathlib.Path({directory!r})
+real = files.atomic_json
+def hold_then_fail(path, value):
+    (directory / "holding").write_text("")
+    while not (directory / "let-go").exists():
+        time.sleep(0.005)
+    raise OSError("the record write failed")
+files.atomic_json = hold_then_fail
+request = ask()
+try:
+    cache.write(directory / "cache", request, arrays_for(request))
+except OSError as error:
+    print("failed:", error)
+"""
+
+
+def test_two_processes_writing_one_key(tmp_path):
+    """The same with two real processes. Another process starts writing a key and is held in the middle of its
+    publication (it waits for a file this test creates). While it is there, a write of the same key from this
+    process is refused, naming the other process. The other is then let go and its record write fails: it removes
+    its tensors and exits. The key is free, this process writes it, and the entry reads back whole. The order is
+    fixed by the two marker files, so nothing here depends on timing."""
+    request = ask()
+    tensors = arrays_for(request)
+    script = HOLDING_WRITER.format(src=str(Path(cache.__file__).parents[1]), tests=str(Path(__file__).parent), directory=str(tmp_path))
+    other = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.time() + 60
+        while not (tmp_path / "holding").exists() and other.poll() is None and time.time() < deadline:
+            time.sleep(0.005)
+        assert (tmp_path / "holding").exists(), other.communicate()
+        with pytest.raises(files.Busy, match=f"held by process {other.pid} .publishing cache entry"):
+            cache.write(tmp_path / "cache", request, tensors, wait=0.1)
+        assert cache.read(tmp_path / "cache", request) is None, "nothing is published yet"
+        (tmp_path / "let-go").write_text("")
+        out, _ = other.communicate(timeout=60)
+    finally:
+        if other.poll() is None:
+            other.kill()
+    assert "failed: the record write failed" in out
+    assert listing(tmp_path / "cache") == [], "the failed writer removed what it had put there"
+    cache.write(tmp_path / "cache", request, tensors, wait=5.0)
+    assert same(cache.read(tmp_path / "cache", request).text, tensors["text"])
+
+
+def test_exclusive_is_released_when_its_holder_ends(tmp_path):
+    """`files.exclusive`: one holder at a time; the lock file says who; a taker can wait; and the lock goes with its
+    holder, so a holder that is killed does not leave it stuck."""
+    lock = tmp_path / "x.lock"
+    with files.exclusive(lock, "the first"):
+        holder = files.lock_holder(lock)
+        assert holder["pid"] == os.getpid() and holder["what"] == "the first" and holder["since"]
+        began = time.monotonic()
+        with pytest.raises(files.Busy, match=f"x.lock is held by process {os.getpid()} .the first, since ") as refused:
+            with files.exclusive(lock, "the second"):
+                raise AssertionError("two holders")
+        assert time.monotonic() - began < 0.5 and refused.value.holder == holder
+        with pytest.raises(files.Busy):
+            with files.exclusive(lock, "the second", wait=0.1):
+                raise AssertionError("two holders")
+    assert files.lock_holder(lock) is None and lock.exists()
+
+    released = threading.Event()
+
+    def hold_briefly():
+        with files.exclusive(lock, "briefly"):
+            released.set()
+            time.sleep(0.1)
+
+    thread = threading.Thread(target=hold_briefly)
+    thread.start()
+    released.wait(5)
+    with files.exclusive(lock, "after waiting", wait=5.0):
+        assert files.lock_holder(lock)["what"] == "after waiting"
+    thread.join()
+
+    doomed = subprocess.Popen([sys.executable, "-c", f"import sys, time; sys.path.insert(0, {str(Path(cache.__file__).parents[1])!r})\n"
+                               f"from h3mlx import files\nwith files.exclusive({str(lock)!r}, 'doomed'):\n    print('held', flush=True); time.sleep(120)"],
+                              stdout=subprocess.PIPE, text=True)
+    try:
+        assert doomed.stdout.readline().strip() == "held"
+        with pytest.raises(files.Busy, match=f"held by process {doomed.pid} .doomed"):
+            with files.exclusive(lock, "too early"):
+                pass
+    finally:
+        doomed.kill()
+        doomed.wait()
+    with files.exclusive(lock, "after the kill"):
+        assert files.lock_holder(lock)["what"] == "after the kill"
 
 
 def test_an_entry_is_written_once(tmp_path):
@@ -642,6 +819,73 @@ def test_a_text_to_image_entry_is_the_direct_encode(tmp_path, vae_pair):  # noqa
         cache.encode(c, request, picture, [picture])
 
 
+def with_orientation(tmp_path, pixels, orientation: int) -> Path:
+    """A PNG of these pixels that carries an EXIF orientation tag (lossless, so the pixels are exactly these)."""
+    picture = Image.fromarray(pixels)
+    exif = picture.getexif()
+    exif[0x0112] = orientation
+    path = tmp_path / f"orientation-{orientation}.png"
+    picture.save(path, exif=exif.tobytes())
+    return path
+
+
+def test_a_picture_is_encoded_the_way_it_is_looked_at(tmp_path, vae_pair):  # noqa: F811
+    """A photograph can say "rotate me" in its EXIF data. Every picture an entry is made from is oriented inside the
+    cache, so the same file gives the same entry whoever opened it: `cache.encode` handed the raw opened file, or the
+    cache's own loader's result, encodes the same latents, and they are the latents of the picture as displayed, not
+    as stored. Orientation 3 is the case that would go unnoticed (upside down, the same size); orientation 6 swaps
+    the sides, and the size the cache reports and checks is the displayed one."""
+    _, vae = vae_pair
+    c = tiny_components(vae)
+    rng = np.random.default_rng(6)
+    stored = rng.integers(0, 256, (48, 40, 3), dtype=np.uint8)
+
+    def request_for(height, width):
+        return cache.request(picture=files.sha256_json("p"), references=[], prompt="a dog", height=height, width=width,
+                             latent_seed=7, latent_float16_round=False, reference_sizing=None, reference_seed=None,
+                             reference_float16_round=None, vae_dtype="float32", text_dtype="float32",
+                             settings=TINY_SETTINGS, encoders={n: "tiny" for n in cache.ENCODERS})
+
+    upside_down = with_orientation(tmp_path, stored, 3)
+    with Image.open(upside_down) as raw:
+        assert raw.size == (40, 48) and raw.getexif()[0x0112] == 3
+        from_raw = cache.encode(c, request_for(48, 40), raw, [])["latents"]
+    loaded = cache.load_picture(upside_down)
+    assert np.array_equal(np.asarray(loaded), stored[::-1, ::-1]) and cache.picture_size(upside_down) == (40, 48)
+    from_loader = cache.encode(c, request_for(48, 40), loaded, [])["latents"]
+    displayed = direct_latents(vae, Image.fromarray(np.ascontiguousarray(stored[::-1, ::-1])), 7, False)
+    as_stored = direct_latents(vae, Image.fromarray(stored), 7, False)
+    assert same(from_raw, from_loader) and same(from_raw, displayed) and not same(from_raw, as_stored)
+    assert np.array_equal(np.asarray(cache.oriented(cache.oriented(loaded))), np.asarray(loaded)), "once is enough"
+
+    on_its_side = with_orientation(tmp_path, stored, 6)  # stored 40 wide by 48 high, displayed 48 wide by 40 high
+    assert cache.picture_size(on_its_side) == (48, 40) and cache.load_picture(on_its_side).size == (48, 40)
+    with Image.open(on_its_side) as raw:
+        turned = cache.encode(c, request_for(40, 48), raw, [])["latents"]
+        assert turned.shape == (1, 1, 10, 12, 4)
+        with pytest.raises(ValueError, match="a 48x40 picture does not have the shape of the stated 40x48"):
+            cache.encode(c, request_for(48, 40), raw, [])
+    assert same(turned, direct_latents(vae, cache.load_picture(on_its_side), 7, False))
+    plain = tmp_path / "plain.png"
+    Image.fromarray(stored).save(plain)
+    assert np.array_equal(np.asarray(cache.load_picture(plain)), stored) and cache.picture_size(plain) == (40, 48)
+
+
+def test_what_turns_a_request_into_an_entry_is_in_the_package():
+    """The code digest covers the package and not the scripts. That is enough only if a script cannot change what
+    an entry holds for a given request, so the script has no picture loader and no encoder loader of its own: it
+    opens pictures with `cache.load_picture`, loads the encoders with `cache.load_encoders`, and reads the release's
+    configs with `cache.release_configs`. What it does decide (each picture's posterior seed, the sizes, the
+    choices) is in the request, and so in the key."""
+    script = (Path(cache.__file__).parents[2] / "scripts" / "train_lora.py").read_text()
+    for forbidden in ("PIL", "exif_transpose", "Image.open", "from_pretrained", "load_vae", "load_text_encoder", "config_components"):
+        assert forbidden not in script, forbidden
+    for used in ("cache.load_picture(", "cache.load_encoders(", "cache.release_configs(", "cache.picture_size(", "cache.encode(", "cache.write("):
+        assert used in script, used
+    digest_sources = {p.name for p in Path(cache.__file__).parent.glob("*.py")}
+    assert {"cache.py", "load.py", "image.py", "vae.py", "presentation.py", "pipeline.py"} <= digest_sources
+
+
 @NEEDS_PROCESSOR
 @pytest.mark.parametrize("sizing", cache.SIZING)
 def test_an_edit_entry_is_the_pipelines_conditioning(sizing):
@@ -686,3 +930,30 @@ def test_an_edit_entry_is_the_pipelines_conditioning(sizing):
         assert same(tensors["text"], debug["prompt_embeds"]) and to_np(tensors["text_token_tags"]).tolist() == debug["text_token_tags"].tolist()
     else:
         assert tensors["condition_latents.2"].shape != pipeline_latents[2].shape, "the large reference is scaled down to the target"
+
+
+@NEEDS_PROCESSOR
+def test_a_reference_is_oriented_like_the_picture(tmp_path):
+    """A reference picture with an EXIF orientation, handed to the encode as the raw opened file and as the cache's
+    loader gives it: the same reference latents and the same text rows (the text encoder sees the reference too),
+    and not the ones of the picture as stored."""
+    import test_p_h3_image as T
+
+    c = T.components(T.build())
+    rng = np.random.default_rng(12)
+    stored = rng.integers(0, 256, (40, 48, 3), dtype=np.uint8)
+    path = with_orientation(tmp_path, stored, 3)
+    target = Image.fromarray(rng.integers(0, 256, (48, 64, 3), dtype=np.uint8))
+    settings = dict(reference_min_pixels=E2E["reference_min_pixels"], reference_max_pixels=E2E["reference_max_pixels"],
+                    vision_pixels=E2E["vision_pixels"], canvas_multiple=c.canvas_multiple)
+    request = cache.request(picture=files.sha256_json("target"), references=[files.sha256_json("reference")],
+                            prompt="make it night", height=48, width=64, latent_seed=5, latent_float16_round=False,
+                            reference_sizing="recipe", reference_seed=42, reference_float16_round=False, vae_dtype="float32",
+                            text_dtype="float32", settings=settings, encoders={n: "tiny" for n in cache.ENCODERS})
+    with Image.open(path) as raw:
+        from_raw = cache.encode(c, request, target, [raw])
+    from_loader = cache.encode(c, request, target, [cache.load_picture(path)])
+    as_stored = cache.encode(c, request, target, [Image.fromarray(stored)])
+    for name in ("condition_latents.0", "text"):
+        assert same(from_raw[name], from_loader[name]) and not same(from_raw[name], as_stored[name]), name
+    assert same(from_raw["latents"], as_stored["latents"]), "the target is the same picture in all three"

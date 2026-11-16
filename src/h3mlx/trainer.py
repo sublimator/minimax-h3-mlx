@@ -10,14 +10,19 @@ Two groups of arguments. The *trajectory* is everything the weights depend on: t
 the hyper-parameters, the seed, the versions. A run can only be resumed with the same trajectory. The *limits* say
 when to stop and how often to checkpoint, and may change from one session to the next.
 
-Nothing here loads a model: the caller hands in the weights, or a function that loads them.
+A run directory belongs to one session at a time (`open_run`), and every check that can refuse a run is made there,
+before anything heavy: nothing here loads a model either, the caller hands in functions that do.
 """
 
+import contextlib
 import json
 import math
 import os
 import shutil
+import signal
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import mlx.core as mx
@@ -34,8 +39,12 @@ BACKWARD = {"blockwise": backward.loss_and_gradients_blockwise, "checkpointed": 
 DENSITY = ("uniform", "logit_normal", "mode")
 WEIGHTING = ("none", "sigma_sqrt", "cosmap")
 STREAMS = {"init": 0, "order": 1, "level": 2, "noise": 3}
-FINISHED, STOPPED = 0, 3  # exit codes: the run reached its last step; a limit stopped it before that
-BYTES = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U8": 1, "BOOL": 1}
+FINISHED, STOPPED = 0, 3  # exit codes: the run reached its last step; a limit or a signal stopped it before that
+OUTPUTS = ("run.json", "adapter.safetensors", "checkpoints")  # what a run writes in its directory
+LOCK = "run.lock"  # the run directory's lock file: held by the one session training in it
+# bytes per element of every dtype a safetensors header can name
+BYTES = {"BOOL": 1, "U8": 1, "I8": 1, "F8_E5M2": 1, "F8_E4M3": 1, "I16": 2, "U16": 2, "F16": 2, "BF16": 2,
+         "I32": 4, "U32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8, "C64": 8}
 
 
 class Refused(ValueError):
@@ -43,7 +52,7 @@ class Refused(ValueError):
 
 
 class LimitReached(Exception):
-    """A limit stopped the run. `reason` is `"wall_clock"` or `"peak_memory"`."""
+    """A limit or a signal stopped the session. `reason` is `"wall_clock"`, `"peak_memory"` or `"terminated"`."""
 
     def __init__(self, reason: str, detail: str):
         super().__init__(detail)
@@ -209,6 +218,8 @@ def weights_summary(headers) -> dict:
             if name == "__metadata__":
                 continue
             count += 1
+            if entry["dtype"] not in BYTES:
+                raise ValueError(f"{name} has a dtype this summary does not know the size of: {entry['dtype']!r}")
             size = BYTES[entry["dtype"]] * math.prod(entry["shape"])
             by_dtype[entry["dtype"]] = by_dtype.get(entry["dtype"], 0) + size
     return {"tensors": count, "bytes": sum(by_dtype.values()), "bytes_by_dtype": dict(sorted(by_dtype.items()))}
@@ -333,6 +344,9 @@ def read_checkpoint(path: Path, traj: dict, cfg: dict) -> tuple[int, dict, dict,
             raise Refused(f"{path / name} is missing or is not the file the checkpoint describes")
     if set(described.get("files", {})) != {"adapter.safetensors", "optimizer.safetensors"}:
         raise Refused(f"{path}: the checkpoint does not list its two files")
+    losses = described.get("losses")
+    if not isinstance(losses, list) or len(losses) != step:
+        raise Refused(f"{path}: {step} steps but {len(losses) if isinstance(losses, list) else 'no'} losses")
     adapter = lora.load(path / "adapter.safetensors")
     spec = traj["adapter"]
     modules = adapter_modules(cfg, spec["targets"], spec["refiner"])
@@ -342,9 +356,6 @@ def read_checkpoint(path: Path, traj: dict, cfg: dict) -> tuple[int, dict, dict,
         raise Refused(f"{path}: the saved adapter is not this run's (modules, rank or alpha differ)")
     trainable = {k: v.astype(mx.float32) for k, v in lora.runtime_tensors(adapter, TRAINED).items()}
     saved = mx.load(str(path / "optimizer.safetensors"), format="safetensors")
-    losses = described.get("losses")
-    if not isinstance(losses, list) or len(losses) != step:
-        raise Refused(f"{path}: {step} steps but {len(losses) if isinstance(losses, list) else 'no'} losses")
     return step, trainable, saved, losses
 
 
@@ -358,52 +369,123 @@ def start_adapter(cfg: dict, traj: dict) -> lora.Adapter:
                      seed=step_seed(traj["hyper"]["seed"], 0, "init"))
 
 
-def run(run_dir, traj: dict, lim: dict, cfg: dict, entries: list, load_weights, load_assistant=None, *,
-        resume: bool, plan: dict | None = None, command=None, clock=time.monotonic, log=print) -> int:
-    """Train, or go on training, until a limit stops the session. Returns `FINISHED` (0) when the run has reached
-    `max_steps`, `STOPPED` (3) when the wall clock or the memory limit ended the session first.
+@dataclass
+class Session:
+    """A run directory held by this process and checked, ready to train in (`open_run`)."""
+
+    run_dir: Path
+    trajectory: dict
+    limits: dict
+    cfg: dict
+    resume: bool
+    record: dict  # the run's record: as read on a resume, new otherwise. Nothing has been written yet
+    step: int  # the step training goes on from
+    matrices: dict | None  # the checkpoint's trainable matrices, or None when there is no checkpoint
+    optimizer: dict | None  # the checkpoint's optimizer state
+    losses: list  # the losses up to `step`
+
+
+def _differences(traj: dict, record: dict) -> list[str]:
+    return [a.replace("the entry has", "the record has").replace("missing from the entry", "missing from the record")
+            for a in cache.differences(traj, record.get("trajectory"))]
+
+
+@contextlib.contextmanager
+def open_run(run_dir, traj: dict, lim: dict, cfg: dict, *, resume: bool):
+    """Take a run directory for this process and check that the run can start or go on in it. Yields a `Session`.
+
+    Everything here is cheap and reads only the run directory: no weights are loaded, no example is encoded, and
+    nothing in the directory is changed but its lock file. So a caller does it first, and a run that is refused
+    costs nothing and leaves the directory as it was.
+
+    * **One session at a time.** The directory's lock file, `run.lock`, is held for as long as the session is open
+      (`files.exclusive`: the lock is the process's, so a session that is killed does not leave it held). A second
+      session on the same directory is refused, and told which process holds it.
+    * **A new run** needs a directory that holds none of a run's outputs (`OUTPUTS`: `run.json`,
+      `adapter.safetensors`, `checkpoints`), whether or not there is a record. Nothing is overwritten.
+    * **A resume** needs the record, with exactly this trajectory; the latest checkpoint on disk, which must not be
+      older than the latest one the record lists, and must be whole and this run's (`read_checkpoint`); and a
+      `max_steps` that the run has not already passed. A run whose record lists no checkpoint and that has none on
+      disk goes on from step 0, which is where its record says its last checkpoint is."""
+    run_dir = Path(run_dir)
+    if resume and not run_dir.is_dir():
+        raise Refused(f"{run_dir / 'run.json'}: no readable run record to resume from (no such directory)")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(files.exclusive(run_dir / LOCK, f"training in {run_dir.name}"))
+        except files.Busy as busy:
+            raise Refused(f"the run directory is in use: {busy}. One session trains in a run directory at a time") from None
+        if not resume:
+            there = [name for name in OUTPUTS if os.path.lexists(run_dir / name)]
+            if there:
+                raise Refused(f"{run_dir} already holds {', '.join(there)}: a new run writes {', '.join(OUTPUTS)} "
+                              "and overwrites none of them. Pass resume to go on with the run that is there, or "
+                              "use another directory")
+            record = {"format": RECORD, "trajectory": traj, "seed": traj["hyper"]["seed"],
+                      "versions": traj["versions"], "sessions": [], "step": 0, "losses": [], "checkpoints": []}
+            yield Session(run_dir, traj, lim, cfg, False, record, 0, None, None, [])
+            return
+        record = read_record(run_dir)
+        apart = _differences(traj, record)
+        if apart:
+            raise Refused(f"{run_dir / 'run.json'} is another run: " + "; ".join(apart[:6])
+                          + (f"; and {len(apart) - 6} more" if len(apart) > 6 else ""))
+        listed = max(record.get("checkpoints") or [0])
+        checkpoint = latest_checkpoint(run_dir)
+        found = int(checkpoint.name[5:]) if checkpoint is not None else 0
+        if found < listed:
+            raise Refused(f"{run_dir / 'run.json'} lists a checkpoint at step {listed}, and the latest in "
+                          f"{run_dir / 'checkpoints'} is " + (f"step {found}" if found else "none")
+                          + ": the run is not gone back to an older checkpoint, or to its start, without being told to")
+        step, matrices, saved, losses = (0, None, None, []) if checkpoint is None else read_checkpoint(checkpoint, traj, cfg)
+        if step > lim["max_steps"]:
+            raise Refused(f"the run is at step {step}, past a max_steps of {lim['max_steps']}: nothing to do, and "
+                          "nothing is written")
+        yield Session(run_dir, traj, lim, cfg, True, record, step, matrices, saved, losses)
+
+
+def train_session(session: Session, entries: list, load_weights, load_assistant=None, *, plan: dict | None = None,
+                  command=None, clock=time.monotonic, log=print) -> int:
+    """Train in an open session until a limit or a signal stops it. Returns `FINISHED` (0) when the run has reached
+    `max_steps`, `STOPPED` (3) when the wall clock, the memory limit or a termination signal ended the session first.
 
     `entries` are the examples' cache entries in the trajectory's order. `load_weights()` returns the base weights
     and `load_assistant()` the frozen adapter (`lora.Adapter`) or None; they are called once, after the record is
     written. `clock` is a monotonic clock in seconds.
 
-    * A new run needs a directory without a `run.json`. With `resume` the directory must hold one whose trajectory
-      is exactly this one; the run goes on from its latest checkpoint, or from the start if it has none.
     * The record (`run.json`) is rewritten atomically after every step. Checkpoints are written every
       `checkpoint_every` steps and when the session ends, each atomically.
     * The memory limit is read from MLX's peak-memory counter (reset when the session starts): after every evaluated
       block of the block-by-block gradient, and after every step. Over it, the step in progress is dropped and the
-      session ends at the last completed step."""
-    run_dir = Path(run_dir)
-    record_path = run_dir / "run.json"
+      session ends at the last completed step.
+    * SIGTERM is taken as a request to stop: at the next of the same places the step in progress is dropped, a
+      checkpoint is written at the last completed step, the record says `terminated`, and the function returns. The
+      signal's previous handler is put back when the session ends."""
+    run_dir, traj, lim, cfg, record = session.run_dir, session.trajectory, session.limits, session.cfg, session.record
     hyper, spec = traj["hyper"], traj["adapter"]
     if len(entries) != len(traj["dataset"]):
         raise ValueError(f"{len(traj['dataset'])} examples in the trajectory, {len(entries)} entries")
-    if resume:
-        record = read_record(run_dir)
-        apart = cache.differences(traj, record.get("trajectory"))
-        if apart:
-            raise Refused(f"{record_path} is another run: " + "; ".join(a.replace("the entry has", "the record has").replace(
-                "missing from the entry", "missing from the record") for a in apart[:6])
-                + (f"; and {len(apart) - 6} more" if len(apart) > 6 else ""))
-    else:
-        if os.path.lexists(record_path):
-            raise Refused(f"{record_path} exists: pass resume to go on with that run, or use another directory")
-        record = {"format": RECORD, "trajectory": traj, "seed": hyper["seed"], "versions": traj["versions"],
-                  "sessions": [], "step": 0, "losses": [], "checkpoints": []}
-    run_dir.mkdir(parents=True, exist_ok=True)
     for stale in (run_dir / "checkpoints").glob(f"{files.TMP}*") if (run_dir / "checkpoints").is_dir() else ():
-        shutil.rmtree(stale, ignore_errors=True)
+        shutil.rmtree(stale, ignore_errors=True)  # a dead writer's: this session holds the directory
 
-    checkpoint = latest_checkpoint(run_dir) if resume else None
     started = clock()
-    session = {"started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "command": command, "limits": lim, "resumed": resume,
-               "from_step": None, "to_step": None, "stopped_by": None}
-    record.update(status="running", stop_reason=None, limits=lim, plan=plan if plan is not None else record.get("plan"))
-    record["sessions"].append(session)
+    step, losses = session.step, session.losses
+    discarded = record["step"] - step
+    note = {"started": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "command": command, "limits": lim,
+            "resumed": session.resume, "from_step": step, "discarded_steps": max(discarded, 0), "to_step": None,
+            "stopped_by": None}
+    record.update(status="running", stop_reason=None, limits=lim, plan=plan if plan is not None else record.get("plan"),
+                  step=step, losses=list(losses), checkpoints=[c for c in record["checkpoints"] if c <= step])
+    record.pop("stop_detail", None)
+    record["sessions"].append(note)
     mx.reset_peak_memory()
+    asked_to_stop = []
+    in_main = threading.current_thread() is threading.main_thread()
+    previous = signal.signal(signal.SIGTERM, lambda number, frame: asked_to_stop.append(number)) if in_main else None
 
     try:
+        save_record(run_dir, record)
         base = load_weights()
         assistant = load_assistant() if load_assistant is not None else None
         if (assistant is None) != (traj["assistant"] is None):
@@ -411,21 +493,15 @@ def run(run_dir, traj: dict, lim: dict, cfg: dict, entries: list, load_weights, 
         params = base if assistant is None else lora.attach(base, cfg, assistant, name=ASSISTANT)
         optimizer = train.adamw(learning_rate=hyper["learning_rate"], betas=tuple(hyper["betas"]), eps=hyper["eps"],
                                 weight_decay=hyper["weight_decay"])
-        if checkpoint is None:
-            step, adapter, losses = 0, start_adapter(cfg, traj), []
+        if session.matrices is None:
+            adapter = start_adapter(cfg, traj)
         else:
-            step, matrices, saved, losses = read_checkpoint(checkpoint, traj, cfg)
-            adapter = lora.Adapter(lora.file_tensors(matrices, TRAINED),
+            adapter = lora.Adapter(lora.file_tensors(session.matrices, TRAINED),
                                    {m: spec["alpha"] for m in adapter_modules(cfg, spec["targets"], spec["refiner"])})
         frozen, trainable = lora.split(lora.attach(params, cfg, adapter, keep_dtype=True, name=TRAINED), TRAINED)
-        if checkpoint is not None:
-            train.restore_optimizer(optimizer, trainable, saved)
-        discarded = record["step"] - step
-        record.update(step=step, losses=list(losses),
-                      checkpoints=[c for c in record["checkpoints"] if c <= step])
-        session.update(from_step=step, discarded_steps=max(discarded, 0))
-        save_record(run_dir, record)
-        log(json.dumps({"event": "start", "step": step, "max_steps": lim["max_steps"], "resumed": resume,
+        if session.optimizer is not None:
+            train.restore_optimizer(optimizer, trainable, session.optimizer)
+        log(json.dumps({"event": "start", "step": step, "max_steps": lim["max_steps"], "resumed": session.resume,
                         "examples": len(entries), "trainable_matrices": len(trainable)}))
 
         grid = train.training_sigmas(hyper["grid"], hyper["shift"])
@@ -433,7 +509,9 @@ def run(run_dir, traj: dict, lim: dict, cfg: dict, entries: list, load_weights, 
         limit_bytes = lim["max_peak_memory_gb"] * 1e9
         saved_at = step
 
-        def check_memory():
+        def check():
+            if asked_to_stop:
+                raise LimitReached("terminated", "a termination signal (SIGTERM) asked the session to stop")
             peak = mx.get_peak_memory()
             if peak > limit_bytes:
                 raise LimitReached("peak_memory", f"MLX's peak memory is {peak / 1e9:.3f} GB, over the limit of "
@@ -448,7 +526,7 @@ def run(run_dir, traj: dict, lim: dict, cfg: dict, entries: list, load_weights, 
 
         stopped = None
         try:
-            check_memory()
+            check()
             while step < lim["max_steps"]:
                 if clock() - started > lim["max_seconds"]:
                     raise LimitReached("wall_clock", f"{clock() - started:.1f} s have passed, over the limit of "
@@ -460,7 +538,7 @@ def run(run_dir, traj: dict, lim: dict, cfg: dict, entries: list, load_weights, 
                 example = train.build_example(cfg, entry.text_token_tags, entry.latents, sigma,
                                               Noise(step_seed(hyper["seed"], step, "noise")),
                                               condition_t=hyper["condition_t"], condition_latents=entry.condition_latents)
-                extra = {"after_stage": check_memory} if hyper["backward"] == "blockwise" else {}
+                extra = {"after_stage": check} if hyper["backward"] == "blockwise" else {}
                 loss, grads = gradient(trainable, frozen, cfg, example, entry.text, weight, **extra)
                 loss = float(loss)
                 if not math.isfinite(loss):
@@ -475,7 +553,7 @@ def run(run_dir, traj: dict, lim: dict, cfg: dict, entries: list, load_weights, 
                     checkpoint_now()
                 save_record(run_dir, record)
                 log(json.dumps({"event": "step", **record["losses"][-1]}))
-                check_memory()
+                check()
         except LimitReached as limit:
             stopped = limit
         checkpoint_now()
@@ -486,14 +564,26 @@ def run(run_dir, traj: dict, lim: dict, cfg: dict, entries: list, load_weights, 
                           final_adapter={"file": "adapter.safetensors", "sha256": files.sha256_file(run_dir / "adapter.safetensors")})
         else:
             record.update(status="stopped", stop_reason=stopped.reason, stop_detail=stopped.detail)
-        session.update(to_step=step, stopped_by=record["stop_reason"], seconds=round(clock() - started, 3),
-                       peak_memory_gb=round(mx.get_peak_memory() / 1e9, 4))
+        note.update(to_step=step, stopped_by=record["stop_reason"], seconds=round(clock() - started, 3),
+                    peak_memory_gb=round(mx.get_peak_memory() / 1e9, 4))
         save_record(run_dir, record)
         log(json.dumps({"event": record["status"], "step": step, "reason": record["stop_reason"]}))
         return FINISHED if stopped is None else STOPPED
     except BaseException as error:
         record.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "error",
                       stop_reason=f"{type(error).__name__}: {error}")
-        session.update(stopped_by=record["stop_reason"])
+        note.update(stopped_by=record["stop_reason"])
         save_record(run_dir, record)
         raise
+    finally:
+        if in_main:
+            signal.signal(signal.SIGTERM, previous)
+
+
+def run(run_dir, traj: dict, lim: dict, cfg: dict, entries: list, load_weights, load_assistant=None, *,
+        resume: bool, plan: dict | None = None, command=None, clock=time.monotonic, log=print) -> int:
+    """`open_run`, then `train_session` in it: for a caller with nothing to do in between. (The script encodes the
+    examples its cache lacks in between, once the run has been checked.)"""
+    with open_run(run_dir, traj, lim, cfg, resume=resume) as session:
+        return train_session(session, entries, load_weights, load_assistant, plan=plan, command=command, clock=clock,
+                             log=log)

@@ -10,7 +10,10 @@ and the versions of this package's source and of the libraries the encode runs t
 key changes, so an entry made another way is not found. The record repeats the whole request, and a reader refuses
 an entry whose record is not the request it was asked for, or whose tensors are not the ones the record describes.
 
-The encoders need weights. `encode` runs them; everything else here does not.
+The encoders need weights. `load_encoders` loads them and `encode` runs them; everything else here does not.
+Everything that turns a request into an entry's numbers is in this package, under the request's code digest: how a
+picture file is opened and oriented, how the encoders are loaded, how they are run. A caller supplies the request's
+values and nothing else.
 """
 
 import importlib.metadata as metadata
@@ -22,15 +25,20 @@ from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
+from PIL import Image, ImageOps
 
 from . import files
 from . import image as I
+from . import load as loaders  # this module has a `load` of its own: an entry's
 
 FORMAT = "h3mlx-training-example-1"
 SIZING = ("pipeline", "recipe")  # how a reference picture is sized: diffusers' pipeline, or the training recipe
 RESIZE = "lanczos"  # the one resampling filter implemented: PIL's, as the pipeline resizes
 DTYPES = {"float32": mx.float32, "bfloat16": mx.bfloat16, "float16": mx.float16}
-PACKAGES = ("mlx", "numpy", "torch", "pillow", "transformers", "tokenizers", "safetensors")
+# the libraries the encode path imports and computes with: mlx-vlm runs the text encoder, torchvision is the
+# processor's image backend, torch draws the posterior's noise, Pillow opens and resizes the pictures
+PACKAGES = ("mlx", "mlx-vlm", "numpy", "torch", "torchvision", "pillow", "transformers", "tokenizers", "safetensors")
+LOCK = "cache.lock"  # the cache directory's lock file: held while an entry is published
 ENCODERS = ("vae", "text_encoder", "text_connector", "tokenizer", "processor")
 SETTINGS = ("reference_min_pixels", "reference_max_pixels", "vision_pixels", "canvas_multiple")
 
@@ -66,12 +74,18 @@ def versions() -> dict:
 
 def identity(directory) -> str:
     """A digest that identifies one component of a release without reading its weights: every file's name, with the
-    file's sha256, except that a `.safetensors` file is taken by its name and size alone. A different release, a
-    changed config or tokenizer, or a weight file of another size gives another digest. A weight file replaced by a
-    different one of the same name and size does not; hashing 66 GB at every start is the price of noticing that,
-    and it is not paid here."""
+    file's sha256, except that a `.safetensors` file is taken by its name and size alone.
+
+    * It notices: a different release, a changed config, tokenizer or processor file, a file added, removed or
+      renamed, a weight file of another size.
+    * It does not notice: a weight file replaced by a different one of the same name and size (hashing 66 GB at every
+      start is the price of noticing that, and it is not paid here).
+    * It ignores, on purpose: hidden files, and everything under a hidden directory. A download tool keeps its own
+      bookkeeping there (`.cache/huggingface/...` inside a folder it filled), which changes without the component
+      changing."""
     directory = Path(directory)
-    listed = sorted(p for p in directory.rglob("*") if p.is_file() and not p.name.startswith("."))
+    listed = sorted(p for p in directory.rglob("*")
+                    if p.is_file() and not any(part.startswith(".") for part in p.relative_to(directory).parts))
     if not listed:
         raise ValueError(f"nothing to identify in {directory}")
     return files.sha256_json([[str(p.relative_to(directory)), p.stat().st_size if p.suffix == ".safetensors"
@@ -252,26 +266,45 @@ def check_tensors(request: dict, tensors: dict) -> dict:
     return arrays
 
 
-def write(directory, request: dict, tensors: dict) -> str:
-    """Write one entry and return its key. The tensors file goes in first and the record last, each atomically, so an
-    entry is there only once it is whole; a write that fails part way leaves no entry and no temporary file. An entry
-    is written once: a key that already has a record is refused (`FileExistsError`), not rewritten under a reader."""
+def write(directory, request: dict, tensors: dict, wait: float = 30.0) -> str:
+    """Write one entry and return its key.
+
+    The tensors are written under a temporary name first. Then, holding the cache directory's lock (`files.exclusive`
+    on `cache.lock`, waiting up to `wait` seconds for it), the entry is published: the tensors renamed into place,
+    then the record written, atomically, last. So an entry is there only once it is whole, and one writer publishes
+    at a time.
+
+    * An entry is written once. A key that already has a record is refused (`FileExistsError`), before the lock and
+      again under it, in case another writer published meanwhile.
+    * A writer that fails removes what it alone put there, and nothing else: its temporary file, and the tensors it
+      renamed into place under the lock, where no record existed and no other writer could be. An entry that has
+      its record is never touched.
+    * When the lock stays held for `wait` seconds the write is refused with `files.Busy`, which says who holds it."""
     directory = Path(directory)
     arrays = check_tensors(request, tensors)
     name = key(request)
     directory.mkdir(parents=True, exist_ok=True)
-    if os.path.lexists(directory / f"{name}.json"):
+    record_path, tensors_path = directory / f"{name}.json", directory / f"{name}.safetensors"
+    if os.path.lexists(record_path):
         raise FileExistsError(f"the cache already has an entry {name}")
-    tensors_path = directory / f"{name}.safetensors"
-    files.atomic_write(tensors_path, lambda tmp: mx.save_safetensors(str(tmp), arrays))
-    record = {"format": FORMAT, "key": name, "request": request,
-              "tensors": {"file": tensors_path.name, "sha256": files.sha256_file(tensors_path),
-                          "arrays": _described(arrays)}}
+    staged = files.temporary(tensors_path)
     try:
-        files.atomic_json(directory / f"{name}.json", record)
-    except BaseException:
-        tensors_path.unlink(missing_ok=True)
-        raise
+        mx.save_safetensors(str(staged), arrays)
+        files.sync_file(staged)
+        record = {"format": FORMAT, "key": name, "request": request,
+                  "tensors": {"file": tensors_path.name, "sha256": files.sha256_file(staged),
+                              "arrays": _described(arrays)}}
+        with files.exclusive(directory / LOCK, f"publishing cache entry {name[:12]}", wait=wait):
+            if os.path.lexists(record_path):
+                raise FileExistsError(f"the cache already has an entry {name}")
+            os.replace(staged, tensors_path)  # over nothing, or over tensors a dead writer left without a record
+            try:
+                files.atomic_json(record_path, record)
+            except BaseException:
+                tensors_path.unlink(missing_ok=True)
+                raise
+    finally:
+        staged.unlink(missing_ok=True)
     return name
 
 
@@ -320,10 +353,59 @@ def read(directory, request: dict) -> Entry | None:
 # --- encoding (needs weights) ------------------------------------------------------------------------------------------
 
 
+def oriented(picture):
+    """The picture as RGB with its EXIF orientation applied. Every picture an entry is made from goes through this,
+    whoever opened the file, so a photograph that says "rotate me" is encoded the way it is looked at, and once
+    applied the orientation is no longer pending: doing it twice changes nothing."""
+    return ImageOps.exif_transpose(picture).convert("RGB")
+
+
+def load_picture(path):
+    """A picture file as `encode` takes it: opened, oriented, RGB."""
+    with Image.open(path) as opened:
+        return oriented(opened)
+
+
+def picture_size(path) -> tuple[int, int]:
+    """(width, height) of a picture file as it will be encoded, that is after its EXIF orientation."""
+    with Image.open(path) as opened:
+        return ImageOps.exif_transpose(opened).size
+
+
+def release_configs(weights) -> tuple[dict, dict, I.Settings]:
+    """(transformer config, VAE config, pipeline settings) of a release folder: three JSON files, no weights."""
+    weights = Path(weights)
+    vae = json.loads((weights / "vae" / "config.json").read_text())
+    transformer = {k: v for k, v in json.loads((weights / "transformer" / "config.json").read_text()).items()
+                   if not k.startswith("_")}
+    transformer["patch_size"] = tuple(transformer["patch_size"])
+    return transformer, vae, I.Settings.from_index(json.loads((weights / "modular_model_index.json").read_text()))
+
+
+def load_encoders(weights, vae_dtype: str):
+    """`image.Components` for `encode`, from a release folder: the VAE (loaded with `vae_dtype`'s policy), the text
+    encoder as far as the connector's hidden states need, the connector, the tokenizer and the processor. This is
+    the one place the encoders are loaded for the cache, so how they are loaded is part of the code digest. It needs
+    the weights; the tokenizer and the processor are read from their local folders."""
+    from transformers import AutoTokenizer, Qwen3VLProcessor
+
+    weights = Path(weights)
+    transformer, _, settings = release_configs(weights)
+    indices = tuple(json.loads((weights / "text_connector" / "config.json").read_text())["hidden_state_indices"])
+    _, encode_states = loaders.load_text_encoder_states(weights / "text_encoder", indices)
+    vae, mean, std = loaders.load_vae(weights / "vae", dtype=DTYPES[vae_dtype])
+    return I.Components(
+        tokenizer=AutoTokenizer.from_pretrained(str(weights / "tokenizer")),
+        processor=Qwen3VLProcessor.from_pretrained(str(weights / "processor")), encode_states=encode_states,
+        connector=loaders.load_safetensors(weights / "text_connector"), vae=vae, vae_latents_mean=mean,
+        vae_latents_std=std, dit_params={}, dit_cfg=transformer, settings=settings)
+
+
 def target_picture(picture, height: int, width: int, multiple: int):
-    """The picture as RGB at (width, height), resized with Lanczos when it is another size. Its aspect ratio must be
-    the stated one to within one `multiple` a side: a picture of another shape is refused, not stretched or cropped."""
-    picture = picture.convert("RGB")
+    """The picture, oriented and RGB (`oriented`), at (width, height), resized with Lanczos when it is another size.
+    Its aspect ratio must be the stated one to within one `multiple` a side: a picture of another shape is refused,
+    not stretched or cropped."""
+    picture = oriented(picture)
     own_width, own_height = picture.size
     if abs(own_width * height / own_height - width) > multiple or abs(own_height * width / own_width - height) > multiple:
         raise ValueError(f"a {own_width}x{own_height} picture does not have the shape of the stated {width}x{height} "
@@ -333,8 +415,9 @@ def target_picture(picture, height: int, width: int, multiple: int):
 
 def encode(components, request: dict, picture, references) -> dict:
     """The tensors of the entry `request` asks for, from the pictures themselves (PIL images, the ones whose digests
-    the request names) and `components` (`image.Components`: the VAE, the text encoder's `encode_states`, the
-    connector, the tokenizer and the processor, loaded as the request says).
+    the request names; each is oriented by its EXIF tag here, `oriented`, so it does not matter whether the caller
+    did) and `components` (`image.Components`: the VAE, the text encoder's `encode_states`, the connector, the
+    tokenizer and the processor, loaded as the request says: `load_encoders`).
 
     * The picture: resized to the stated size (`target_picture`), encoded, one posterior sample from a generator
       seeded with the request's seed, rounded through float16 or not, normalised.
@@ -343,7 +426,7 @@ def encode(components, request: dict, picture, references) -> dict:
     * The text: the prompt as written for text-to-image; for an edit, the pipeline's presentation (a vision block per
       reference, then the instruction with its "Edit <Picture 1>. " prefix), through the text encoder and the
       connector, cast to the request's text dtype."""
-    references = [r.convert("RGB") for r in references]
+    references = [oriented(r) for r in references]
     if len(references) != len(request["inputs"]["references"]):
         raise ValueError(f"the request names {len(request['inputs']['references'])} references, got {len(references)}")
     if len(references) > I.MAX_EDIT_IMAGES:

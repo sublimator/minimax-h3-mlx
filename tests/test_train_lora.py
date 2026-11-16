@@ -94,7 +94,7 @@ def fill_cache(argv, text_rows=9, seed=0) -> list[dict]:
     """Synthetic entries for exactly the requests this command line makes. Returns the requests."""
     args = T.parser().parse_args(argv)
     examples = T.read_dataset(Path(args.dataset))
-    cfg, vcfg, settings = T.release(Path(args.weights))
+    cfg, vcfg, settings = cache.release_configs(Path(args.weights))
     asked = T.requests(args, examples, Path(args.weights), settings, MULTIPLE)
     g = torch.Generator().manual_seed(seed)
     for example, request in zip(examples, asked):
@@ -132,6 +132,35 @@ def work(release, data, tmp_path):
 
     fill_cache(argv())
     return argv, tmp_path / "run", tmp_path / "cache"
+
+
+def snapshot(run_dir) -> dict:
+    """Every file under a run directory with its bytes, the lock file aside (it is rewritten by whoever holds it)."""
+    return {str(p.relative_to(run_dir)): p.read_bytes() for p in sorted(Path(run_dir).rglob("*"))
+            if p.is_file() and p.name != trainer.LOCK}
+
+
+def refuse_heavy(monkeypatch):
+    """The loaders of the base weights and of the encoders raise, and so does the encode. (A run's own checkpoint,
+    a few small files, may still be read: that is how a resume checks it.)"""
+    def refuse(*a, **kw):
+        raise AssertionError("something heavy was loaded")
+
+    for owner, name in ((load, "load_safetensors"), (load, "load_transformer"), (load, "load_vae"),
+                        (load, "load_text_encoder_states"), (load, "load_text_encoder"), (cache, "load_encoders"),
+                        (cache, "encode"), (T, "encode_missing")):
+        monkeypatch.setattr(owner, name, refuse)
+
+
+def refuse_to_load(monkeypatch):
+    """Every way the script and the package have of opening weights raises."""
+    def refuse(*a, **kw):
+        raise AssertionError("weights opened")
+
+    for owner, name in ((mx, "load"), (load, "load_safetensors"), (load, "load_transformer"), (load, "load_vae"),
+                        (load, "load_text_encoder_states"), (load, "load_text_encoder"), (lora, "load"), (cache, "encode"),
+                        (cache, "load"), (T, "encode_missing")):
+        monkeypatch.setattr(owner, name, refuse)
 
 
 def record_of(run_dir) -> dict:
@@ -243,17 +272,6 @@ def test_a_dataset_that_is_not_one_is_refused(work, data, tmp_path, capsys, cont
 
 
 # --- the plan ----------------------------------------------------------------------------------------------------------
-
-
-def refuse_to_load(monkeypatch):
-    """Every way the script and the package have of opening weights raises."""
-    def refuse(*a, **kw):
-        raise AssertionError("weights opened")
-
-    for owner, name in ((mx, "load"), (load, "load_safetensors"), (load, "load_transformer"), (load, "load_vae"),
-                        (load, "load_text_encoder_states"), (load, "load_text_encoder"), (lora, "load"), (cache, "encode"),
-                        (cache, "load"), (T, "encode_missing")):
-        monkeypatch.setattr(owner, name, refuse)
 
 
 def test_plan_only_opens_no_weights_and_writes_nothing(work, release, data, tmp_path, capsys, monkeypatch):
@@ -680,7 +698,7 @@ def test_a_resume_under_other_code_or_into_nothing_is_refused(work, capsys, monk
     assert run(argv(**{"--max-steps": ["6"]})) == 0
     with pytest.raises(SystemExit):  # a run directory in use, without --resume
         run(argv())
-    assert "exists: pass resume to go on with that run, or use another directory" in capsys.readouterr().err
+    assert "already holds run.json, adapter.safetensors, checkpoints" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         run(argv() + ["--resume", "--plan-only"])
     assert "--plan-only and --resume do not go together" in capsys.readouterr().err
@@ -707,13 +725,16 @@ def test_a_resume_under_other_code_or_into_nothing_is_refused(work, capsys, monk
     ("the checkpoint's record gone", "the checkpoint's record cannot be read"),
     ("another run's checkpoint", "belongs to another run or another step"),
     ("a renamed step", "belongs to another run or another step"),
-    ("fewer losses than steps", "5 steps but 4 losses"),
+    ("fewer losses than steps", "10 steps but 9 losses"),
 ])
-def test_a_damaged_checkpoint_is_refused_not_skipped(work, capsys, damage, message):
+def test_a_damaged_checkpoint_is_refused_not_skipped(work, capsys, monkeypatch, damage, message):
     """The latest checkpoint is the one a resume uses. If it is not whole, or not this run's, the resume stops and
-    says so; it does not quietly fall back to an older one."""
+    says so; it does not quietly fall back to an older one. The refusal comes before anything heavy and changes
+    nothing: no weights are loaded, no example is encoded, and the run directory, a finished run's record included,
+    is byte for byte what it was."""
     argv, run_dir, _ = work
     assert run(argv(**{"--max-steps": ["10"]})) == 0
+    assert record_of(run_dir)["status"] == "finished"
     latest = run_dir / "checkpoints" / "step-00000010"
     described = json.loads((latest / "checkpoint.json").read_text())
     if damage == "a byte of the adapter":
@@ -729,13 +750,286 @@ def test_a_damaged_checkpoint_is_refused_not_skipped(work, capsys, damage, messa
     elif damage == "a renamed step":
         latest.rename(run_dir / "checkpoints" / "step-00000011")
     elif damage == "fewer losses than steps":
-        shutil.rmtree(latest)
-        earlier = run_dir / "checkpoints" / "step-00000005"
-        five = json.loads((earlier / "checkpoint.json").read_text())
-        (earlier / "checkpoint.json").write_text(json.dumps({**five, "losses": five["losses"][:4]}))
+        (latest / "checkpoint.json").write_text(json.dumps({**described, "losses": described["losses"][:9]}))
+    before = snapshot(run_dir)
+    refuse_heavy(monkeypatch)
     with pytest.raises(SystemExit) as stop:
         run(argv() + ["--resume"])
     assert stop.value.code == 2 and message in capsys.readouterr().err
+    assert snapshot(run_dir) == before
+
+
+def test_a_resume_goes_on_from_the_records_latest_checkpoint_or_not_at_all(work, capsys, monkeypatch):
+    """The record lists the checkpoints it wrote. A resume that finds less on disk than the record's latest is
+    refused: with the newest checkpoint folder gone it does not roll back to an older one, and with the whole
+    checkpoints folder gone it does not start again from step 0. Nothing is written by either refusal. More on disk
+    than the record lists is the trace of a run stopped between a checkpoint and its record, and is resumed from."""
+    argv, run_dir, _ = work
+    assert run(argv(run="straight")) == 0 and run(argv(**{"--max-steps": ["11"]})) == 0
+    assert record_of(run_dir)["checkpoints"] == [5, 10, 11]
+    aside = run_dir.parent / "aside"
+    shutil.move(run_dir / "checkpoints" / "step-00000011", aside)
+    before = snapshot(run_dir)
+    with pytest.raises(SystemExit) as stop:
+        run(argv() + ["--resume"])
+    err = capsys.readouterr().err
+    assert stop.value.code == 2 and "lists a checkpoint at step 11" in err and "is step 10" in err
+    assert snapshot(run_dir) == before
+
+    shutil.move(run_dir / "checkpoints", run_dir.parent / "all-aside")
+    before = snapshot(run_dir)
+    with pytest.raises(SystemExit) as stop:
+        run(argv() + ["--resume"])
+    err = capsys.readouterr().err
+    assert stop.value.code == 2 and "lists a checkpoint at step 11" in err and "is none" in err
+    assert snapshot(run_dir) == before
+    shutil.move(run_dir.parent / "all-aside", run_dir / "checkpoints")
+    shutil.move(aside, run_dir / "checkpoints" / "step-00000011")
+
+    # the other way round: the record behind the disk (a run stopped after its checkpoint's rename, before its record)
+    record = record_of(run_dir)
+    behind = {**record, "status": "running", "step": 9, "losses": record["losses"][:9], "checkpoints": [5]}
+    (run_dir / "run.json").write_text(json.dumps(behind))
+    (run_dir / "adapter.safetensors").unlink()
+    assert run(argv() + ["--resume"]) == 0
+    resumed = record_of(run_dir)
+    assert resumed["sessions"][-1]["from_step"] == 11 and resumed["step"] == 12 and len(resumed["losses"]) == 12
+    assert adapter_bytes(run_dir) == adapter_bytes(run_dir.parent / "straight")
+    assert drawn(resumed) == drawn(record_of(run_dir.parent / "straight"))
+
+    # and a run that died before its first checkpoint goes on from its start, which is where its record says its
+    # last checkpoint is
+    calls = {"count": 0}
+    real = train.optimizer_step
+
+    def dies(*a, **kw):
+        calls["count"] += 1
+        if calls["count"] == 3:
+            raise RuntimeError("the power went")
+        return real(*a, **kw)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(train, "optimizer_step", dies)
+        with pytest.raises(RuntimeError):
+            run(argv(run="young", **{"--checkpoint-every": ["50"]}))
+    young = record_of(run_dir.parent / "young")
+    assert young["step"] == 2 and young["checkpoints"] == [] and not (run_dir.parent / "young" / "checkpoints").exists()
+    assert run(argv(run="young", **{"--checkpoint-every": ["50"]}) + ["--resume"]) == 0
+    again = record_of(run_dir.parent / "young")
+    assert again["sessions"][1]["from_step"] == 0 and again["sessions"][1]["discarded_steps"] == 2
+    assert adapter_bytes(run_dir.parent / "young") == adapter_bytes(run_dir.parent / "straight")
+
+
+def test_a_resume_past_its_max_steps_is_refused(work, capsys):
+    """A run at step 12 resumed with a `--max-steps` of 5 has nothing to do. It is refused, and nothing is written:
+    not a record saying step 12 beside a limit of 5, and not the adapter again."""
+    argv, run_dir, _ = work
+    assert run(argv()) == 0
+    before = snapshot(run_dir)
+    with pytest.raises(SystemExit) as stop:
+        run(argv(**{"--max-steps": ["5"]}) + ["--resume"])
+    assert stop.value.code == 2 and "the run is at step 12, past a max_steps of 5" in capsys.readouterr().err
+    assert snapshot(run_dir) == before
+
+
+def test_a_refused_resume_encodes_nothing(release, data, tmp_path, capsys, monkeypatch):
+    """The run directory is checked before the cache is filled: a `--resume` into a directory with no run, or with
+    another run's record, is refused with the encoders never loaded, even when every example is missing from the
+    cache."""
+    filled = arguments(release, data, tmp_path / "cache", tmp_path / "run", **{"--max-steps": ["3"]})
+    fill_cache(filled)
+    assert run(filled) == 0
+    capsys.readouterr()
+    refuse_heavy(monkeypatch)
+    empty = tmp_path / "empty-cache"
+    for run_dir, changes, message in ((tmp_path / "no-such-run", {}, "no readable run record to resume from"),
+                                      (tmp_path / "run", {"--latent-seed": ["12"]}, "is another run")):
+        with pytest.raises(SystemExit) as stop:
+            run(arguments(release, data, empty, run_dir, **{"--max-steps": ["3"], **changes}) + ["--resume"])
+        assert stop.value.code == 2 and message in capsys.readouterr().err
+    assert not empty.exists() and not (tmp_path / "no-such-run").exists()
+
+
+# --- who owns a run directory ------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("there", ["adapter.safetensors", "checkpoints", "run.json"])
+def test_a_new_run_overwrites_nothing(work, capsys, there):
+    """A new run writes `run.json`, `adapter.safetensors` and `checkpoints/` in its directory. If any of the three is
+    already there the run is refused before it reads a weight, whether or not there is a record: a directory holding
+    only someone's adapter is not an empty run directory. Other files are not the run's and do not stop it."""
+    argv, run_dir, _ = work
+    run_dir.mkdir()
+    (run_dir / "notes.txt").write_text("the arguments I used")
+    assert trainer.OUTPUTS == ("run.json", "adapter.safetensors", "checkpoints")
+    if there == "checkpoints":
+        (run_dir / there).mkdir()
+    else:
+        (run_dir / there).write_bytes(b"someone's file, not this run's")
+    before = snapshot(run_dir)
+    with pytest.raises(SystemExit) as stop:
+        run(argv())
+    err = capsys.readouterr().err
+    assert stop.value.code == 2 and f"already holds {there}" in err and "overwrites none of them" in err
+    assert snapshot(run_dir) == before
+    (run_dir / there).rmdir() if there == "checkpoints" else (run_dir / there).unlink()
+    assert run(argv()) == 0 and (run_dir / "notes.txt").read_text() == "the arguments I used"
+
+
+def test_one_session_in_a_run_directory_at_a_time(work, capsys, monkeypatch):
+    """While one session has a run directory, a second is refused and told who holds it, and it touches nothing:
+    in particular not the first one's checkpoint that is written and about to be renamed into place. Here the second
+    session is started at exactly that moment, from inside the first one's rename; the first then finishes as if
+    nothing had happened. Once it is over the directory can be taken again."""
+    argv, run_dir, _ = work
+    assert run(argv(run="straight", **{"--max-steps": ["2"], "--checkpoint-every": ["1"]})) == 0
+    assert run(argv(**{"--max-steps": ["1"], "--checkpoint-every": ["1"]})) == 0
+    real = os.rename
+    seen = {}
+
+    def rename_while_a_second_session_starts(src, dst):
+        if Path(dst).name == "step-00000002" and not seen:
+            seen["temporary"] = Path(src).is_dir()
+            seen["holder"] = files.lock_holder(run_dir / trainer.LOCK)
+            with pytest.raises(SystemExit) as stop:
+                run(argv(**{"--max-steps": ["2"], "--checkpoint-every": ["1"]}) + ["--resume"])
+            seen["second"] = (stop.value.code, capsys.readouterr().err)
+            seen["temporary_after"] = Path(src).is_dir()
+        return real(src, dst)
+
+    monkeypatch.setattr(os, "rename", rename_while_a_second_session_starts)
+    assert run(argv(**{"--max-steps": ["2"], "--checkpoint-every": ["1"]}) + ["--resume"]) == 0
+    monkeypatch.undo()
+    code, err = seen["second"]
+    assert code == 2 and "the run directory is in use" in err and f"held by process {os.getpid()} (training in run" in err
+    assert seen["temporary"] and seen["temporary_after"], "the first session's checkpoint in progress was left alone"
+    assert seen["holder"]["pid"] == os.getpid() and seen["holder"]["what"] == "training in run"
+    assert record_of(run_dir)["status"] == "finished" and record_of(run_dir)["checkpoints"] == [1, 2]
+    assert adapter_bytes(run_dir) == adapter_bytes(run_dir.parent / "straight")
+    assert files.lock_holder(run_dir / trainer.LOCK) is None, "released: the lock file says nobody holds it"
+    assert run(argv(**{"--max-steps": ["2"], "--checkpoint-every": ["1"]}) + ["--resume"]) == 0
+
+    # held by something else entirely: a new run is refused too, and leaves no outputs
+    fresh = run_dir.parent / "fresh"
+    fresh.mkdir()
+    with files.exclusive(fresh / trainer.LOCK, "something else"):
+        with pytest.raises(SystemExit):
+            run(argv(run="fresh"))
+        assert "held by process" in capsys.readouterr().err and "(something else" not in ""
+    assert sorted(p.name for p in fresh.iterdir()) == [trainer.LOCK]
+
+
+def test_a_second_process_is_refused_and_sigterm_stops_the_first_cleanly(work, capsys):
+    """Two real processes. The script runs as a process of its own; once its record shows it is under way, a resume
+    of the same run from this process is refused, naming the other process's id, and changes nothing. The first
+    process is then sent SIGTERM: it stops at the next block or step, writes a checkpoint at its last completed step,
+    records that it was terminated and exits with code 3. With it gone the lock is free, and the run resumes to the
+    uninterrupted run's adapter, byte for byte."""
+    argv, run_dir, _ = work
+    long = {"--max-steps": ["400"], "--checkpoint-every": ["50"]}
+    assert run(argv(run="straight", **long)) == 0
+    capsys.readouterr()
+    process = subprocess.Popen([sys.executable, str(ROOT / "scripts" / "train_lora.py"), *argv(**long)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + 120
+        while time.time() < deadline and process.poll() is None:
+            try:
+                if record_of(run_dir)["step"] >= 20:
+                    break
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.005)
+        assert process.poll() is None, "the first process is still training"
+        with pytest.raises(SystemExit) as stop:
+            run(argv(**long) + ["--resume"])
+        err = capsys.readouterr().err
+        assert stop.value.code == 2 and f"held by process {process.pid} (training in run" in err
+        assert process.poll() is None, "and it was not disturbed"
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=60) == trainer.STOPPED == 3
+    finally:
+        if process.poll() is None:
+            process.kill()
+    stopped = record_of(run_dir)
+    reached = stopped["step"]
+    assert stopped["status"] == "stopped" and stopped["stop_reason"] == "terminated" and 20 <= reached < 400
+    assert "SIGTERM" in stopped["stop_detail"] and stopped["checkpoints"][-1] == reached and len(stopped["losses"]) == reached
+    assert (run_dir / "checkpoints" / f"step-{reached:08d}" / "checkpoint.json").is_file()
+    assert not (run_dir / "adapter.safetensors").exists() and stopped["sessions"][0]["stopped_by"] == "terminated"
+
+    assert run(argv(**long) + ["--resume"]) == 0
+    resumed = record_of(run_dir)
+    assert resumed["step"] == 400 and resumed["sessions"][1]["from_step"] == reached and resumed["sessions"][1]["discarded_steps"] == 0
+    assert adapter_bytes(run_dir) == adapter_bytes(run_dir.parent / "straight")
+    assert drawn(resumed) == drawn(record_of(run_dir.parent / "straight"))
+
+
+def test_sigterm_stops_at_the_next_boundary_with_a_checkpoint(work, capsys, monkeypatch):
+    """SIGTERM delivered to this process during the fourth step's update: the step that was under way when it came
+    is completed (the signal is looked at after an evaluated block and after a step, not in the middle of an
+    update), the session ends there with a checkpoint at step 4, status `stopped`, reason `terminated`, exit code 3,
+    and SIGTERM's handler is what it was before the session. A second signal, in the middle of a backward pass,
+    drops that step. Resumed, the run ends where an uninterrupted one does."""
+    argv, run_dir, _ = work
+    assert run(argv(run="straight")) == 0
+    before = signal.getsignal(signal.SIGTERM)
+    calls = {"count": 0}
+    real = train.optimizer_step
+
+    def signalled(*a, **kw):
+        calls["count"] += 1
+        if calls["count"] == 4:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(train, "optimizer_step", signalled)
+    assert run(argv()) == 3
+    monkeypatch.undo()
+    assert signal.getsignal(signal.SIGTERM) is before
+    record = record_of(run_dir)
+    assert record["status"] == "stopped" and record["stop_reason"] == "terminated" and record["step"] == 4
+    assert record["checkpoints"] == [4] and not (run_dir / "adapter.safetensors").exists()
+
+    # in the middle of the sixth step's backward pass: that step is dropped, the session ends at 5
+    stages = {"count": 0}
+    real_blockwise = trainer.BACKWARD["blockwise"]
+
+    def signalled_mid_step(*a, after_stage=None, **kw):
+        stages["count"] += 1
+
+        def stage():
+            if stages["count"] == 2 and not stages.get("sent"):
+                stages["sent"] = True
+                os.kill(os.getpid(), signal.SIGTERM)
+            after_stage()
+
+        return real_blockwise(*a, after_stage=stage, **kw)
+
+    monkeypatch.setitem(trainer.BACKWARD, "blockwise", signalled_mid_step)
+    assert run(argv() + ["--resume"]) == 3
+    monkeypatch.undo()
+    record = record_of(run_dir)
+    assert record["step"] == 5 and record["checkpoints"] == [4, 5] and record["stop_reason"] == "terminated"
+    assert run(argv() + ["--resume"]) == 0
+    assert adapter_bytes(run_dir) == adapter_bytes(run_dir.parent / "straight")
+    assert drawn(record_of(run_dir)) == drawn(record_of(run_dir.parent / "straight"))
+
+
+def test_every_safetensors_dtype_has_a_size():
+    """The plan sums the base weights' bytes from their headers. Every dtype a safetensors header can name is sized,
+    the unsigned ones included (the optimizer's own step count is a U64), and one it does not know is an error with
+    the tensor's name, which the script reports as it reports any bad argument."""
+    names = ["BOOL", "U8", "I8", "F8_E5M2", "F8_E4M3", "I16", "U16", "F16", "BF16", "I32", "U32", "F32", "F64", "I64", "U64"]
+    sizes = [1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 8, 8, 8]
+    header = {f"t{i}": {"dtype": name, "shape": [3, 2], "data_offsets": [0, 0]} for i, name in enumerate(names)}
+    summary = trainer.weights_summary([{**header, "__metadata__": {"format": "pt"}}])
+    assert summary["tensors"] == len(names) and summary["bytes"] == 6 * sum(sizes)
+    assert summary["bytes_by_dtype"] == {name: 6 * size for name, size in sorted(zip(names, sizes))}
+    for name, dtype in (("U64", mx.uint64), ("U32", mx.uint32), ("U16", mx.uint16), ("I16", mx.int16), ("BOOL", mx.bool_)):
+        assert trainer.BYTES[name] == mx.zeros((1,), dtype=dtype).nbytes, name
+    with pytest.raises(ValueError, match="odd.weight has a dtype this summary does not know the size of: 'Q7'"):
+        trainer.weights_summary([{"odd.weight": {"dtype": "Q7", "shape": [1], "data_offsets": [0, 1]}}])
 
 
 def test_checkpoints_are_whole_or_absent(work, capsys, monkeypatch):

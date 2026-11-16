@@ -11,12 +11,16 @@ The dataset is a JSON file: `{"examples": [{"picture": "a.png", "prompt": "...",
 order; without them an example is text-to-image.
 
 Order: read the configs and the dataset -> look each example up in the cache -> `--plan-only` prints the plan and
-stops here, having opened no weights -> encode the examples the cache lacks (the VAE and the text encoder, freed
-after) -> the transformer -> the loop. `run.json` in the run directory is rewritten after every step; checkpoints go
-to `checkpoints/step-NNNNNNNN/`; the finished adapter is `adapter.safetensors`, in diffusers' format.
+stops here, having opened no weights -> take the run directory for this process and check that the run can start or
+be resumed in it (a new run needs a directory without `run.json`, `adapter.safetensors` or `checkpoints`) -> encode
+the examples the cache lacks (the VAE and the text encoder, freed after) -> the transformer -> the loop. `run.json`
+in the run directory is rewritten after every step; checkpoints go to `checkpoints/step-NNNNNNNN/`; the finished
+adapter is `adapter.safetensors`, in diffusers' format. SIGTERM stops the run at the next block or step with a
+checkpoint.
 
-Exit codes: 0 the run reached `--max-steps`; 3 the wall clock or the memory limit stopped the session (resume to go
-on); 2 the arguments, or a `--resume` that does not match the run directory.
+Exit codes: 0 the run reached `--max-steps`; 3 the wall clock, the memory limit or SIGTERM stopped the session
+(resume to go on); 2 the arguments, a run directory in use or not empty of a run's outputs, or a `--resume` that
+does not match the run directory.
 
 This script downloads nothing and reads only the folders it is given: it turns the Hugging Face hub off for its
 process before anything that could reach it is imported, so a tokenizer or processor folder that is not there is an
@@ -36,14 +40,12 @@ from pathlib import Path  # noqa: E402
 
 import mlx.core as mx  # noqa: E402
 import numpy as np  # noqa: E402
-from PIL import Image, ImageOps  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from h3mlx import cache, files, load, lora, trainer  # noqa: E402
-from h3mlx import image as I  # noqa: E402
 from h3mlx.vae import VaeConfig  # noqa: E402
 
 EXAMPLE_KEYS = {"picture", "prompt", "height", "width", "references"}
@@ -127,26 +129,13 @@ def read_dataset(path: Path) -> list[dict]:
     return out
 
 
-def release(weights: Path) -> tuple[dict, dict, I.Settings]:
-    """(transformer config, VAE config, pipeline settings): three JSON files, no weights."""
-    vcfg = json.loads((weights / "vae" / "config.json").read_text())
-    tcfg = {k: v for k, v in json.loads((weights / "transformer" / "config.json").read_text()).items()
-            if not k.startswith("_")}
-    tcfg["patch_size"] = tuple(tcfg["patch_size"])
-    return tcfg, vcfg, I.Settings.from_index(json.loads((weights / "modular_model_index.json").read_text()))
-
-
 def picture_seed(seed: int, digest: str) -> int:
     """A posterior-sample seed of a picture's own, from `--latent-seed` and the picture's digest: two pictures of one
     size do not get the same noise, and a picture's entry does not depend on where it sits in the dataset."""
     return int(np.random.SeedSequence([seed, int(digest[:15], 16)]).generate_state(1, dtype=np.uint64)[0] >> 1)
 
 
-def load_picture(path: Path) -> Image.Image:
-    return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
-
-
-def requests(args, examples: list[dict], weights: Path, settings: I.Settings, multiple: int) -> list[dict]:
+def requests(args, examples: list[dict], weights: Path, settings, multiple: int) -> list[dict]:
     """One cache request per example: the files' digests, the choices on the command line and the encoders'
     identities. Reads the pictures' bytes and the release's small files; no weights."""
     encoders = {name: cache.identity(weights / name) for name in cache.ENCODERS}
@@ -179,10 +168,9 @@ def describe(examples, asked, cache_dir: Path, cfg: dict, ratio: int, multiple: 
         if request["references"] is not None:
             choice = request["references"]
             for reference in example["references"]:
-                with Image.open(reference) as opened:
-                    own = ImageOps.exif_transpose(opened).size
                 sizes.append(cache.reference_sizes(
-                    choice["sizing"], *own, target_height=example["height"], target_width=example["width"],
+                    choice["sizing"], *cache.picture_size(reference), target_height=example["height"],
+                    target_width=example["width"],
                     min_pixels=choice["min_pixels"], max_pixels=choice["max_pixels"],
                     vision_pixels=choice["vision_pixels"], multiple=multiple)[0])
         out.append({"picture": example["picture"].name, "height": example["height"], "width": example["width"],
@@ -193,22 +181,18 @@ def describe(examples, asked, cache_dir: Path, cfg: dict, ratio: int, multiple: 
 
 
 def encode_missing(weights: Path, cache_dir: Path, todo: list, vae_dtype: str, log) -> None:
-    """Encode the examples the cache lacks and write their entries: the VAE and the text encoder are loaded once,
-    used for every example, and dropped before the transformer is loaded."""
-    from run_p_h3_image import config_components
-
-    indices = tuple(json.loads((weights / "text_connector" / "config.json").read_text())["hidden_state_indices"])
-    model, encode_states = load.load_text_encoder_states(weights / "text_encoder", indices)
-    c = config_components(weights, encode_states)
-    c.vae, _, _ = load.load_vae(weights / "vae", dtype=cache.DTYPES[vae_dtype])
-    c.connector = load.load_safetensors(weights / "text_connector")
+    """Encode the examples the cache lacks and write their entries: the VAE and the text encoder are loaded once
+    (`cache.load_encoders`), used for every example, and dropped before the transformer is loaded. How a picture is
+    opened and how the encoders are loaded and run is the package's, not this script's."""
+    components = cache.load_encoders(weights, vae_dtype)
     for example, request in todo:
         began = time.time()
-        tensors = cache.encode(c, request, load_picture(example["picture"]), [load_picture(r) for r in example["references"]])
+        tensors = cache.encode(components, request, cache.load_picture(example["picture"]),
+                               [cache.load_picture(r) for r in example["references"]])
         key = cache.write(cache_dir, request, tensors)
         log(json.dumps({"event": "encoded", "picture": example["picture"].name, "key": key,
                         "text_rows": int(tensors["text"].shape[1]), "seconds": round(time.time() - began, 2)}))
-    del model, encode_states, c
+    del components
     gc.collect()
     mx.clear_cache()
 
@@ -231,7 +215,7 @@ def main(argv=None, clock=time.monotonic) -> int:
             if unset:
                 ap.error(f"the dataset has reference pictures: {', '.join(unset)} required (--reference-float16-round "
                          "or --no-reference-float16-round)")
-        cfg, vcfg, settings = release(weights)
+        cfg, vcfg, settings = cache.release_configs(weights)
         ratio = VaeConfig.from_diffusers(vcfg).spatial_ratio
         multiple = ratio * cfg["patch_size"][2]
         asked = requests(args, examples, weights, settings, multiple)
@@ -257,17 +241,19 @@ def main(argv=None, clock=time.monotonic) -> int:
         return 0
 
     log = lambda line: print(line, flush=True)  # noqa: E731
-    todo = [(e, r) for e, r in zip(examples, asked) if cache.read(cache_dir, r) is None]
-    if todo:
-        encode_missing(weights, cache_dir, todo, args.vae_dtype, log)
-    entries = [cache.read(cache_dir, r) for r in asked]
     assistant = args.assistant.expanduser() if args.assistant else None
     try:
-        return trainer.run(run_dir, traj, lim, cfg, entries,
-                           load_weights=lambda: load.load_transformer(weights / "transformer")[0],
-                           load_assistant=(lambda: lora.load(assistant)) if assistant else None,
-                           resume=args.resume, plan=plan, command=sys.argv[1:] if argv is None else [str(a) for a in argv],
-                           clock=clock, log=log)
+        # the run directory first: held by this process, and every reason to refuse the run found, before any
+        # encoder or weight is loaded
+        with trainer.open_run(run_dir, traj, lim, cfg, resume=args.resume) as session:
+            todo = [(e, r) for e, r in zip(examples, asked) if cache.read(cache_dir, r) is None]
+            if todo:
+                encode_missing(weights, cache_dir, todo, args.vae_dtype, log)
+            entries = [cache.read(cache_dir, r) for r in asked]
+            return trainer.train_session(
+                session, entries, load_weights=lambda: load.load_transformer(weights / "transformer")[0],
+                load_assistant=(lambda: lora.load(assistant)) if assistant else None, plan=plan,
+                command=sys.argv[1:] if argv is None else [str(a) for a in argv], clock=clock, log=log)
     except trainer.Refused as e:
         ap.error(str(e))
 
