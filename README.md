@@ -23,9 +23,11 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
 - **P-H3-Image:** both workflows end to end, its text connector, the single-frame image decoder, and its prompt
   upsampler (Qwen3.5-9B, via mlx-vlm). It reuses H3's transformer, packing and denoise loop unchanged.
 - **LoRA adapters, and the first pieces of training:** `h3mlx.lora` reads and writes adapters in diffusers' format
-  (any rank and alpha), converts ones saved under the original checkpoint's key names, and attaches or merges them;
-  `h3mlx.train` has the forward process, the training target, the loss and the noise-level sampling. There is no
-  training loop yet, and nothing has been trained with it.
+  (any rank and alpha, on any `Linear` of the transformer), converts ones saved under the original checkpoint's key
+  names, attaches or merges them, and stacks named adapters, a frozen one beside a trainable one. `h3mlx.train` has
+  the forward process, the training target, the loss, the noise-level sampling, a training example for one picture
+  with or without reference pictures, and its loss and gradient. There is no training loop yet, and nothing has been
+  trained with it.
 - **Porting guides:** [`docs/porting.md`](docs/porting.md) (diffusers -> h3mlx),
   [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md),
   [`docs/porting-p-h3-image.md`](docs/porting-p-h3-image.md) and
@@ -38,15 +40,15 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 429 tests and skips 70. Those 70 need the releases' tokenizers, processors,
-configs and weight indexes, plus HyperFlow's manifest and adapter header. These files aren't shipped here because they
-belong to MiniMax, Video Rebirth and Pruna. Fetch them from Hugging Face at pinned revisions (about 50 MB, no weights)
-and all 499 run:
+No weights are needed. A plain clone runs 485 tests and skips 71. Those 71 need the releases' tokenizers, processors,
+configs and weight indexes, plus HyperFlow's manifest and adapter header and a public training adapter's header. These
+files aren't shipped here because they belong to MiniMax, Video Rebirth, Pruna and the adapter's publisher. Fetch them
+from Hugging Face at pinned revisions (about 50 MB, no weights) and all 556 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest
 
-Or point `H3MLX_FIXTURES` at a copy. Seven of the 70 also need `ffmpeg` and `ffprobe` on the `PATH`.
+Or point `H3MLX_FIXTURES` at a copy. Seven of the 71 also need `ffmpeg` and `ffprobe` on the `PATH`.
 
 The oracle is diffusers main at `d3d8af89` (P-H3-Image isn't in a diffusers release yet); its H3 code is 0.42.1's plus a
 tensor-parallel plan, and the H3 tests pass against both.

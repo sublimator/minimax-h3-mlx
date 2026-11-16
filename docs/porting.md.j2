@@ -153,7 +153,11 @@ its pair with `timestep_index · 3 + modality_tag`.
 
 {{ code(TR, function='MiniMaxH3AdaLayerNormModulation.forward', root=D) }}
 {{ code('src/h3mlx/ops.py', function='adaln_modulation') }}
+{{ code('src/h3mlx/ops.py', function='adaln_tables') }}
 {{ code('src/h3mlx/ops.py', function='modulate') }}
+
+(`adaln_tables` is the projection read from the weight dict. It goes through `plinear`, which without a LoRA is exactly
+`linear`; a LoRA on the projection is covered in `docs/porting-lora-training.md`.)
 
 The `silu` here runs on the f32 timestep embedding, and only its result is cast to the bf16 projection, as the
 original's comment explains. The place where a bf16 `silu` could round differently is the feed-forward gate. There our
@@ -524,8 +528,11 @@ for audio. This is one tiny f32 configuration, not the bf16 release.
   is not ported. One specific LoRA is: HyperFlow, Video Rebirth's 8-step LoRA, with its two-time embedder and fixed
   grid; see `docs/porting-hyperflow.md`. Its hook is `ops.plinear`: every targeted linear adds a LoRA when the weight
   dict carries `<name>.lora_A.weight` / `.lora_B.weight`, and without them it is exactly `linear(x, p[name + ".weight"], p[name + ".bias"] if bias else
-  None)`, the call §2's attention, feed-forward and time-embedder code made before HyperFlow. Only the linears that go
-  through `plinear` can carry a LoRA (`hyperflow.wired_shapes`); a file targeting any other is refused.
+  None)`, the call §2's code made before HyperFlow. Every `Linear` of the transformer now goes through `plinear`. A
+  HyperFlow file may target the attention, feed-forward and time-embedder linears only (`hyperflow.wired_shapes`) and
+  is refused if it names any other. General adapters, in diffusers' file format, are read by `h3mlx.lora`
+  (`docs/porting-lora-training.md`), which does not route between `transformer` and `transformer_ref`: the caller
+  attaches an adapter to the weights it means.
 - **Speedups.** Sparse attention is not ported: a dense bf16 baseline comes first. Weight quantization exists
   (`load.quantize_transformer`, `ops.QuantizedWeight`) and P-H3-Image's run script uses it (`--quantize`; see
   `docs/porting-p-h3-image.md`); `ref2va` and its script don't yet.

@@ -25,8 +25,11 @@ licence notices are reproduced in THIRD_PARTY_NOTICES.md, as their licences requ
 - torchaudio (PyTorch), BSD 2-Clause License: src/h3mlx/resample.py is its sinc resampler, copied verbatim, with its
   licence in that file.
 
-Also credited, with no code copied: MLX (Apple, MIT License), and ComfyUI-MiniMax-H3-MLX-SolAttn (yshenaw, Apache
-License 2.0), an earlier MLX port of MiniMax H3 whose AdaLN modulation cache inspired the one in src/h3mlx/ops.py.
+Also credited, with no code copied: MLX (Apple, MIT License); ComfyUI-MiniMax-H3-MLX-SolAttn (yshenaw, Apache
+License 2.0), an earlier MLX port of MiniMax H3 whose AdaLN modulation cache inspired the one in src/h3mlx/ops.py; and
+ai-toolkit (Ostris, LLC, MIT License), a third-party trainer whose MiniMax H3 and P-H3-Image model files at commit
+d6a18ad7 are the training recipe that src/h3mlx/train.py's example builder follows (read, not run, and not the model
+maker's recipe; docs/porting-lora-training.md says which steps come from it).
 
 The MiniMax H3 and P-H3-Image weights, configs, tokenizers and processors are not included. MiniMax H3 comes under the
 MiniMax H3 Community License, which has its own terms, including territory exclusions. P-H3-Image's release says per

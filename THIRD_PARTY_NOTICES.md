@@ -94,6 +94,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
+## ai-toolkit (Ostris)
+
+https://github.com/ostris/ai-toolkit, commit d6a18ad72da9abca3ffb67ea8e42c25764eee61a. MIT License, Copyright (c) 2024
+Ostris, LLC.
+
+No code of it is copied, translated or quoted here. Its MiniMax H3 and P-H3-Image model files
+(`extensions_built_in/diffusion_models/minimax_h3/minimax_h3.py`, `p_h3_image.py` and `src/packing.py`) were read as a
+training recipe, and `src/h3mlx/train.py`'s example builder follows that recipe where diffusers has no code to follow:
+silence for a picture's audio rows, no loss on them, references held at the conditioning timestep, and the reference
+encode without float16 rounding as an option. `docs/porting-lora-training.md` cites the lines. It is a third-party
+trainer's recipe, not the model maker's.
+
 ## mlx-vlm
 
 https://github.com/Blaizzy/mlx-vlm, tag v0.7.11. MIT License. `docs/porting.md` and `docs/porting-p-h3-image.md`

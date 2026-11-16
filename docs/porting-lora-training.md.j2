@@ -5,7 +5,9 @@
      ../diffusers-main  huggingface/diffusers at main commit d3d8af89, sparse: src/, tests/, docs/ (no examples/)
    No markers were added upstream: passages inside their long functions are quoted by line range, which is stable
    because both checkouts are pinned. Our src/h3mlx/lora.py carries three markers (`alpha-fold`, `qkv-split`,
-   `fc1-swap`). #}
+   `fc1-swap`).
+   The training example's recipe (section 6) is a third-party trainer, ostris/ai-toolkit at d6a18ad7 (MIT). It is cited
+   by file and line and not quoted: no checkout of it is read by this template. #}
 {% set PEFT = '../peft' %}
 {% set LAYER = 'src/peft/tuners/lora/layer.py' %}
 {% set DM = '../diffusers-main' %}
@@ -14,6 +16,7 @@
 {% set CONV = 'src/diffusers/loaders/lora_conversion_utils.py' %}
 {% set TU = 'src/diffusers/training_utils.py' %}
 {% set SCH = 'src/diffusers/schedulers/scheduling_minimax_h3.py' %}
+{% set BD = 'src/diffusers/modular_pipelines/p_h3_image/before_denoise.py' %}
 # Porting LoRA training to MLX, part 1: PEFT and diffusers → `h3mlx`
 
 This guide covers the first pieces a LoRA trainer for the MLX transformer needs, each ported op by op and tested
@@ -24,33 +27,42 @@ against the PyTorch original on small random tensors:
 2. **A converter** for adapters saved under the original checkpoint's key names (§2).
 3. **The forward process, the training target and the loss** (§3).
 4. **Sampling the noise level and weighting the loss** (§4).
+5. **Two named adapters on one `Linear`,** a frozen one beside a trainable one (§5).
+6. **One training example:** a picture with or without reference pictures, as rows, audio rows and row timesteps (§6).
+7. **The example's loss and its gradient** on the transformer (§7).
 
 In each section the original comes first, then the port, then what changed and which test ties them together. It
 assumes the main guide (`docs/porting.md`) for the transformer and the scheduler, and the HyperFlow guide
 (`docs/porting-hyperflow.md`) for how a LoRA reaches the forward (`ops.plinear`).
 
-**Nothing here trains yet.** There is no training loop, no gradient test, no optimizer and no run on real weights;
-§6 lists what is missing. Everything below is weight-free.
+**Nothing here trains yet.** There is no training loop, no optimizer and no run on real weights; §9 lists what is
+missing. Everything below is weight-free.
 
 **Sources, pinned.**
 
 | what | where | pin |
 | --- | --- | --- |
 | LoRA layer, scaling, init, merge (Apache-2.0) | `huggingface/peft`, `src/peft/tuners/lora/` | tag `v0.21.2` (`eaa35c7`), the version the tests import |
-| LoRA files, the original-layout converter, the scheduler, `training_utils` (Apache-2.0) | `huggingface/diffusers` main | `d3d8af89e5b08a352cf47bba3a451c5fed9a49b1`, the commit the tests import |
+| LoRA files, the original-layout converter, the scheduler, `training_utils`, the P-H3-Image pipeline's layout and row steps (Apache-2.0) | `huggingface/diffusers` main | `d3d8af89e5b08a352cf47bba3a451c5fed9a49b1`, the commit the tests import |
+| a training recipe for this model (MIT; read, not run, not quoted) | `ostris/ai-toolkit`, `extensions_built_in/diffusion_models/minimax_h3/` | `d6a18ad72da9abca3ffb67ea8e42c25764eee61a` |
 
 **The oracle, and what it is not.** The tests compare against PEFT, diffusers and torch run on tiny models and random
-tensors. diffusers' example training scripts are not part of the checkout these guides read, and no trainer for this
-model was run or read here. So this guide claims parity with the library functions it quotes and with nothing else:
-where a trainer has to make a choice (the shift, the number of noise levels, the density, the weighting), the port
-takes an argument and has no default.
+tensors. diffusers' example training scripts are not part of the checkout these guides read. For the training-time
+choices that diffusers has no code for, §6 follows a third-party trainer's model files as a named recipe. That trainer
+is not the model maker's, and it is not an oracle here: it was read, not run, and nothing is compared with it
+numerically. So this guide claims parity with the library functions it quotes and with nothing else: where a trainer
+has to make a choice (the shift, the number of noise levels, the density, the weighting, the conditioning level), the
+port takes an argument and has no default.
 
 | piece | ours | original | tests |
 | --- | --- | --- | --- |
-| scaling, init, attach, merge, files | `src/h3mlx/lora.py`, `ops.plinear` | PEFT `layer.py`; diffusers `loaders/peft.py`, `utils/peft_utils.py`, `loaders/lora_pipeline.py` | `tests/test_lora.py` (68) |
+| scaling, init, attach, merge, files | `src/h3mlx/lora.py`, `ops.plinear` | PEFT `layer.py`; diffusers `loaders/peft.py`, `utils/peft_utils.py`, `loaders/lora_pipeline.py` | `tests/test_lora.py` (72) |
 | original-layout converter | `lora.convert_original` | diffusers `loaders/lora_conversion_utils.py` | `tests/test_lora_convert.py` (53) |
 | forward process, target, loss | `src/h3mlx/train.py` | diffusers `scheduling_minimax_h3.py`; torch `mse_loss` | `tests/test_train.py` (47) |
-| noise-level sampling, loss weighting | `src/h3mlx/train.py` | diffusers `training_utils.py`, its two schedulers | `tests/test_train_sampling.py` (33) |
+| noise-level sampling, loss weighting | `src/h3mlx/train.py` | diffusers `training_utils.py`, its two schedulers | `tests/test_train_sampling.py` (37) |
+| named adapters on one `Linear` | `src/h3mlx/lora.py`, `ops.plinear` | PEFT `layer.py`; diffusers `load_lora_adapter`, `set_adapters` | `tests/test_lora_stack.py` (10, one of them on a release fixture) |
+| one training example | `train.build_example` | diffusers `p_h3_image/before_denoise.py`, `scheduling_minimax_h3.py`; the recipe | `tests/test_train_example.py` (24) |
+| the example's loss and gradient | `train.example_loss`, `train.loss_and_gradients` | torch autograd on diffusers' transformer with PEFT's layers | `tests/test_train_gradients.py` (15) |
 
 ## 1. LoRA adapters
 
@@ -105,7 +117,7 @@ which comes to 1 / √in. `lora_B` is zero, so a new adapter does nothing until 
   Tests that need equal adapters on both sides copy the tensors across.
 - **float32, always.** The matrices are float32 whatever the base weights are. `alpha` defaults to the rank.
 - **Which modules.** The default is the attention and feed-forward matrices of every block and refiner block
-  (`block_modules`). The time embedder's two linears can be named explicitly. Nothing else can (§1.3).
+  (`block_modules`). Any other `Linear` of the transformer can be named explicitly (§1.3).
 
 `test_init_is_a_float32_no_op` checks the shapes, the dtype over a bf16 base, the bound, the zero `lora_B`, the
 order of the draws, and that the forward with a fresh adapter is the base model's bit for bit.
@@ -117,17 +129,29 @@ order of the draws, and that the forward with a fresh adapter is the base model'
 {{ code('src/h3mlx/lora.py', function='check') }}
 {{ code('src/h3mlx/lora.py', function='attach') }}
 
-- **Only wired linears.** PEFT wraps any `nn.Linear` a file names. Our forward applies a LoRA only where it calls
-  `plinear`: the six matrices of each block and refiner block and the time embedder's two. A LoRA on `proj_in`, on an
-  `adaln_proj` or on the output heads would be silently ignored, so it is refused, as in the HyperFlow loader.
-- **One adapter per `Linear`.** Attaching to weights that already carry a LoRA, HyperFlow's included, is refused.
-  Stacking two adapters is a later piece.
+- **Any `Linear` of the transformer.** PEFT wraps any `nn.Linear` a file names, and diffusers loads a LoRA onto each:
+  the six matrices of a block or refiner block, the time embedder's two, a block's AdaLN projection
+  (`adaln_proj.linear`), the final one (`norm_out.linear`), and the input and output projections. The forward now runs
+  every one of them through `plinear`, so an adapter on any of them acts as it does in diffusers. A first version
+  served the attention, feed-forward and time-embedder linears only and refused the rest; published MiniMax H3
+  adapters carry LoRAs on the AdaLN projections (the mixin's comment in §1.5), so that was a gap.
+- **The modulation cache follows.** The cache (main guide, §2.6) computes each block's AdaLN tables up front and can
+  drop the projections. Its tables come from the same `plinear` call, so they include a LoRA on a projection, and
+  dropping a projection drops the LoRA on it. `test_modulation_cache_carries_a_lora_on_the_adaln_projections` checks a
+  cached forward against the uncached one bit for bit.
+- **A target that is not a `Linear` of the model is refused.** The forward would ignore it.
+- **One unnamed adapter per `Linear`.** Attaching one to weights that already carry a LoRA, HyperFlow's included, is
+  refused. Named adapters stack (§5).
+- **An adapter must match itself.** `Adapter` is two plain dicts, tensors and alphas. `check_keys` refuses a stray
+  tensor, half a pair, a pair without an alpha and an alpha without a pair, for `attach`, `merge` and `save` alike
+  (`test_an_adapter_must_match_its_own_modules`).
 - **A positive, finite alpha. This differs from PEFT on purpose.** PEFT takes any number: zero leaves an adapter that
   does nothing and cannot train, a negative one flips the delta's sign, NaN and infinity poison the forward. `check`
   refuses them, and so do `init`, `read` and `save` (§1.5). `test_alpha_must_be_positive_and_finite` shows PEFT's
   layer taking each of the four and ours refusing it at every entry and exit.
 
 {{ code('src/h3mlx/lora.py', function='check_alpha') }}
+{{ code('src/h3mlx/lora.py', function='check_keys') }}
 - **The dtype has two answers in the original, and so here.** PEFT creates an adapter in its base layer's dtype, and
   `load_lora_adapter` copies a file's values into it: bf16 on the blocks, float32 on the time embedder. That is the
   default (and what `hyperflow.attach` does). A trainer then casts the trainable parameters up:
@@ -234,6 +258,12 @@ What differs from the original, on purpose:
   LoRA, and loads PEFT's `lora_magnitude_vector` as DoRA), rsLoRA, a LoRA bias, `fan_in_fan_out`, any key that is not
   a `lora_A` / `lora_B` weight, half a pair, a rank in the metadata that is not the tensors', and a file holding both
   `transformer.` and `transformer_ref.` adapters unless told which.
+- **A `bias` setting other than none is refused.** With `bias: all` or `lora_only` PEFT also trains base-layer biases
+  and writes them with the adapter, so such metadata describes more than the two matrices the port reads. diffusers
+  loads it without a word (`test_a_bias_setting_other_than_none_is_refused`).
+- **An empty prefix is refused.** `prefix=""` is not `prefix=None`: diffusers takes it as a prefix of its own, finds no
+  key that starts with a dot, and loads nothing; written that way, every key gets a leading dot
+  (`test_an_empty_prefix_is_refused`).
 - **An alpha that is not positive and finite is refused,** from the metadata's `lora_alpha` and `alpha_pattern` and
   from a header `alpha` alike (§1.3). diffusers takes `float("nan")` from a header and hands it to PEFT.
 - **The metadata is strict JSON.** Python's `json.dumps` writes `NaN` and `Infinity` for such numbers, which is what
@@ -348,11 +378,11 @@ sides.
   with a warning and loads what is left as a plain LoRA, which is not the adapter that was trained
   (`test_dora_scale_in_an_original_file_is_refused`).
 
-- **Converted, then refused at attach.** The converter also maps LoRAs on the AdaLN projections and on the patch,
-  condition and final projections, as theirs does. Our forward runs no LoRA there (§1.3), so `attach` refuses such an
-  adapter instead of dropping part of it. The mixin's comment in §1.5 says published H3 LoRAs carry rank-16 LoRAs on
-  the AdaLN projections: those files convert here but do not attach. Wiring `adaln_proj` through `plinear`, and through
-  the modulation cache, is not done.
+- **Every converted module attaches.** The converter also maps LoRAs on the AdaLN projections and on the patch,
+  condition and final projections, as theirs does, and diffusers loads each onto its `Linear`. So does the port
+  (§1.3). `test_every_converted_module_attaches_and_gives_the_same_forward` converts an adapter on all 28 linears of
+  the tiny model and compares the forward with diffusers', then leaves out each group of those modules in turn and
+  checks the output moves.
 
 ### 2.5 The tests
 
@@ -367,7 +397,8 @@ sides.
 | `test_converted_adapter_gives_the_same_forward` (×5) | the tiny transformer's forward against the mixin's `lora_state_dict` + `load_lora_adapter`; guards per layout |
 | `test_header_alpha_with_a_converted_file` (×2) | a header `alpha` used, and ignored beside `.alpha` tensors |
 | `test_original_layout_file_is_read_whole_for_either_partition` (×3) | no prefix, `transformer` and `transformer_ref`: the same adapter, and the forward the mixin's loader for that partition gives |
-| `test_refusals_shared_with_diffusers`, `test_bad_alpha_is_refused` (×4), `test_half_a_pair_names_the_module` (×2), `test_dora_scale_in_an_original_file_is_refused`, `test_unwired_converted_modules_are_refused_at_attach`, `test_layout_detection` | the errors both sides raise; the three ours raises where theirs loops, raises a bare KeyError or drops keys; attach's refusal; which keys count as original |
+| `test_every_converted_module_attaches_and_gives_the_same_forward` | an adapter on every `Linear`, the AdaLN and the input and output projections included: diffusers' forward, and each group counts |
+| `test_refusals_shared_with_diffusers`, `test_bad_alpha_is_refused` (×4), `test_half_a_pair_names_the_module` (×2), `test_dora_scale_in_an_original_file_is_refused`, `test_layout_detection` | the errors both sides raise; the three ours raises where theirs loops, raises a bare KeyError or drops keys; which keys count as original |
 
 ## 3. The forward process, the target and the loss
 
@@ -524,6 +555,11 @@ MiniMax H3's scheduler has a sampling grid and no training grid. The port builds
   (`test_sample_sigmas_refuses_nan_and_a_bad_grid`).
 - **A million levels don't fit.** At shift 12 the float32 grid merges neighbours somewhere between 100,000 and
   1,000,000 points; `training_sigmas` raises instead of returning fewer levels than asked.
+- **The shift must be a positive, finite float32. This differs from the scheduler on purpose.** Its test is
+  `shift <= 0`, which NaN and infinity pass; 1e39 is infinite as a float32 and 1e-50 is zero. Each gives the scheduler
+  a grid with NaN in it and no error, and gave `ops.flow_sigmas` and `denoise.shift_grid` the same, on the sampling
+  path too. Both raise now (`ops.usable_shift`); valid shifts are untouched. `sample_sigmas` also refuses a grid with
+  a level that is not finite (`test_a_shift_that_is_not_a_positive_finite_float32_is_refused`).
 
 From a seed to sigmas, against the torch chain (diffusers' density, the scheduler's grid, the lookup):
 
@@ -532,7 +568,311 @@ From a seed to sigmas, against the torch chain (diffusers' density, the schedule
 | uniform | the same sigmas, bit for bit (`test_same_seed_same_sigmas_uniform`, 40 seeds × 3 grids) |
 | `logit_normal`, `mode` | the same level except when `u` sits within a step or two of a boundary: at most 1 of 40,000 draws moved, to the neighbouring level, in each of five cases (`test_same_seed_nearly_same_sigmas_otherwise` allows 20) |
 
-## 5. What each test would catch
+## 5. Two named adapters on one `Linear`
+
+A trainer may keep a second adapter active beside the one it trains. The recipe of §6 does: it loads an "assistant"
+adapter as a live LoRA for training, frozen, and switches it off for sampling (`minimax_h3.py:354-454` of the pinned
+trainer). In PEFT that is two named adapters on the same layers.
+
+### 5.1 Names, in the weights and in a file
+
+PEFT keeps each adapter's matrices under the adapter's name, so its state dict has
+`<module>.lora_A.<name>.weight` and `<module>.lora_B.<name>.weight`. When it saves one adapter it strips the name: a
+file has `<module>.lora_A.weight`, whichever adapter it was. The port uses the same two spellings in the same two
+places:
+
+{{ code('src/h3mlx/lora.py', function='runtime_key') }}
+{{ code('src/h3mlx/lora.py', function='runtime_tensors') }}
+{{ code('src/h3mlx/lora.py', function='file_tensors') }}
+
+- **In the weights:** `attach(..., name="subject")` puts the matrices under PEFT's runtime names. Beside them it adds
+  two things PEFT keeps as Python state: `<module>.lora_scaling.<name>` where the scaling is not 1, and
+  `<module>.lora_adapters`, the tuple of the adapters active on that `Linear`, in order.
+- **In a file and in `Adapter.tensors`:** no name.
+
+`test_runtime_keys_are_pefts` compares the weights' LoRA keys with PEFT's state dict for two loaded adapters, and
+`test_file_keys_carry_no_adapter_name` compares the file keys with `get_peft_model_state_dict` and with
+`save_lora_adapter(adapter_name=...)`. They are separate tests because they are separate claims.
+
+### 5.2 The forward
+
+PEFT's forward (the extract in §1.1) loops over the active adapters in order. Three details of that loop are easy to
+get wrong:
+
+- it casts the input to each adapter's dtype **and keeps the cast**, so a later adapter sees the input as the earlier
+  one left it;
+- it adds each scaled delta to the running result, so the dtype of the running sum, and where it is rounded, depend
+  on the order;
+- it casts back to the base result's dtype once, at the end.
+
+`plinear` (§1.1) follows it to the letter. An unnamed adapter, HyperFlow's included, takes the old path untouched.
+
+{{ code('src/h3mlx/lora.py', function='attach') }}
+{{ code('src/h3mlx/lora.py', function='set_active') }}
+
+- **Order.** Adapters apply in the order they were attached. `set_active(params, names)` is PEFT's `set_adapters`: it
+  returns weights with those adapters active in that order. The matrices of an adapter that is off stay in the dict,
+  as PEFT keeps them.
+- **Sampling.** The assistant off and the trained adapter on is `set_active(params, ("subject",))`.
+
+`test_stacked_forward_matches_peft_in_every_state` loads both adapters into diffusers' transformer under names and
+compares the forward in five states: both active in either order, each alone, neither. The two adapters overlap on
+most linears, and each has some to itself (the trainable one sits on an AdaLN projection and on `proj_in` too).
+
+`test_stacked_rounding_is_pefts` pins the three details bit for bit on one `Linear`, with an identity base and
+selection matrices so that every product is exact:
+
+| case | what it pins |
+| --- | --- |
+| bf16 base, a bf16 adapter and a float32 one, both orders | which sum is rounded to bf16 on the way |
+| float32 base and input, a bf16 adapter then a float32 one, both orders | the kept cast: the second adapter sees the input rounded to bf16 |
+
+In PEFT itself the two orders give different bits in both cases; the test checks that too.
+
+### 5.3 Two groups of weights
+
+{{ code('src/h3mlx/lora.py', function='split') }}
+
+`split(params, "subject")` returns the trainable adapter's matrices as one dict and everything else as another: the
+base weights, the other adapter, the scalings and the adapter lists. A trainer differentiates with respect to the
+first and merges the two inside the function it differentiates (§7). Nothing is marked as frozen: a weight is frozen
+by not being in the group that is differentiated.
+
+`test_gradients_reach_the_trainable_factors_only` compares the gradient of a simple objective with torch's, where the
+assistant's and the base's parameters have `requires_grad` off and end with no gradient. The worst gradient tensor is
+8.6e-6 from torch's, relative. The trainable gradient still runs through the assistant's deltas in the layers
+downstream; the test checks that switching the assistant off changes it.
+
+Not from PEFT: PEFT's `set_adapters` turns `requires_grad` on for every adapter it activates, so a trainer has to
+freeze the assistant again after activating it. The torch side of these tests does.
+
+### 5.4 The public training adapter, by its header
+
+The recipe's assistant for P-H3-Image is a public file. Its safetensors header (keys, shapes and dtypes; no tensor
+data) is a release fixture, fetched by `scripts/fetch_test_fixtures.py` like HyperFlow's:
+
+- **File:** `ostris/minimax_h3_training_adapter`, `p_h3_image_training_adapter_v1.safetensors`, revision `e4e119ca`.
+  The repository states no licence.
+- **Header:** 416 tensors, all bf16, rank 16, in the original checkpoint's key layout with the `diffusion_model.`
+  prefix, on `qkv_proj`, `out_proj`, `mlp.fc1` and `mlp.fc2` of 50 blocks and 2 refiner blocks. No `.alpha` tensors
+  and no `alpha` entry.
+
+`test_training_adapter_header_fits_p_h3_image` converts the header's shapes (§2) and checks them against the released
+transformer's config: 312 modules, the attention and feed-forward linears of every block and refiner block, each pair
+of the shape its `Linear` needs, scaling 1, and the same keys and shapes as diffusers' converter gives. It also
+stacks under a name beside a fresh trainable adapter.
+
+**A header proves nothing about whether the adapter fits the weights.** Shapes and names agree; the values were never
+read. Whether it was trained against these weights, and whether training with it attached does what its name says,
+can only be found out on real weights.
+
+### 5.5 The tests
+
+| test | pins |
+| --- | --- |
+| `test_runtime_keys_are_pefts` | the weights' LoRA keys for two named adapters are PEFT's state-dict keys; what is added beside them |
+| `test_file_keys_carry_no_adapter_name` | file keys against PEFT's and diffusers' writers; `runtime_tensors` and `file_tensors` |
+| `test_stacked_forward_matches_peft_in_every_state` | the tiny transformer's forward in five activation states, within 2e-4 |
+| `test_stacked_rounding_is_pefts` (×2) | PEFT's order of casts and sums, bit for bit, in both adapter orders |
+| `test_modulation_cache_carries_a_lora_on_the_adaln_projections` (×2) | a cached forward with AdaLN LoRAs, named and unnamed, bit for bit the uncached one; what the cache drops |
+| `test_gradients_reach_the_trainable_factors_only` | the trainable group's gradient against torch autograd; none elsewhere |
+| `test_stacking_refusals` | a name twice, a named adapter beside an unnamed one (HyperFlow's included), names with dots, merging onto named adapters, unknown names |
+| `test_training_adapter_header_fits_p_h3_image` (release fixture) | the public adapter's header against the released config |
+
+## 6. One training example
+
+diffusers has no trainer for this model in the checkout read here, so there is no library code for what a training
+step feeds the transformer. The port follows a named recipe for that, **the MiniMax H3 and P-H3-Image model files of
+`ostris/ai-toolkit` at commit `d6a18ad7`** (MIT). It is a third-party trainer's recipe. It is not the model maker's:
+how Pruna or MiniMax trained is not published. It was read, not run, and none of its code is copied here.
+
+Most of what a training step needs is also a sampling step, and for those diffusers has code that the port already
+matches. So the rule in this section is: where diffusers has the step, use the port's tested function and test
+against diffusers; where only the recipe has it, follow the recipe and say so.
+
+### 6.1 What the recipe says
+
+| step | in the recipe | diffusers has it? |
+| --- | --- | --- |
+| the model's timestep is `1 − sigma`, sigma from a 0..1000 scale | `minimax_h3.py:866`, `874-875` | yes: the scheduler's convention |
+| audio level: remapped from the video level by the two shifts; for P-H3-Image the audio shift is the video shift, so one level for both | `minimax_h3.py:871-873`; `p_h3_image.py:120-121`; `src/packing.py:646-653` | at sampling both schedulers get the same sigmas |
+| a picture has no soundtrack: audio rows are zeros noised at the audio level | `minimax_h3.py:919-923` | no: sampling starts them from noise |
+| no loss on audio rows for a single frame | `minimax_h3.py:892-901` | no |
+| row timesteps: text and video rows at the picture's, audio rows at the audio's, references at `max(t, level)` | `minimax_h3.py:975-983` | yes: `build_row_timesteps` |
+| reference pictures: encoded, mixed with noise at the conditioning level, packed ahead of the picture's rows | `minimax_h3.py:1258-1348` | yes: `PH3ImagePrepareConditionLatentsStep` |
+| the reference encode: a seed-42 posterior sample **without** float16 rounding for P-H3-Image | `minimax_h3.py:724-738`; `p_h3_image.py:122-123` | the pipeline rounds |
+| the loss is on the generated video rows; the model's output is the velocity `x_0 − noise` | `minimax_h3.py:1025-1031`, `1047-1050` | the sign: yes (§3.2) |
+| an assistant adapter, live and frozen during training | `minimax_h3.py:354-454` | no (§5) |
+
+Values read from the recipe's source. None is a default in the port:
+
+| value | where |
+| --- | --- |
+| training grid: 1,000 levels, shifted by the video shift, no dynamic shifting | `minimax_h3.py:103-107`, `230-233` |
+| video shift 12.0, audio shift 3.0 | `src/packing.py:47-48` |
+| conditioning level 0.999, encode seed 42 | `src/packing.py:52-53` |
+| two audio latents for one frame, two audio channels | `src/packing.py:43`, `91-93` |
+
+**No preset is defined.** A preset would need the recipe's timestep density and loss weighting too. Those are set in
+the trainer's loop and job configuration, which were not read, so they are missing, and a preset with holes would be
+worse than none.
+
+Not read, and so not claimed: how the trainer mixes the picture with noise and how it samples timesteps (its loop),
+the base-class method its audio rows pass through, and its own packing of the sequence.
+
+### 6.2 The builder
+
+{{ code(BD, function='PH3ImagePrepareConditionLatentsStep.__call__', root=DM) }}
+{{ code(BD, function='PH3ImagePrepareLatentsStep.__call__', root=DM) }}
+{{ code(BD, lines=(939, 944), root=DM) }}
+
+{{ code('src/h3mlx/train.py', struct='Example') }}
+{{ code('src/h3mlx/train.py', function='build_example') }}
+
+Step by step, and whose it is:
+
+- **Layout: diffusers'.** Text-to-image's layout without references and the edit's with them, the two
+  `image.generate` builds (P-H3-Image guide). The recipe packs its own sequence, which was not read and is not
+  compared.
+- **Order of the draws: the pipeline's.** One per reference in packed order, then the picture's, then the audio
+  rows'. At sigma 1 the example's generated rows and audio rows are therefore the sampler's starting rows for the
+  same seed.
+- **References: the pipeline's mix.** `scale_noise` to the conditioning timestep given as a tensor, so `1 − t` is
+  taken in float32. The recipe writes the same mix with a Python float, whose `1 − t` is double (§3.1): 1.3e-5
+  relative apart on the noise's factor. The level itself is an argument with no default.
+- **The picture: the scheduler's forward process** (§3.1) at `t = 1 − sigma` in float32, given as a tensor. The factor
+  on the noise is then the `1 − t` that the sampler's step multiplies the velocity by (§3.2). Its target is
+  `velocity_target`.
+- **Audio rows: the recipe's.** Silence noised at the audio level. `audio_sigma=None` is the picture's level, the
+  recipe's rule for P-H3-Image. One difference: the recipe multiplies the noise by sigma, the port by `1 − t`. They
+  are the same number down to sigma 0.5; below that they differ by the float32 rounding of `t = 1 − sigma`, at most
+  6e-8.
+- **Row timesteps: diffusers'.** `denoise.row_timesteps`, with the references at `max(t, level)`.
+
+### 6.3 The loss mask
+
+{{ code('src/h3mlx/train.py', function='loss_mask') }}
+
+The loss covers the generated video rows and nothing else. `loss_mask` is that set over the packed sequence, and
+`Example.generated` takes the same rows out of the transformer's video output.
+
+The rows are found by the layout, never by timestep. With the conditioning level at 0.999, at a noise level of 0.001
+or less the picture's timestep is at or above it, the references are held at the picture's timestep, and a generated
+row and a condition row carry the same value. `test_loss_mask_does_not_depend_on_timesteps` builds that case at sigma 0.0005:
+the table of distinct timesteps has one entry, a mask read off timesteps takes the references' rows as rows to train
+on, and the layout's mask is unchanged.
+
+### 6.4 The reference pictures' encode
+
+{{ code('src/diffusers/modular_pipelines/p_h3_image/encoders.py', lines=(61, 65), root=DM) }}
+
+{{ code('src/h3mlx/vae.py', function='encode_condition') }}
+{{ code('src/h3mlx/train.py', function='encode_references') }}
+
+The pipeline rounds the posterior sample through float16 before normalising it; the port's `encode_condition` does
+the same, and that is what the model is shown at sampling. The recipe turns the rounding off for P-H3-Image. Neither
+is known to be how the model was trained. So `train.encode_references` takes the rounding as a required argument:
+
+- `float16_round=True` is the pipeline's encode, unchanged.
+- `float16_round=False` is the posterior sample itself, as the recipe encodes references.
+
+The two differ by float16's rounding, at most 5e-4 relative. A comparison with torch through the tiny VAE is looser
+than that, so `test_reference_encode_float16_rounding_is_a_choice` checks the rounding directly: un-normalised, the
+rounded latents are float16 values and the others are not.
+
+The builder takes latents, not pictures. Resizing a reference is not part of it. The pipeline keeps a reference at
+its own size within an area range (P-H3-Image guide); the recipe scales it down to the target's area
+(`src/packing.py:112-124`). Which a trainer does belongs with the latent cache, a later piece.
+
+### 6.5 The tests
+
+The torch side of `tests/test_train_example.py` assembles the same example from diffusers' functions: the two layout
+builders, `patchify_video_latents`, the scheduler's `scale_noise` and `build_row_timesteps`, with the noise drawn from
+one torch generator in the pipeline's order.
+
+| test | pins |
+| --- | --- |
+| `test_example_is_diffusers_pieces` (3 reference counts × 4 levels) | layout, rows, audio rows, target and row timesteps, bit for bit; at sigma 1 the sampler's starting rows; the audio rows against sigma times the noise |
+| `test_example_guards` | separate draws; references not left clean; an audio level and a conditioning level of their own move what they should and nothing else |
+| `test_example_target_steps_back_to_the_picture` (×4) | one Euler step along the example's target lands on the picture's clean rows; along the flipped target it does not |
+| `test_loss_mask_is_the_generated_video_rows` (×3) | the mask against one built from diffusers' layout; `Example.generated` |
+| `test_loss_mask_does_not_depend_on_timesteps` | a generated row and a condition row with the same timestep value |
+| `test_reference_encode_float16_rounding_is_a_choice`, `test_encode_references_needs_the_choice` | both answers reach the encode; no default |
+| `test_example_refusals` | no conditioning level; a level outside (0, 1]; latents in the wrong layout |
+
+## 7. The example's loss and its gradient
+
+{{ code('src/h3mlx/train.py', function='example_loss') }}
+{{ code('src/h3mlx/train.py', function='loss_and_gradients') }}
+
+The weights come in as two arguments, the trainable group first. `mx.value_and_grad` differentiates with respect to
+its first argument, so the gradients are a dict with the trainable group's keys. The base weights and any other
+adapter are in the second argument and are constants.
+
+The torch side is diffusers' transformer with PEFT's layers: a frozen assistant and a trainable adapter loaded under
+names, the trainable parameters cast to float32 (`cast_training_params`, §1.3), the example assembled from diffusers'
+functions (§6.5), `mse_loss` on the generated video rows, `backward`.
+
+### 7.1 Float32
+
+`test_loss_and_gradients_are_torchs` runs eight cases: text-to-image and edits with one and two references, four
+noise levels, with the assistant beside the trainable adapter and without. The loss agrees to 1e-5 relative, and
+every gradient tensor to 1e-4 (the worst measured is 1.2e-5).
+
+At PEFT's initialisation `lora_B` is zero, which is where training starts. Then the loss is the model's without the
+adapter, `lora_A`'s gradient is exactly zero on both sides, and `lora_B`'s is torch's
+(`test_at_pefts_init_the_gradient_reaches_lora_b_alone`).
+
+### 7.2 A bf16 base with float32 factors
+
+This is the setting the trainer is meant to run in: the base in the release's mixed precision, the assistant in its
+base's dtype as loaded, the trainable matrices float32 and their products float32. There is no exact answer in bf16,
+so each side is scored against the float32 run, as the forward's mixed-precision tests are. Four layers, adapters on
+the attention and feed-forward linears (`test_gradients_over_a_bf16_base_track_torchs`):
+
+| seed | gradient error against float32, torch | MLX | loss error, torch | MLX |
+| --- | --- | --- | --- | --- |
+| 0 | 0.0118 | 0.0117 | 0.0039 | 0.0053 |
+| 1 | 0.0114 | 0.0116 | 0.0008 | 0.0005 |
+| 2 | 0.0155 | 0.0151 | 0.0009 | 0.0015 |
+
+The test asks that MLX's gradient error be at most 1.5 times torch's own plus 1e-3, and that both losses be within 1%
+of the float32 loss.
+
+- **What this does not pin.** Its allowance is wide: an implementation that ran the trainable products in bf16 passes
+  it. That the products are float32 is pinned bit for bit at the level of one `Linear` (§5.2,
+  `test_stacked_rounding_is_pefts`), not here.
+- **Larger adapters are noisier.** In a two-layer variant with adapter matrices three times larger, the gradient
+  errors ran from 1% to 10% on both sides over six seeds, with MLX between 0.5 and 1.5 times torch's (a probe, not a
+  test). These are tiny random models. They say nothing about 50 real layers.
+- **No bf16 product path.** Running the trainable products in bf16 to save memory is a separate mode, not built.
+
+### 7.3 Who gets a gradient, and the sign
+
+- `test_no_gradient_for_the_base_or_the_assistant`: in torch only the trainable adapter's parameters hold a gradient
+  after `backward`. Ours returns the trainable group's keys and nothing else. The check is not empty: differentiated
+  on purpose, the assistant's matrices and a base weight have non-zero gradients here, so a function that
+  differentiated every weight would return them.
+- `test_the_targets_sign_reaches_the_loss_and_the_gradient`: the torch side's target is not `x_0 − noise` but the
+  velocity the scheduler's step needs, solved from the step equation in float64 (§3.2). Ours matches it. With the
+  example's target negated the loss moves by 8% and the gradient is 1.25 away, relative. (A random model's output is
+  nearly uncorrelated with the target, so the loss alone is a weak witness of the sign; the gradient is not.)
+
+One thing about MLX learned here: `mx.value_and_grad` walks every argument it is handed, and it rebuilds the tuples
+of adapter names in the dict of constants. The arrays in it are left as the same objects.
+
+### 7.4 The tests
+
+| test | pins |
+| --- | --- |
+| `test_loss_and_gradients_are_torchs` (×8) | float32 loss and every gradient tensor against torch and PEFT |
+| `test_at_pefts_init_the_gradient_reaches_lora_b_alone` | the start of training: zero `lora_B` |
+| `test_weight_scales_the_loss_and_the_gradient` | the loss weight |
+| `test_no_gradient_for_the_base_or_the_assistant` | gradients for the trainable group only |
+| `test_the_targets_sign_reaches_the_loss_and_the_gradient` | the target's sign, against a target solved from the step equation |
+| `test_gradients_over_a_bf16_base_track_torchs` (×3) | bf16 base, float32 factors: MLX's error against torch's own |
+
+## 8. What each test would catch
 
 Each wrong implementation below was made on a copy of the sources and run against the tests; the named test failed.
 
@@ -552,7 +892,9 @@ Each wrong implementation below was made on a copy of the sources and run agains
 | `save` casts every tensor to float32 | `test_half_precision_adapter_keeps_its_dtype_in_the_file` |
 | a zero, negative, NaN or infinite alpha accepted by `check`, `init`, `read` (metadata or header) or `save`; NaN let through alone; the writer's JSON not strict | `test_alpha_must_be_positive_and_finite`, `test_saved_metadata_is_strict_json` |
 | DoRA keys checked across the whole file, or not checked in the component read | `test_prefix_reads_one_component_and_ignores_the_others` |
-| unwired targets accepted | `test_refusals` |
+| `check` or `save` not comparing the tensors with the modules; extra tensors, or missing ones, not noticed | `test_an_adapter_must_match_its_own_modules` |
+| an empty prefix taken by `save` or by `read`; a `bias` setting other than none accepted | `test_an_empty_prefix_is_refused`, `test_a_bias_setting_other_than_none_is_refused` |
+| a target that is not a `Linear` accepted | `test_refusals` |
 | feed-forward halves not swapped; q, k, v in another order; no de-interleave; a wrong rename | `test_converts_to_diffusers_dicts` |
 | alpha not folded, or all of it put on `lora_A`; folded with MLX's half-precision product | `test_converts_to_diffusers_dicts` (the last at rank 6) |
 | alpha applied again after the fold | `test_header_alpha_with_a_converted_file` |
@@ -570,27 +912,50 @@ Each wrong implementation below was made on a copy of the sources and run agains
 | half-precision or integer levels upcast | `test_loss_weighting_takes_float32_or_float64_only` |
 | grid one point short, with its terminal 0, or ascending | `test_training_sigmas_are_the_schedulers` |
 | lookup rounded instead of floored, in float64, or unclipped | `test_same_seed_same_sigmas_uniform`, `test_sample_sigmas_lookup` |
-| a NaN `u` let through the range test; the grid's shape unchecked | `test_sample_sigmas_refuses_nan_and_a_bad_grid` |
+| a NaN `u` let through the range test; the grid's shape or its levels unchecked | `test_sample_sigmas_refuses_nan_and_a_bad_grid` |
+| `flow_sigmas` or `shift_grid` testing `shift <= 0` only; the shift not checked as a float32 | `test_a_shift_that_is_not_a_positive_finite_float32_is_refused` |
+| a later adapter's input cast from the original input; the deltas summed before they meet the base result; adapters applied in sorted order; a named adapter's products in the base's dtype | `test_stacked_rounding_is_pefts` |
+| a named adapter's scaling ignored; `set_active` leaving every adapter on, or ignoring the order given | `test_stacked_forward_matches_peft_in_every_state` |
+| `attach` overwriting a `Linear`'s adapter list; `split` handing over every named adapter | `test_runtime_keys_are_pefts`, `test_file_keys_carry_no_adapter_name` |
+| the frozen adapter's delta cut from the gradient | `test_gradients_reach_the_trainable_factors_only`, `test_loss_and_gradients_are_torchs` |
+| an unnamed adapter attached beside a named one; `merge` onto weights with a named adapter | `test_stacking_refusals` |
+| a block's AdaLN projection, the final one, `proj_in`, `audio_proj_out` or `context_embedder` not through `plinear` | `test_stacked_forward_matches_peft_in_every_state`, `test_every_converted_module_attaches_and_gives_the_same_forward` |
+| the modulation cache building its tables without the LoRA, or leaving a dropped projection's LoRA behind | `test_modulation_cache_carries_a_lora_on_the_adaln_projections` |
+| the example's target `noise − x_0`; the picture's noise drawn before the references'; the references or the picture mixed with a Python float; references left clean; the picture's rows ahead of the references'; an edit packed as text-to-image | `test_example_is_diffusers_pieces` |
+| audio rows left as plain noise, or at the picture's level whatever `audio_sigma`; the references' timestep not raised to the picture's | `test_example_is_diffusers_pieces`, `test_example_guards` |
+| the loss mask covering the condition rows; `generated` keeping them | `test_loss_mask_is_the_generated_video_rows` |
+| float16 rounding always on, or inverted; the choice dropped on the way to the encode | `test_reference_encode_float16_rounding_is_a_choice`, `test_encode_references_needs_the_choice` |
+| the example's sigma unchecked | `test_example_refusals` |
+| gradients taken for every weight; the loss over the condition rows too; every row at the first timestep; the audio rows left out of the forward | `test_loss_and_gradients_are_torchs` |
+| the weight dropped from the example's loss | `test_weight_scales_the_loss_and_the_gradient` |
 
 Where a row names a dtype, the change is caught only there. A tensor timestep's `1 − t` taken in float64 from the
 value before its cast is one such: for a float32 sample it rounds to the same float32 number, because that
 subtraction is a single correctly rounded operation either way, and only the bf16 cases fail, where the timestep
 must be cast to bf16 before the subtraction.
 
-## 6. Not done, and open
+## 9. Not done, and open
 
-- **No training.** No loop, no gradient test against torch, no memory-bounded backward pass, no optimizer step, no
-  latent or text caches, no script, and no run on real weights. The pieces here have not been used together.
-- **Two adapters on one `Linear`** (a frozen one beside a trainable one) are refused. PEFT's forward casts the input
-  inside its loop over active adapters (§1.1's extract), which will matter then.
-- **The example builder.** Which rows are noised, at which timesteps, what the audio rows hold during image training,
-  and how condition rows are treated are not decided here. §3.3 says only what the loss needs from it.
+- **No training.** No memory-bounded backward pass, no optimizer step, no latent or text caches, no script, and no
+  run on real weights. The pieces here have been used together on a tiny random model for one loss and one gradient
+  (§7), and no further.
+- **Memory.** `example_loss` runs the whole forward under autograd. The forward evaluates block by block, which keeps
+  every block's graph alive for the backward pass. That is fine at tiny sizes and is what the memory-bounded backward
+  pass is for.
+- **A quantized base.** The weights are passed as arguments, and `mx.value_and_grad` walks them. A quantized weight
+  is an object, not an array; whether it can be passed this way is untested.
+- **The recipe's unread parts.** How the trainer mixes the picture with noise, how it samples timesteps, its density
+  and its loss weighting were not read (§6.1). No preset is defined.
 - **A step-distilled base.** P-H3-Image samples in 8 steps without guidance. Whether a plain flow-matching loss on it
-  keeps that behaviour is untested here.
-- **LoRAs on the AdaLN projections** convert but do not attach (§2.4).
+  keeps that behaviour, with or without the assistant adapter, is untested here.
+- **The assistant adapter's values.** Only its header was read (§5.4).
+- **Reference pictures' sizes.** The builder takes latents. Which sizing rule a trainer uses for references is not
+  decided (§6.4).
 - **Density and weighting defaults.** None are chosen. The tests cover the functions, not which settings suit this
   model.
-- **bf16.** Every forward test of an adapter here is float32, except `test_adapter_dtypes_follow_peft`, which is one
-  forward on four tiny layers. Gradients in bf16 are untested.
-- **Real files.** No published adapter was read by this code; the tests write their own. Layout details of real
-  files that the converter's docstring does not mention would not be caught.
+- **bf16.** Gradients over a bf16 base are tested on four tiny layers, with a wide allowance (§7.2). A bf16 product
+  path for the trainable matrices is not built.
+- **Real files.** No published adapter's tensors were read by this code; the tests write their own. Layout details of
+  real files that the converter's docstring does not mention would not be caught.
+- **Routing between partitions.** `h3mlx.lora` returns an adapter and the caller attaches it to the weights it means.
+  diffusers' routing of a file to `transformer` or `transformer_ref` is not ported.

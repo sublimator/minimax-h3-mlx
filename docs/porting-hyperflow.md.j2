@@ -72,10 +72,12 @@ header, each tensor's shape against its parameter), and one theirs doesn't need:
 
 - **Shapes:** every LoRA must fit its base 2-D `Linear` weight.
 - **Rank and scaling:** all LoRAs share one positive rank, and the scaling must be 1 (§2).
-- **Wiring:** every target must be a linear that our forward actually runs through `plinear` (`wired_shapes`). PEFT
-  would wrap *any* `nn.Linear` a file names, `proj_in` or `adaln_proj` included. Our forward calls plain `linear` for
-  those, so a LoRA there would be silently ignored; it is refused instead. The released file targets exactly the wired
-  set.
+- **Wiring:** every target must be one of the linears a HyperFlow file may sit on (`wired_shapes`): the attention and
+  feed-forward matrices of each block and refiner block, and the two time embedders' linears. PEFT would wrap *any*
+  `nn.Linear` a file names, `proj_in` or `adaln_proj` included; a HyperFlow file that names one of those is refused.
+  The released file targets exactly the wired set. (When this was written the forward ran only those linears through
+  `plinear`. It now runs every one, for general adapters: `docs/porting-lora-training.md`. HyperFlow's check is
+  unchanged.)
 
 `check_file` runs all of this from the header alone, against shapes derived from the transformer's config, and also
 checks the grid. The run script calls it in the plan step (§7).
