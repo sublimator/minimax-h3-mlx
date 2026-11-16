@@ -1,5 +1,5 @@
 """Pieces of a flow-matching trainer for the MLX transformer: the forward process, the target, the loss, one training
-example, and sampling the noise level. No training loop here.
+example and its loss and gradient, and sampling the noise level. No training loop here.
 
 MiniMax H3's transformer predicts a data-ward velocity. Its scheduler (diffusers `scheduling_minimax_h3.py`) works in
 `t = 1 - sigma`, with `t = 1` clean: `scale_noise` mixes `x_t = t * x_0 + (1 - t) * noise`, and `step` recovers
@@ -198,6 +198,33 @@ def build_example(cfg: dict, text_token_tags, latents: mx.array, sigma, noise, *
     return Example(layout=layout, video_rows=mx.concatenate(rows), audio_rows=audio_rows,
                    target=ops.patchify(velocity_target(clean, drawn), patch), clean_rows=ops.patchify(clean, patch),
                    timestep=timestep, timestep_indices=timestep_indices, sigma=sigma32)
+
+
+# --- the loss of an example, and its gradient ----------------------------------------------------------------------
+
+
+def example_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None) -> mx.array:
+    """One example's loss: the transformer's forward on the example's rows with the weights `{**frozen, **trainable}`,
+    then `flow_match_loss` of the generated video rows against the example's target. Nothing is taken from the audio
+    output or from the condition rows.
+
+    The weights come in as two arguments, the trainable matrices first (`lora.split`), so the function can be
+    differentiated with respect to them and to nothing else. `text` is the prompt's embeddings, (1, text rows, text
+    dim). Products with float32 LoRA matrices are float32 whatever the base's dtype (`ops.plinear`), and the loss is
+    float32."""
+    lay = example.layout
+    video_pred, _ = ops.dit_forward(
+        {**frozen, **trainable}, cfg, example.video_rows[None], example.audio_rows[None], text,
+        mx.array(example.timestep), mx.array(example.timestep_indices), token_tags=mx.array(lay.token_tags),
+        position_ids=mx.array(lay.position_ids.astype(np.float32)), video_indices=mx.array(lay.video_indices),
+        audio_indices=mx.array(lay.audio_indices), text_indices=mx.array(lay.text_indices))
+    return flow_match_loss(example.generated(video_pred), example.target[None], weight)
+
+
+def loss_and_gradients(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None):
+    """(loss, gradients) of `example_loss`. The gradients are a dict with `trainable`'s keys and no others: the base
+    weights and any other adapter in `frozen` are constants of the differentiation and get none."""
+    return mx.value_and_grad(example_loss)(trainable, frozen, cfg, example, text, weight)
 
 
 # --- sampling the noise level ------------------------------------------------------------------------------------------
