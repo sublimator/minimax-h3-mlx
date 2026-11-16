@@ -18,19 +18,25 @@ to `checkpoints/step-NNNNNNNN/`; the finished adapter is `adapter.safetensors`, 
 Exit codes: 0 the run reached `--max-steps`; 3 the wall clock or the memory limit stopped the session (resume to go
 on); 2 the arguments, or a `--resume` that does not match the run directory.
 
-This script downloads nothing and reads only the folders it is given.
+This script downloads nothing and reads only the folders it is given: it turns the Hugging Face hub off for its
+process before anything that could reach it is imported, so a tokenizer or processor folder that is not there is an
+error and never a fetch.
 """
 
-import argparse
-import gc
-import json
-import sys
-import time
-from pathlib import Path
+import os
 
-import mlx.core as mx
-import numpy as np
-from PIL import Image, ImageOps
+os.environ["HF_HUB_OFFLINE"] = "1"
+
+import argparse  # noqa: E402
+import gc  # noqa: E402
+import json  # noqa: E402
+import sys  # noqa: E402
+import time  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import mlx.core as mx  # noqa: E402
+import numpy as np  # noqa: E402
+from PIL import Image, ImageOps  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))

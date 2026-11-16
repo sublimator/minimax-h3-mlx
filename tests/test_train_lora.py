@@ -168,6 +168,22 @@ def test_a_missing_argument_is_an_error_that_names_it(work, capsys, flag):
     assert not run_dir.exists()
 
 
+def test_the_script_turns_the_hub_off_before_it_imports_anything():
+    """The script must not download. Its first statement after the docstring sets `HF_HUB_OFFLINE`, ahead of every
+    import that could bring in a library that reads it, and a process that runs the script has the hub off."""
+    source = (ROOT / "scripts" / "train_lora.py").read_text()
+    body = source.split('"""', 2)[2]
+    statements = [line for line in body.splitlines() if line.strip() and not line.startswith("#")]
+    assert statements[:2] == ["import os", 'os.environ["HF_HUB_OFFLINE"] = "1"']
+    probe = ("import runpy, sys, os; sys.argv = ['train_lora.py', '--help']\n"
+             "try:\n    runpy.run_path(sys.argv.pop(0) and %r, run_name='__main__')\n"
+             "except SystemExit:\n    pass\n"
+             "import huggingface_hub.constants as c; print('offline', os.environ['HF_HUB_OFFLINE'], c.HF_HUB_OFFLINE)" % str(ROOT / "scripts" / "train_lora.py"))
+    env = {k: v for k, v in os.environ.items() if k != "HF_HUB_OFFLINE"}
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env).stdout
+    assert out.strip().endswith("offline 1 True"), out[-300:]
+
+
 def test_only_the_backward_way_has_a_default():
     """Every option of the parser is required, but for: the optional assistant, the density's own parameters and the
     reference choices (required when they apply, checked below), the two modes, and how the gradient is taken, which
