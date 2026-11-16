@@ -1,6 +1,9 @@
 """P-H3-Image against diffusers' own implementation (main at d3d8af89, `PH3Image*`), on tiny random models: the text
 connector, the single-frame image VAE, the text-to-image and edit layouts, the edit resize rules, the text encoder's
-several hidden states, and both workflows end to end through `PH3ImageBlocks`."""
+several hidden states, and both workflows end to end through `PH3ImageBlocks`, without and with a LoRA adapter loaded
+into diffusers' transformer."""
+
+import copy
 
 import mlx.core as mx
 import numpy as np
@@ -10,7 +13,7 @@ from conftest import RELEASE, assert_close, state_mx, to_mx
 from PIL import Image
 
 from h3mlx import image as I
-from h3mlx import load
+from h3mlx import load, lora
 from h3mlx import vae_ops as V
 from h3mlx.packing import Ref, build_packed_sequence, build_ref2va_packed_sequence
 from h3mlx.vae import VaeConfig, VideoVAE, encode_condition
@@ -337,7 +340,8 @@ E2E = dict(reference_min_pixels=32 * 32, reference_max_pixels=64 * 64, canvas_mi
            vision_pixels=48 * 48)
 
 
-def run_diffusers(t, prompt, images, height, width, seed):
+def run_diffusers(t, prompt, images, height, width, seed, **extra):
+    """`extra` goes to the pipeline call as it is (`attention_kwargs`)."""
     from diffusers.modular_pipelines.p_h3_image.modular_blocks_p_h3_image import PH3ImageBlocks
 
     blocks = PH3ImageBlocks()
@@ -353,7 +357,8 @@ def run_diffusers(t, prompt, images, height, width, seed):
         kw.update(height=height, width=width)
     with _quiet():
         out = pipe(prompt=prompt, generator=torch.Generator().manual_seed(seed), output_type="np",
-                   output=["images", "prompt_embeds", "text_token_tags"] + (["condition_rows"] if images else []), **kw)
+                   output=["images", "prompt_embeds", "text_token_tags"] + (["condition_rows"] if images else []), **kw,
+                   **extra)
     return np.asarray(out["images"])[0], out["prompt_embeds"], out["text_token_tags"], out.get("condition_rows")
 
 
@@ -375,8 +380,10 @@ def components(t):
     return c
 
 
-def run_ours(t, prompt, images, height, width, seed, free=False, cache=False):
+def run_ours(t, prompt, images, height, width, seed, free=False, cache=False, adapter=None, scale=None):
     c = components(t)
+    if adapter is not None:
+        c.dit_params = lora.for_sampling(c.dit_params, c.dit_cfg, adapter, scale)
     dbg = {}
     with _quiet():
         img = I.generate(c, prompt, images=images, height=height, width=width, seed=seed, check_finite=True, debug=dbg,
@@ -414,6 +421,57 @@ def test_end_to_end_matches_diffusers(workflow):
     assert got.shape == want.shape
     assert np.abs(got - want).max() < 2e-5
     assert want.std() > 0.01  # not a flat image that would match anything
+
+
+@NEEDS_PROCESSOR
+@pytest.mark.parametrize("workflow", ["text2image", "edit"])
+def test_end_to_end_with_an_adapter_matches_diffusers(tmp_path, workflow):
+    """The whole pipeline with a LoRA on every block Linear, against diffusers with the same file loaded into its
+    transformer (`load_lora_adapter`): as trained, and at other strengths both ways diffusers scales an adapter for this
+    pipeline (`set_adapters(name, weights=)` on the transformer, `attention_kwargs={"scale": ...}` on the call). The
+    bound is the one the pipeline is held to without an adapter. Guards: the adapter moves diffusers' own picture
+    by 500 times that bound, and so does each change of scale."""
+    from test_lora import FILE, random_adapter
+
+    t = build()
+    plain = dict(t, dit=copy.deepcopy(t["dit"]))  # ours reads the torch weights: before PEFT wraps the Linears
+    cfg = dict(t["dit"].config)
+    modules = lora.block_modules(cfg)
+    lora.save(tmp_path / FILE, random_adapter(cfg, {m: 4 for m in modules}, {m: 6.0 for m in modules}, seed=5, std=0.1))
+    rng = np.random.default_rng(11)
+    images, height, width, prompt = None, 40, 56, "A risograph print of a lighthouse at dusk, two inks, no other text."
+    if workflow == "edit":
+        images = [Image.fromarray(rng.integers(0, 256, (h, w, 3), dtype=np.uint8)) for h, w in ((40, 48), (56, 32))]
+        height, width, prompt = None, None, EDIT_PROMPT
+
+    def theirs(**extra):
+        with torch.no_grad():
+            return run_diffusers(t, prompt, images, height, width, seed=7, **extra)[0]
+
+    def ours(scale):
+        adapter = None if scale is None else lora.load(tmp_path / FILE)
+        return run_ours(plain, prompt, images, height, width, seed=7, adapter=adapter, scale=scale)[0]
+
+    without = theirs()
+    base_err = np.abs(ours(None) - without).max()
+    t["dit"].load_lora_adapter(str(tmp_path), weight_name=FILE, adapter_name="default")
+    assert {layer.scaling["default"] for layer in t["dit"].modules() if hasattr(layer, "lora_A")} == {1.5}
+    wants = {1.0: theirs()}
+    for scale in (0.6, -1.3):
+        by_argument = theirs(attention_kwargs={"scale": scale})
+        t["dit"].set_adapters("default", weights=scale)
+        wants[scale] = theirs()
+        t["dit"].set_adapters("default", weights=1.0)
+        assert np.array_equal(by_argument, wants[scale]), "diffusers' two ways of scaling agree"
+    print(workflow, f"no adapter: max |diff| {base_err:.2e}")
+    assert base_err < 2e-5
+    for scale, want in wants.items():
+        err = np.abs(ours(scale) - want).max()
+        print(workflow, f"adapter x {scale}: max |diff| {err:.2e}; the adapter moves diffusers' picture by "
+                        f"{np.abs(want - without).max():.2e} (mean {np.abs(want - without).mean():.2e})")
+        assert err < 2e-5
+        assert np.abs(want - without).max() > 1e-2
+    assert np.abs(wants[0.6] - wants[1.0]).max() > 1e-2 and np.abs(wants[-1.3] - wants[1.0]).max() > 1e-2
 
 
 @NEEDS_PROCESSOR

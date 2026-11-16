@@ -1,7 +1,9 @@
 """`scripts/run_p_h3_image.py` on a tiny release saved in diffusers' own layout: text-to-image and edit through the
 command line against diffusers' `PH3ImageBlocks`, the re-decode path (faithful, and refusing bad rows), the VAE's
-bfloat16 loading policy against `from_pretrained`, the upsampler's aspect label, and early refusals."""
+bfloat16 loading policy against `from_pretrained`, the upsampler's aspect label, early refusals, and `--lora`: a
+trained adapter against diffusers with the same file loaded, its scale, the plan and the record."""
 
+import hashlib
 import json
 import shutil
 import sys
@@ -15,7 +17,7 @@ from conftest import RELEASE
 from PIL import Image
 
 from h3mlx import image as I
-from h3mlx import load
+from h3mlx import load, lora
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -155,7 +157,8 @@ def test_cli_redecode_refuses_rows_that_do_not_fit(tiny, tmp_path):
 
 @pytest.mark.parametrize("extra", [["--prompt-file", "p.txt"], ["--image", "a.png"], ["--sigmas", "1,0"],
                                    ["--upsample"], ["--height", "8", "--width", "8"], ["--seed", "99"],
-                                   ["--seed", "0"], ["--max-new-tokens", "6"], ["--quantize", "8"]])
+                                   ["--seed", "0"], ["--max-new-tokens", "6"], ["--quantize", "8"],
+                                   ["--lora", "a.safetensors", "--lora-scale", "1"], ["--lora-scale", "1"]])
 def test_cli_redecode_refuses_generation_options(tiny, tmp_path, extra):
     _, rel, _ = tiny
     with pytest.raises(SystemExit):
@@ -258,6 +261,249 @@ def test_cli_unusable_upsampler_answer_stops_before_the_image_model(tiny, tmp_pa
     names = [e["event"] for e in log["events"]]
     assert log["status"] == "error" and "upsample_start" in names and "start" not in names
     assert log["upsampler_answer"] is not None and log["request"] == "a lighthouse"
+
+
+# -- a trained adapter: --lora and --lora-scale ------------------------------------------------------------------------
+
+
+def _adapter(folder, cfg, modules=None, std=0.2, name="adapter.safetensors"):
+    """A random adapter (rank 4, alpha 6: scaling 1.5) written as the trainer writes its own, with `lora.save`."""
+    from test_lora import random_adapter
+
+    modules = lora.block_modules(cfg) if modules is None else modules
+    lora.save(folder / name, random_adapter(cfg, {m: 4 for m in modules}, {m: 6.0 for m in modules}, seed=5, std=std))
+    return folder / name
+
+
+@pytest.fixture(scope="module")
+def tiny_lora(tmp_path_factory):
+    """Its own tiny release, an adapter file on every block Linear, diffusers' picture without the adapter, and from
+    here on the adapter loaded into the torch transformer (`load_lora_adapter`, under the name "default")."""
+    import test_p_h3_image as T
+
+    t, rel, _ = _release(tmp_path_factory)
+    path = _adapter(tmp_path_factory.mktemp("lora"), R.configs(rel)[0])
+    with torch.no_grad():
+        without, *_ = T.run_diffusers(t, T2I, None, 40, 56, seed=7)
+    t["dit"].load_lora_adapter(str(path.parent), weight_name=path.name, adapter_name="default")
+    return t, rel, path, without
+
+
+def _t2i(rel, tmp_path, out, *extra):
+    return ["--weights", rel, "--prompt-file", _prompt(tmp_path, T2I), "--out", out, "--seed", 7, "--height", 40,
+            "--width", 56, *extra]
+
+
+def _rows(out):
+    return np.load(out / "final_rows.npz")["video_rows"]
+
+
+def _sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("scale", [1.0, 0.6, -1.3])
+def test_cli_lora_matches_diffusers(tiny_lora, tmp_path, scale):
+    """`--lora --lora-scale` against diffusers with the same file loaded and the same weight set: the picture to one
+    level of 255, as without an adapter. Guards: the adapter moves diffusers' picture by many levels, and so does
+    the scale."""
+    import test_p_h3_image as T
+
+    t, rel, path, without = tiny_lora
+    with torch.no_grad():
+        trained, *_ = T.run_diffusers(t, T2I, None, 40, 56, seed=7)
+        t["dit"].set_adapters("default", weights=scale)
+        try:
+            want, *_ = T.run_diffusers(t, T2I, None, 40, 56, seed=7)
+        finally:
+            t["dit"].set_adapters("default", weights=1.0)
+    out = tmp_path / "out"
+    assert _run(_t2i(rel, tmp_path, out, "--lora", path, "--lora-scale", scale)) == 0
+    got = np.asarray(Image.open(out / "image.png"), dtype=np.int16)
+    exp, plain, as_trained = (I.to_uint8(a).astype(np.int16) for a in (want, without, trained))
+    print(f"x {scale}: max level diff {np.abs(got - exp).max()}; the adapter moves diffusers' picture by "
+          f"{np.abs(exp - plain).max()} levels, the scale by {np.abs(exp - as_trained).max()}")
+    assert got.shape == exp.shape and np.abs(got - exp).max() <= 1
+    assert np.abs(exp - plain).max() >= 20
+    assert scale == 1.0 or np.abs(exp - as_trained).max() >= 20
+
+
+def test_cli_lora_scale_zero_is_the_run_without_one(tiny_lora, tmp_path):
+    """Scale 0: the same rows and the same PNG as the run without `--lora`, bit for bit, with the adapter still
+    checked, hashed and recorded as not applied. A run without `--lora` records that it had none."""
+    _, rel, path, _ = tiny_lora
+    plain, zero = tmp_path / "plain", tmp_path / "zero"
+    assert _run(_t2i(rel, tmp_path, plain)) == 0
+    assert _run(_t2i(rel, tmp_path, zero, "--lora", path, "--lora-scale", 0)) == 0
+    assert np.array_equal(_rows(zero).view(np.uint32), _rows(plain).view(np.uint32))
+    assert (zero / "image.png").read_bytes() == (plain / "image.png").read_bytes()
+    log = _log(zero)
+    assert log["plan"]["lora"]["applied"] is False and log["plan"]["lora"]["sha256"] == _sha(path)
+    assert log["plan"]["lora"]["scalings"] == [0.0]
+    (event,) = [e for e in log["events"] if e["event"] == "lora"]
+    assert event["applied"] is False and event["scale"] == 0
+    source = json.loads(str(np.load(zero / "final_rows.npz")["source"]))
+    assert source["lora"] == {"path": str(path), "sha256": _sha(path), "scale": 0.0}
+    assert json.loads(str(np.load(plain / "final_rows.npz")["source"]))["lora"] is None
+    assert "lora" not in _log(plain)["plan"] and not any(e["event"] == "lora" for e in _log(plain)["events"])
+
+
+@pytest.mark.parametrize("where", ["blocks", "every Linear"])
+def test_cli_lora_gives_the_same_rows_with_the_modulation_cache_on_and_off(tiny_lora, tmp_path, where):
+    """The cache computes each call's AdaLN tables up front and drops the projections. An adapter on the block
+    Linears is not in those tables at all; one on every Linear is, through the time embedder and the projections,
+    and the cache carries it. Either way the rows are the uncached run's, bit for bit. Guard: the adapter counts."""
+    _, rel, path, _ = tiny_lora
+    if where == "every Linear":
+        cfg = R.configs(rel)[0]
+        path = _adapter(tmp_path, cfg, sorted(lora.wired_shapes(cfg)), std=0.1)
+    on, off, plain = tmp_path / "on", tmp_path / "off", tmp_path / "plain"
+    assert _run(_t2i(rel, tmp_path, on, "--lora", path, "--lora-scale", 0.6)) == 0
+    assert _run(_t2i(rel, tmp_path, off, "--lora", path, "--lora-scale", 0.6, "--no-modulation-cache")) == 0
+    assert _run(_t2i(rel, tmp_path, plain)) == 0
+    assert np.array_equal(_rows(on).view(np.uint32), _rows(off).view(np.uint32))
+    assert np.abs(_rows(on) - _rows(plain)).max() > 0.01
+    sources = [json.loads(str(np.load(o / "final_rows.npz")["source"])) for o in (on, off)]
+    assert [s["modulation_cache"] for s in sources] == [True, False]
+
+
+def test_cli_lora_plan_only_names_the_adapter_and_opens_no_weights(tiny_lora, tmp_path, monkeypatch):
+    """The plan says which file (its hash and size), the scale, the Linears by kind with the blocks they cover, the
+    rank, the alpha, the scaling the forward multiplies by and the parameter count, from the adapter file's header:
+    every loader of tensors is made to raise."""
+    _, rel, path, _ = tiny_lora
+
+    def refuse(*a, **k):
+        raise AssertionError("weights were opened")
+
+    for owner, name in ((mx, "load"), (lora, "load"), (load, "load_transformer"), (load, "load_vae"),
+                        (load, "load_safetensors"), (lora, "for_sampling")):
+        monkeypatch.setattr(owner, name, refuse)
+    out = tmp_path / "plan"
+    assert _run(_t2i(rel, tmp_path, out, "--plan-only", "--lora", path, "--lora-scale", 0.8)) == 0
+    log = _log(out)
+    cfg = R.configs(rel)[0]
+    shapes = lora.wired_shapes(cfg)
+    kinds = {f"{blocks}.*.{target}": covered
+             for blocks, covered in (("transformer_blocks", "0-1"), ("token_refiner.refiner_blocks", "0"))
+             for target in lora.BLOCK_TARGETS}
+    assert log["status"] == "planned" and log["plan"]["lora"] == {
+        "path": str(path), "sha256": _sha(path), "bytes": path.stat().st_size, "scale": 0.8, "applied": True,
+        "modules": 18, "module_kinds": kinds, "ranks": [4], "alphas": [6.0], "scalings": [0.8 * 6.0 / 4],
+        "parameters": sum(4 * (shapes[m][0] + shapes[m][1]) for m in lora.block_modules(cfg))}
+    assert not (out / "image.png").exists() and not any(e["event"] == "lora" for e in log["events"])
+
+
+def test_cli_lora_record_and_redecode(tiny_lora, tmp_path):
+    """What a run with an adapter leaves: the plan's entry, the arguments, an event when the adapter went on (before
+    anything else runs), and in `final_rows.npz` the file's hash and the scale, which a re-decode reports as its
+    source."""
+    _, rel, path, _ = tiny_lora
+    out = tmp_path / "out"
+    assert _run(_t2i(rel, tmp_path, out, "--lora", path, "--lora-scale", 0.6)) == 0
+    log = _log(out)
+    assert log["status"] == "done" and log["settings"]["lora"] == str(path) and log["settings"]["lora_scale"] == 0.6
+    assert log["plan"]["lora"]["sha256"] == _sha(path) and log["plan"]["lora"]["scale"] == 0.6
+    names = [e["event"] for e in log["events"]]
+    assert names.index("plan") < names.index("lora") < names.index("start") < names.index("text_done")
+    event = log["events"][names.index("lora")]
+    assert (event["applied"], event["scale"], event["modules"], event["sha256"]) == (True, 0.6, 18, _sha(path))
+    recorded = {"path": str(path), "sha256": _sha(path), "scale": 0.6}
+    assert json.loads(str(np.load(out / "final_rows.npz")["source"]))["lora"] == recorded
+    again = tmp_path / "again"
+    assert _run(["--weights", rel, "--out", again, "--decode-from", out / "final_rows.npz"]) == 0
+    assert _log(again)["plan"]["source"]["lora"] == recorded
+    assert np.array_equal(np.asarray(Image.open(again / "image.png")), np.asarray(Image.open(out / "image.png")))
+
+
+def test_cli_lora_refuses_at_the_arguments(tiny_lora, tmp_path, capsys):
+    """No default for the scale, and nothing that is not an adapter for this transformer: each is an argument error
+    that names the trouble, before any model loads and before `run.json` exists."""
+    from safetensors.torch import save_file
+
+    t, rel, path, _ = tiny_lora
+    cfg = R.configs(rel)[0]
+    wide = _adapter(tmp_path, dict(cfg, hidden_size=64), name="wide.safetensors")
+    unknown = tmp_path / "unknown.safetensors"
+    save_file({"transformer.nowhere.lora_A.weight": torch.zeros(2, 4), "transformer.nowhere.lora_B.weight": torch.zeros(4, 2)},
+              str(unknown))
+    not_one = tmp_path / "text.safetensors"
+    not_one.write_text("not a safetensors file")
+    base = tmp_path / "base.safetensors"
+    save_file({"proj_in.weight": torch.zeros(2, 2)}, str(base))
+    out = tmp_path / "early"
+    for extra, said in (
+            (["--lora", path], "--lora needs --lora-scale"),
+            (["--lora-scale", 1.0], "give the adapter with --lora"),
+            (["--lora", path, "--lora-scale", "nan"], "scale must be a finite number"),
+            (["--lora", path, "--lora-scale", "inf"], "scale must be a finite number"),
+            (["--lora", tmp_path / "absent.safetensors", "--lora-scale", 1.0], "No such file"),
+            (["--lora", not_one, "--lora-scale", 1.0], "not a safetensors file"),
+            (["--lora", base, "--lora-scale", 1.0], "only <module>.lora_A/B.weight keys"),
+            (["--lora", wide, "--lora-scale", 1.0], "do not fit the Linear"),
+            (["--lora", unknown, "--lora-scale", 1.0], "not Linears of this transformer"),
+            (["--lora", wide, "--lora-scale", 0], "do not fit the Linear")):  # scale 0 excuses nothing
+        with pytest.raises(SystemExit):
+            _run(_t2i(rel, tmp_path, out, *extra))
+        assert said in capsys.readouterr().err, extra
+        assert not out.exists()
+
+
+def test_cli_lora_refuses_a_broken_adapter_before_the_text_encoder(tiny_lora, tmp_path, monkeypatch):
+    """What the header cannot show is refused when the file is read, which is before the text encoder runs: a NaN
+    in a matrix, and a file that is not the one the plan hashed."""
+    _, rel, path, _ = tiny_lora
+    adapter = lora.load(path)
+    key = sorted(adapter.tensors)[5]
+    poisoned = np.array(adapter.tensors[key])
+    poisoned[0, 0] = np.nan
+    bad = tmp_path / "nan.safetensors"
+    lora.save(bad, lora.Adapter(dict(adapter.tensors, **{key: mx.array(poisoned)}), dict(adapter.alpha)))
+    out = tmp_path / "nan"
+    with pytest.raises(ValueError, match="hold a NaN or an infinity"):
+        _run(_t2i(rel, tmp_path, out, "--lora", bad, "--lora-scale", 1.0))
+    log = _log(out)
+    assert log["status"] == "error" and not any(e["event"] in ("lora", "start", "text_done") for e in log["events"])
+
+    swapped = tmp_path / "swapped.safetensors"
+    shutil.copy(path, swapped)
+    read = lora.load
+
+    def load_then_swap(p, *a, **k):
+        loaded = read(p, *a, **k)
+        mx.eval(loaded.tensors)
+        shutil.copy(bad, p)
+        return loaded
+
+    monkeypatch.setattr(lora, "load", load_then_swap)
+    out = tmp_path / "swapped"
+    with pytest.raises(RuntimeError, match="changed while it was being read"):
+        _run(_t2i(rel, tmp_path, out, "--lora", swapped, "--lora-scale", 1.0))
+    assert _log(out)["status"] == "error" and not any(e["event"] in ("lora", "start") for e in _log(out)["events"])
+
+
+@pytest.mark.parametrize("bits", [8, 4])
+def test_cli_lora_with_quantize_quantizes_the_base_and_keeps_the_adapter(tiny_q, tmp_path, bits):
+    """`--quantize` with `--lora`: the adapter goes on first, the six base matrices of each block are quantized as
+    they are without one, and the adapter stays dense beside them. The picture is the unquantized run's with the same
+    adapter, within the quantization error measured without one, and far from the quantized run's without it."""
+    _, rel, _ = tiny_q
+    path = _adapter(tmp_path, R.configs(rel)[0])
+    runs = {"dense": ["--lora", path, "--lora-scale", 0.7], "both": ["--lora", path, "--lora-scale", 0.7, "--quantize", bits],
+            "quantized": ["--quantize", bits]}
+    for name, extra in runs.items():
+        assert _run(_t2i(rel, tmp_path, tmp_path / name, *extra)) == 0
+    log = _log(tmp_path / "both")
+    names = [e["event"] for e in log["events"]]
+    assert names.index("lora") < names.index("text_done") < names.index("stage_quantize") < names.index("quantized")
+    assert log["events"][names.index("quantized")]["weights"] == 6 * 3
+    source = json.loads(str(np.load(tmp_path / "both" / "final_rows.npz")["source"]))
+    assert source["quantize"] == bits and source["lora"] == {"path": str(path), "sha256": _sha(path), "scale": 0.7}
+    dense, both, quantized = (np.asarray(Image.open(tmp_path / n / "image.png"), dtype=np.float32) for n in runs)
+    error, effect = np.abs(both - dense).mean(), np.abs(both - quantized).mean()
+    print(f"{bits}-bit with the adapter: mean |diff| {error:.2f} / 255 from the unquantized run with it, "
+          f"{effect:.2f} from the quantized run without it")
+    assert error < (0.05 if bits == 8 else 0.5) and effect > 2.0
 
 
 # -- the VAE's dtype policy ------------------------------------------------------------------------------------------
