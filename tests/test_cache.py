@@ -162,8 +162,12 @@ def test_an_example_without_references_ignores_the_reference_choices():
     plain = ask(references=[])
     assert plain["references"] is None and plain["text"]["workflow"] == "text2image" and ask()["text"]["workflow"] == "edit"
     for change in (dict(reference_sizing="pipeline"), dict(reference_seed=1), dict(reference_float16_round=True),
-                   dict(settings=dict(SETTINGS, vision_pixels=500_000))):
+                   dict(settings=dict(SETTINGS, vision_pixels=500_000)),
+                   dict(reference_sizing=None, reference_seed=None, reference_float16_round=None)):
         assert cache.key(ask(references=[], **change)) == cache.key(plain), change
+    for change in (dict(reference_sizing=None), dict(reference_seed=None), dict(reference_float16_round=None)):
+        with pytest.raises(ValueError, match="reference"):  # with references they are needed
+            ask(**change)
     assert cache.key(ask(references=[], latent_seed=8)) != cache.key(plain)
 
 

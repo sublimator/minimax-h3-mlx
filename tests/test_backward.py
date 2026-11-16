@@ -148,6 +148,32 @@ def test_bounded_gradients_refuse_what_the_loss_refuses(function):
         function(trainable, frozen, cfg, example, text[:, :1])
 
 
+def test_the_blockwise_gradient_reports_after_every_stage():
+    """`after_stage` is called after each evaluation: the start, every block on the way up, the end, and every block
+    on the way back. It changes nothing, and an exception raised in it stops the gradient there, which is how a
+    trainer enforces a memory limit in the middle of a step."""
+    frozen, trainable, args = groups(modules=BLOCKS_ONLY)
+    calls = []
+    want_loss, want = WAYS["blockwise"](trainable, frozen, *args)
+    loss, grads = WAYS["blockwise"](trainable, frozen, *args, after_stage=lambda: calls.append(mx.get_peak_memory()))
+    assert len(calls) == 2 * TINY["num_layers"] + 2 and float(loss) == float(want_loss)
+    assert all(np.array_equal(np.array(grads[k]), np.array(want[k])) for k in want)
+
+    class Stop(Exception):
+        pass
+
+    seen = []
+
+    def third_time():
+        seen.append(1)
+        if len(seen) == 3:
+            raise Stop
+
+    with pytest.raises(Stop):
+        WAYS["blockwise"](trainable, frozen, *args, after_stage=third_time)
+    assert len(seen) == 3
+
+
 def test_stages_cover_every_trainable_key_once():
     """Which stage of the forward a trainable matrix belongs to: the input projections, the token refiner and the time
     embedder come before the blocks; each block has its own, its AdaLN projection included; the final projection and

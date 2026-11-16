@@ -339,6 +339,46 @@ def optimizer_step(optimizer, trainable: dict, grads: dict, *, max_grad_norm: fl
     return updated, norm
 
 
+def optimizer_state(optimizer, trainable: dict) -> dict:
+    """The optimizer's state as a flat dict of arrays, for a checkpoint: the step count and, for each trainable
+    matrix, Adam's two moments, under `m.<key>` and `v.<key>`. The learning rate is not state here: it is constant
+    and an argument (`adamw`). Before the first step there is no state to save, which is an error."""
+    state = optimizer.state
+    missing = sorted(k for k in trainable if k not in state or set(state[k]) != {"m", "v"})
+    if missing or "step" not in state:
+        raise ValueError(f"the optimizer has no Adam state for {len(missing)} of {len(trainable)} matrices: it has not "
+                         "stepped on them yet")
+    out = {"step": mx.array(int(state["step"].item()), dtype=mx.uint64)}
+    for key in trainable:
+        out["m." + key], out["v." + key] = state[key]["m"], state[key]["v"]
+    return out
+
+
+def restore_optimizer(optimizer, trainable: dict, saved: dict) -> None:
+    """Put a saved state (`optimizer_state`) into a new optimizer made with the same hyper-parameters, so that its
+    next step is the step the saved one would have taken. The saved moments must be exactly the trainable matrices',
+    in their shapes and float32."""
+    want = {"step"} | {f"{moment}.{key}" for key in trainable for moment in "mv"}
+    if set(saved) != want:
+        raise ValueError(f"the saved optimizer state is not for these matrices: {len(set(saved) ^ want)} names differ, "
+                         f"e.g. {sorted(set(saved) ^ want)[:2]}")
+    step = int(np.array(saved["step"]).item())
+    if step < 1:
+        raise ValueError(f"a saved optimizer state has taken at least one step, got {step}")
+    for key, matrix in trainable.items():
+        for moment in "mv":
+            got = saved[f"{moment}.{key}"]
+            if got.shape != matrix.shape or got.dtype != mx.float32:
+                raise ValueError(f"{moment}.{key}: saved as {got.dtype} {tuple(got.shape)}, the matrix is float32 "
+                                 f"{tuple(matrix.shape)}")
+    optimizer.init(trainable)
+    state = optimizer.state
+    state["step"] = mx.array(step, dtype=state["step"].dtype)
+    for key in trainable:
+        state[key] = {"m": saved["m." + key], "v": saved["v." + key]}
+    mx.eval(state)
+
+
 # --- sampling the noise level ------------------------------------------------------------------------------------------
 
 

@@ -282,3 +282,68 @@ def test_no_hyper_parameter_has_a_default():
     with pytest.raises(TypeError):
         train.optimizer_step(train.adamw(learning_rate=1e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0), {}, {})
     assert train.adamw(learning_rate=1e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0).bias_correction is True
+
+
+# --- saving the optimizer's state ---------------------------------------------------------------------------------------
+
+
+def some_gradients(matrices, i):
+    g = torch.Generator().manual_seed(100 + i)
+    return {k: to_mx(torch.randn(tuple(v.shape), generator=g) * 0.1) for k, v in matrices.items()}
+
+
+def test_a_saved_optimizer_goes_on_where_it_stopped(tmp_path):
+    """Six steps in one go, against three steps, the state written to a safetensors file and read back into a new
+    optimizer, and three more: the same matrices bit for bit, and the same state. The state is the step count and
+    Adam's two moments for each matrix; without it (a new optimizer on the same matrices) the next steps differ."""
+    hp = dict(learning_rate=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+    start = {"a.lora_A.x.weight": mx.ones((2, 3)), "a.lora_B.x.weight": mx.ones((3, 2)) * 0.5}
+
+    def steps(optimizer, matrices, first, last):
+        for i in range(first, last):
+            matrices, _ = train.optimizer_step(optimizer, matrices, some_gradients(matrices, i), max_grad_norm=0.3)
+        return matrices
+
+    straight = train.adamw(**hp)
+    want = steps(straight, dict(start), 0, 6)
+
+    first = train.adamw(**hp)
+    halfway = steps(first, dict(start), 0, 3)
+    saved = train.optimizer_state(first, halfway)
+    assert sorted(saved) == ["m.a.lora_A.x.weight", "m.a.lora_B.x.weight", "step", "v.a.lora_A.x.weight", "v.a.lora_B.x.weight"]
+    assert int(saved["step"].item()) == 3
+    mx.save_safetensors(str(tmp_path / "optimizer.safetensors"), saved)
+    read = mx.load(str(tmp_path / "optimizer.safetensors"))
+    second = train.adamw(**hp)
+    train.restore_optimizer(second, halfway, read)
+    got = steps(second, halfway, 3, 6)
+    assert all(np.array_equal(to_np(got[k]), to_np(want[k])) for k in want)
+    after, reference = train.optimizer_state(second, got), train.optimizer_state(straight, want)
+    assert all(np.array_equal(to_np(after[k]), to_np(reference[k])) for k in reference) and int(after["step"].item()) == 6
+
+    forgetful = steps(train.adamw(**hp), halfway, 3, 6)
+    assert not any(np.array_equal(to_np(forgetful[k]), to_np(want[k])) for k in want), "the state matters"
+    without_step = dict(read, step=mx.array(1, dtype=mx.uint64))  # the moments alone are not enough: the step sets the bias correction
+    third = train.adamw(**hp)
+    train.restore_optimizer(third, halfway, without_step)
+    assert not any(np.array_equal(to_np(v), to_np(want[k])) for k, v in steps(third, halfway, 3, 6).items())
+
+
+def test_optimizer_state_refusals():
+    hp = dict(learning_rate=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+    w = {"a.lora_A.x.weight": mx.ones((2, 3)), "a.lora_B.x.weight": mx.ones((3, 2))}
+    fresh = train.adamw(**hp)
+    with pytest.raises(ValueError, match="has not stepped on them yet"):
+        train.optimizer_state(fresh, w)
+    stepped, _ = train.optimizer_step(fresh, w, some_gradients(w, 0), max_grad_norm=1.0)
+    saved = train.optimizer_state(fresh, stepped)
+    for bad, message in (
+        ({k: v for k, v in saved.items() if k != "v.a.lora_B.x.weight"}, "is not for these matrices"),
+        ({**saved, "m.b.lora_A.x.weight": saved["m.a.lora_A.x.weight"]}, "is not for these matrices"),
+        ({**saved, "step": mx.array(0, dtype=mx.uint64)}, "has taken at least one step"),
+        ({**saved, "m.a.lora_A.x.weight": saved["m.a.lora_A.x.weight"].T}, "saved as"),
+        ({**saved, "v.a.lora_A.x.weight": saved["v.a.lora_A.x.weight"].astype(mx.bfloat16)}, "saved as"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            train.restore_optimizer(train.adamw(**hp), stepped, bad)
+    train.restore_optimizer(train.adamw(**hp), stepped, saved)

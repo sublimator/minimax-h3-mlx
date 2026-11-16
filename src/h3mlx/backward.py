@@ -62,8 +62,10 @@ def loss_and_gradients_checkpointed(trainable: dict, frozen: dict, cfg: dict, ex
 
 
 def loss_and_gradients_blockwise(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array,
-                                 weight=None):
+                                 weight=None, after_stage=None):
     """(loss, gradients) as `train.loss_and_gradients` returns them, one block at a time; evaluated on return.
+    `after_stage()`, when given, is called after every evaluation (each block on the way up and on the way back):
+    the place for a caller to look at memory and stop by raising.
 
     Forward: the stages run in order, each evaluated, and each block's input is kept. Backward: the vector-Jacobian
     product of the last stage gives the cotangent of the last block's output; each block, last to first, turns the
@@ -88,17 +90,21 @@ def loss_and_gradients_blockwise(trainable: dict, frozen: dict, cfg: dict, examp
     def finish(x, temb, *matrices):
         return forward.finish(x, temb, {**p, **dict(zip(tail_keys, matrices))})
 
+    after_stage = after_stage or (lambda: None)
     x, temb = start(*[trainable[k] for k in head_keys])
     mx.eval(x, temb)
+    after_stage()
     inputs = [x]
     for i in range(cfg["num_layers"]):
         x = block(i)(inputs[-1], temb, *[trainable[k] for k in block_keys[i]])
         mx.eval(x)
+        after_stage()
         inputs.append(x)
 
     (loss,), (g_x, g_temb, *g_tail) = mx.vjp(finish, [inputs.pop(), temb, *[trainable[k] for k in tail_keys]],
                                              [mx.array(1.0, dtype=mx.float32)])
     mx.eval(loss, g_x, g_tail)
+    after_stage()
     grads = dict(zip(tail_keys, g_tail))
     for i in reversed(range(cfg["num_layers"])):
         _, (g_x, g_t, *g_block) = mx.vjp(block(i), [inputs.pop(), temb, *[trainable[k] for k in block_keys[i]]], [g_x])
@@ -106,6 +112,7 @@ def loss_and_gradients_blockwise(trainable: dict, frozen: dict, cfg: dict, examp
             g_temb = g_temb + g_t
             mx.eval(g_temb)
         mx.eval(g_x, g_block)
+        after_stage()
         grads.update(zip(block_keys[i], g_block))
     if head_keys:
         _, g_head = mx.vjp(start, [trainable[k] for k in head_keys], [g_x, g_temb])

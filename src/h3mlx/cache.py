@@ -144,7 +144,8 @@ def request(*, picture: str, references, prompt: str, height: int, width: int, l
     `settings` holds the release's `reference_min_pixels`, `reference_max_pixels` and `vision_pixels` and the
     `canvas_multiple`; `encoders` holds an identity (`identity`) for each of `ENCODERS`.
 
-    An example without references does not depend on the reference choices, and its request leaves them out."""
+    An example without references does not depend on the reference choices: its request leaves them out, and they
+    may be given as None."""
     references = [_digest(f"references[{i}]", r) for i, r in enumerate(references)]
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("the prompt must be a string with something in it")
@@ -159,12 +160,12 @@ def request(*, picture: str, references, prompt: str, height: int, width: int, l
             raise ValueError(f"{what} is one of {sorted(DTYPES)}, got {dtype!r}")
     if set(encoders) != set(ENCODERS) or not all(isinstance(v, str) and v for v in encoders.values()):
         raise ValueError(f"encoders must name an identity for exactly {ENCODERS}, got {sorted(encoders)}")
-    if reference_sizing not in SIZING:
-        raise ValueError(f"reference sizing is one of {SIZING}, got {reference_sizing!r}")
-    _seed("reference_seed", reference_seed)
-    _flag("reference_float16_round", reference_float16_round)
     reference = None
     if references:
+        if reference_sizing not in SIZING:
+            raise ValueError(f"reference sizing is one of {SIZING}, got {reference_sizing!r}")
+        _seed("reference_seed", reference_seed)
+        _flag("reference_float16_round", reference_float16_round)
         reference = {"sizing": reference_sizing, "seed": reference_seed, "float16_round": reference_float16_round,
                      "resize": RESIZE, "min_pixels": settings["reference_min_pixels"],
                      "max_pixels": settings["reference_max_pixels"], "vision_pixels": settings["vision_pixels"]}
