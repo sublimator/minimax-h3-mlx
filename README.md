@@ -31,7 +31,8 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
   keys that change with every input, encode choice and code version. `scripts/train_lora.py` puts them together:
   every training argument required, a `--plan-only` that opens no weights, limits that stop a run, a run record, and
   checkpoints it resumes from, one session to a run directory. **It has run on a tiny random transformer in the tests and never on real weights;**
-  `docs/porting-lora-training.md` §13 lists what a first real run would still need.
+  `docs/porting-lora-training.md` §14 lists what a first real run would still need. `scripts/run_p_h3_image.py --lora`
+  samples with a trained adapter, attached at a scale that has no default (§12 of that guide).
 - **Porting guides:** [`docs/porting.md`](docs/porting.md) (diffusers -> h3mlx),
   [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md),
   [`docs/porting-p-h3-image.md`](docs/porting-p-h3-image.md) and
@@ -44,10 +45,10 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 783 tests and skips 75. Those 75 need the releases' tokenizers, processors,
+No weights are needed. A plain clone runs 808 tests and skips 91. Those 91 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header and a public training adapter's header. These
 files aren't shipped here because they belong to MiniMax, Video Rebirth, Pruna and the adapter's publisher. Fetch them
-from Hugging Face at pinned revisions (about 50 MB, no weights) and all 858 run:
+from Hugging Face at pinned revisions (about 50 MB, no weights) and all 899 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest
@@ -146,6 +147,13 @@ Without `--upsample` the prompt is rendered as written, so write it the way the 
 is, describe one scene, quote every word of text, leave out hype words. `--upsample` runs the upsampler first, as the
 diffusers pipeline does by default (its greedy decoding can differ from torch's in places; the prompt it wrote is saved
 as `prompt.txt`). `--plan-only` prints the sizes without reading weights.
+
+`--lora adapter.safetensors --lora-scale 1.0` samples with a LoRA adapter, for instance one `scripts/train_lora.py`
+wrote. The scale has no default: 1.0 is the adapter as trained, and 0 is the run without it, bit for bit. The adapter
+is attached beside the weights for the whole denoise, never merged into them; with `--quantize` the base matrices are
+quantized and the adapter stays at full precision. The plan names the adapter from its file's header, and `run.json`
+and `final_rows.npz` record the file's hash and the scale. This is tested against diffusers on tiny models only
+(`docs/porting-lora-training.md`, §12); no trained adapter has been sampled on the real weights by the tests.
 
 Sizes follow the pipeline. Text-to-image defaults to 2912x2912 (8 MP); the card lists the 8 MP size for each aspect
 ratio, and other sizes are rounded to multiples of 32. An edit is generated at Picture 1's size, scaled up to at least

@@ -344,6 +344,11 @@ against the unquantized one.
 
 {{ code('src/h3mlx/load.py', function='quantize_transformer') }}
 
+**A trained adapter.** The run script takes `--lora` with `--lora-scale` and attaches the adapter beside the
+transformer's weights before `generate` runs; `generate` itself is unchanged. The LoRA training guide
+(`docs/porting-lora-training.md`, §12) has the choice between attaching and merging, the scale, the order with
+`--quantize`, and the comparison with diffusers with the same file loaded.
+
 ## 11. Not done, and open
 
 - **Real-weight equivalence with torch is not measured.** Every comparison above uses tiny random models; the release

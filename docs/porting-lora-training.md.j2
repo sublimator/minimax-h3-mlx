@@ -10,7 +10,8 @@
    by file and line and not quoted: no checkout of it is read by this template.
    Sections 8 and 9 have no library original to quote: their oracles are the plain gradient of section 7 and torch's
    optimizer, run in the tests. Sections 10 and 11 (the cache and the training script) are this port's own; what
-   they take from the recipe is cited by file and line, as in section 6. #}
+   they take from the recipe is cited by file and line, as in section 6. Section 12 (the sampler with an adapter)
+   quotes PEFT's `set_scale` and diffusers' `apply_lora_scale`. #}
 {% set PEFT = '../peft' %}
 {% set LAYER = 'src/peft/tuners/lora/layer.py' %}
 {% set DM = '../diffusers-main' %}
@@ -21,6 +22,8 @@
 {% set SCH = 'src/diffusers/schedulers/scheduling_minimax_h3.py' %}
 {% set BD = 'src/diffusers/modular_pipelines/p_h3_image/before_denoise.py' %}
 {% set TR = 'src/diffusers/models/transformers/transformer_minimax_h3.py' %}
+{% set PU = 'src/diffusers/utils/peft_utils.py' %}
+{% set LB = 'src/diffusers/loaders/lora_base.py' %}
 # Porting LoRA training to MLX, part 1: PEFT and diffusers → `h3mlx`
 
 This guide covers the first pieces a LoRA trainer for the MLX transformer needs, each ported op by op and tested
@@ -38,6 +41,7 @@ against the PyTorch original on small random tensors:
 9. **The optimizer step** (§9).
 10. **A cache of encoded examples,** and how reference pictures are sized (§10).
 11. **The training script:** `scripts/train_lora.py`, its plan, limits, record and checkpoints (§11).
+12. **Sampling with a trained adapter:** `scripts/run_p_h3_image.py --lora`, attached at a scale (§12).
 
 In each section the original comes first, then the port, then what changed and which test ties them together. It
 assumes the main guide (`docs/porting.md`) for the transformer and the scheduler, and the HyperFlow guide
@@ -45,7 +49,7 @@ assumes the main guide (`docs/porting.md`) for the transformer and the scheduler
 
 **Nothing here has trained a real model.** There is a training script now (§11), and it has run only on a tiny random
 transformer: it overfits one synthetic example there, stops at its limits and resumes to the same weights. No real
-weights have been loaded by it, no real picture encoded, and §13 lists what a first real run would still need.
+weights have been loaded by it, no real picture encoded, and §14 lists what a first real run would still need.
 Everything below is weight-free.
 
 **Sources, pinned.**
@@ -77,6 +81,7 @@ port takes an argument and has no default.
 | the optimizer step | `train.adamw`, `train.optimizer_step` | `torch.optim.AdamW`, `clip_grad_norm_` | `tests/test_train_optimizer.py` (32) |
 | the cache of encoded examples | `src/h3mlx/cache.py`, `src/h3mlx/files.py` | diffusers `p_h3_image/before_encoder.py` for one sizing rule; the recipe for the other | `tests/test_cache.py` (99, three of them on release fixtures) |
 | the training script | `scripts/train_lora.py`, `src/h3mlx/trainer.py` | none: the pieces above, in order | `tests/test_train_lora.py` (103, one of them on release fixtures) |
+| a trained adapter at sampling | `lora.for_sampling`, `lora.from_header`, `lora.summary`, `scripts/run_p_h3_image.py` | PEFT `set_scale`; diffusers `load_lora_adapter`, `set_adapters`, `apply_lora_scale`, and its P-H3-Image pipeline | `tests/test_lora_sampling.py` (25); on release fixtures, 2 in `tests/test_p_h3_image.py` and 14 in `tests/test_run_p_h3_image.py` |
 
 ## 1. LoRA adapters
 
@@ -1766,7 +1771,175 @@ On real weights this path has never run.
 | `test_every_draw_is_a_function_of_the_seed_and_the_step` | the seeds, pinned; the adapter's start; each picture's posterior seed |
 | `test_a_run_from_pictures_encodes_what_the_cache_lacks` (release fixtures) | the encode path on tiny encoders |
 
-## 12. What each test would catch
+## 12. Sampling with a trained adapter
+
+A training run is judged by sampling with what it trained. The sampling script takes the adapter:
+
+    uv run python scripts/run_p_h3_image.py --weights P-H3-Image --prompt-file prompt.txt --out out/img \
+        --lora runs/first/adapter.safetensors --lora-scale 1.0
+
+`--lora` is the `adapter.safetensors` the training script writes (a checkpoint's or the final one), or any LoRA file
+with one component that `lora.load` reads (§1.5, §2). `--lora-scale` has no default: 1.0 is the adapter as trained,
+and leaving it out is an error that names it. Without `--lora` the script does what it did. This section changes
+neither the forward nor the sampler: `src/h3mlx/ops.py` and `src/h3mlx/image.py` are the files they were.
+
+### 12.1 Attached, not merged
+
+{{ code('src/h3mlx/lora.py', function='for_sampling') }}
+
+The choice was between `attach` (§1.3) and `merge` (§1.4), and each of the sampler's options points the same way.
+
+- **It is diffusers' computation.** `load_lora_adapter` wraps each `Linear`, and the forward adds
+  `B(A x) * scaling` to the base result on every call; nothing is merged unless the caller asks for it
+  (`fuse_lora`). `plinear` is that line (§1.1), so the sampler with an adapter is as close to diffusers as it is
+  without one (§12.4).
+- **A bf16 weight has eight significant bits.** Merging rounds `W + delta` once into each weight, and whatever part
+  of the delta is under half a step of its weight is gone. Attached, the delta is computed on its own, at its own
+  size, and only then added to the Linear's output. `test_merging_into_bf16_loses_a_small_adapter_and_attaching_keeps_it`
+  builds the extreme case on one Linear: every weight between 2^-6 and 2^-5, and a rank-one delta of 3.05e-5 an
+  entry. Merged, none of the 3,072 weights changes and the adapter has vanished. Attached, the output moves by
+  1.5e-3, the size the delta predicts.
+- **`--quantize` needs no second rule.** Merging would have to come before quantizing (`merge` refuses a quantized
+  weight), and the delta would then be quantized with the base. Attached, the adapter goes on the weights as they
+  are loaded, and `generate` quantizes the base matrices where it always does, after the text and the pictures are
+  encoded. The quantizer's pattern matches base weights only, so the adapter's matrices stay dense beside them, in
+  the base's dtype. A Linear is then the quantized base's product plus the dense delta, the shape PEFT's own layers
+  over a quantized `Linear` have (`tuners/lora/bnb.py`, lines 251 to 269: the base layer's result, then
+  `lora_B(lora_A(x)) * scaling` added).
+- **The modulation cache needs nothing.** It is on by default, and its tables come from the same `plinear` call
+  (§1.3). An adapter on the block matrices, which is what the training script trains, is not in those tables at
+  all. One on the time embedder or the AdaLN projections is, and the cache carries it.
+- **The cost** is two small products for each Linear on each call: the rank over the width of the base product's
+  work, and the adapter's matrices in memory.
+
+At a scale of exactly 0 nothing is attached, so the rows and the picture are those of a run without `--lora`, bit
+for bit, by construction. diffusers at weight 0 keeps the adapter and adds a zero delta. That gave the same picture
+on the tiny release, and it is not the same bits in general: a negative zero in a Linear's output becomes a positive
+one (`test_an_adapter_attached_at_zero_is_not_bit_for_bit_nothing`, on the CPU stream, where a matmul can return
+one). The adapter is still read and checked at 0. Its matrices must be finite at any scale: one NaN in an adapter is
+a NaN in every picture, and it is refused when the file is read, before the text encoder runs.
+
+### 12.2 The scale
+
+{{ code(LAYER, function='LoraLayer.set_scale', root=PEFT) }}
+
+{{ code('src/h3mlx/lora.py', function='check_scale') }}
+
+`attach` takes the scale (§1.3): a module's scaling becomes `scale * alpha / rank`, in that order, rounded to
+float32 where the delta is multiplied (§1.1). That is `set_scale`, which diffusers reaches through
+`set_adapters(name, weights=scale)` on the transformer. The pipeline has a second route, a scale for one call:
+
+{{ code(PU, function='apply_lora_scale', root=DM) }}
+
+The transformer's forward carries that decorator, and the P-H3-Image pipeline passes its `attention_kwargs` through.
+`scale_lora_layers` multiplies each layer's scaling in place and `unscale_lora_layers` divides it back afterwards, so
+the number is `alpha / rank * scale`, the other order. The two routes gave identical pictures in every case tested,
+and the port's is the first: it is a function of the arguments, with nothing to undo.
+
+- **The scale is exactly a factor on the delta.** `test_scale_on_one_linear_is_the_delta_times_the_scale` holds one
+  Linear to `base + B(A x) * float32(scale * alpha / rank)` bit for bit, in float32 and in bf16, and to PEFT's layer
+  after `set_scale`. `test_a_power_of_two_scale_is_the_adapter_with_lora_b_scaled` holds the whole transformer, with
+  an adapter on every Linear: at 0.5, 4 and -2 the output is, bit for bit, that of the adapter whose `lora_B` is
+  that many times as large. `test_scale_is_diffusers_adapter_weight` compares the scalings and the forward with
+  diffusers at 0.6, -1.3, 2 and 1/3, by both routes.
+- **Any finite number.** A negative scale subtracts the adapter's delta, as it does in diffusers. NaN and infinity
+  are refused. (An alpha is still positive, §1.3: the scale is the caller's, the alpha is the file's.)
+- **Loading the file into diffusers to compare.** At the pinned commit, `load_lora_adapter` on a bare file path reads
+  the tensors and not the header:
+
+{{ code(LB, lines=(221, 225), root=DM) }}
+
+  `use_safetensors` is `None` unless the caller sets it, so with no `weight_name` the branch that reads the
+  metadata is skipped, the file is loaded by the fallback, and every module runs at alpha = rank. For a file of
+  rank 4 and alpha 6 that is a scaling of 1.0 where the file says 1.5 (measured). With `weight_name=` or
+  `use_safetensors=True` the metadata is read. The port reads the header always (§1.5), so a comparison has to load
+  the file one of those two ways; the tests use `weight_name`.
+
+### 12.3 The plan, the record, and what is refused
+
+{{ code('src/h3mlx/lora.py', function='from_header') }}
+{{ code('src/h3mlx/lora.py', function='summary') }}
+{{ code('scripts/run_p_h3_image.py', function='adapter_plan') }}
+
+- **`--plan-only` opens no weights.** The plan's `lora` entry gives the file, its hash and size, the scale, whether
+  it is applied, the Linears by kind with the blocks each kind covers (`transformer_blocks.*.attn.to_q: 0-49`), the
+  ranks, the alphas, the scalings the forward multiplies by, and the parameter count. All of it comes from the
+  file's safetensors header. `from_header` puts zero stand-ins of the header's shapes through `read`, the path a
+  loaded file takes, so each layout the loader reads is described the same way and no tensor is read
+  (`test_from_header_is_the_loaded_adapter_and_reads_no_tensor`, eleven kinds of file with the tensor loader
+  raising).
+- **What does not fit is an argument error.** A missing scale, a scale without an adapter, a scale that is not
+  finite, a file that is not there or is not a LoRA file, and an adapter that does not fit this transformer's
+  Linears are refused when the arguments are checked, before a model loads and before `run.json` exists. Scale 0
+  excuses none of them.
+- **The record.** `run.json` has the plan's entry, the two arguments, and a `lora` event when the adapter goes on,
+  before the run starts. `final_rows.npz` carries the file's path, its hash and the scale in its `source` record
+  beside the prompt and the seed, and `null` when there was no adapter; a re-decode (`--decode-from`) reports them as
+  its source, and takes neither option itself.
+- **The hash is the file that was read.** The plan hashes the file, and the script hashes it again once its tensors
+  are in memory. A file that changed in between stops the run.
+
+### 12.4 Against diffusers
+
+The oracle is diffusers' P-H3-Image pipeline on the tiny release with the same file loaded into its transformer.
+`test_end_to_end_with_an_adapter_matches_diffusers` runs both workflows with an adapter of rank 4 and alpha 6 on
+every block matrix. The largest difference between the two float pictures, with the bound at 2e-5 as it is without an
+adapter (the P-H3-Image guide, §10):
+
+| | text-to-image | edit | the adapter moves diffusers' text-to-image picture by |
+| --- | --- | --- | --- |
+| no adapter | 1.8e-7 | 1.8e-7 | |
+| as trained (1.0) | 1.8e-7 | 1.8e-7 | 3.6e-2 |
+| 0.6 | 2.1e-7 | 1.8e-7 | 1.8e-2 |
+| -1.3 | 1.8e-7 | 1.8e-7 | 3.2e-2 |
+
+The last column is what makes the comparison a test: the adapter moves the picture by more than 500 times the
+bound, and the test asserts that it does. Through the command line (`test_cli_lora_matches_diffusers`, a larger adapter), the PNG differs from
+diffusers' by 0 levels of 255 at 1.0, 0.6 and -1.3, where the adapter moves diffusers' PNG by 76, 35 and 88 levels.
+
+With the sampler's other options, on the tiny release:
+
+| option | result | test |
+| --- | --- | --- |
+| modulation cache on and off | the same rows, bit for bit, for an adapter on the block matrices and for one on every Linear | `test_cli_lora_gives_the_same_rows_with_the_modulation_cache_on_and_off` |
+| scale 0 | the rows and the PNG of the run without `--lora`, bit for bit | `test_cli_lora_scale_zero_is_the_run_without_one` |
+| `--quantize 8` | 0.02 of 255 (mean) from the unquantized run with the adapter; 2.8 from the quantized run without it | `test_cli_lora_with_quantize_quantizes_the_base_and_keeps_the_adapter` |
+| `--quantize 4` | 0.30 of 255 from the unquantized run with the adapter; 2.8 from the quantized run without it | the same |
+
+The quantized rows are held to the bounds the quantized run has without an adapter (0.05 and 0.5).
+`test_a_quantized_base_keeps_the_adapter_dense` checks the order in the package: after `for_sampling` the quantizer
+takes the 18 base matrices and leaves every tensor of the adapter as it was, one Linear is the quantized product
+plus the dense delta bit for bit, and the whole forward is the forward over the dequantized matrices with the same
+adapter.
+
+All of this is on tiny float32 models. The adapter over bf16 weights rests on §1.3's dtype test and on the one
+Linear above; no real adapter has been sampled by these tests.
+
+### 12.5 The tests
+
+| test | pins |
+| --- | --- |
+| `test_scale_is_diffusers_adapter_weight` (×4) | each Linear's scaling and the forward against diffusers' `set_adapters(weights=)` and `attention_kwargs` |
+| `test_scale_on_one_linear_is_the_delta_times_the_scale` (×8) | one Linear, bit for bit, float32 and bf16; PEFT's layer after `set_scale` |
+| `test_a_power_of_two_scale_is_the_adapter_with_lora_b_scaled` (×3) | the whole transformer, bit for bit, an adapter on every Linear |
+| `test_scale_one_changes_nothing_and_a_named_adapter_takes_a_scale` | the default scale leaves `attach` as it was; a named adapter's scaling; what a scale may be |
+| `test_for_sampling_attaches_and_leaves_the_base_alone` | the base arrays are the same objects; the adapter cast and scaled as `attach` does |
+| `test_merging_into_bf16_loses_a_small_adapter_and_attaching_keeps_it` | why not `merge` |
+| `test_scale_zero_is_the_weights_themselves`, `test_an_adapter_attached_at_zero_is_not_bit_for_bit_nothing` | 0 attaches nothing, and why |
+| `test_for_sampling_refuses` | a scale that is not a finite number; a NaN or an infinity in a matrix, at 1.0 and at 0; a misfit; weights that carry a LoRA |
+| `test_a_quantized_base_keeps_the_adapter_dense` | the order with `--quantize` |
+| `test_from_header_is_the_loaded_adapter_and_reads_no_tensor`, `test_from_header_refuses_what_is_not_a_lora_file` | the header-only adapter for every kind of file; what is not one |
+| `test_summary_names_the_linears_the_ranks_and_the_scalings` | the plan's description, exactly |
+| `test_end_to_end_with_an_adapter_matches_diffusers` (×2, release fixtures) | the pipeline against diffusers, three scales, both of its routes |
+| `test_cli_lora_matches_diffusers` (×3, release fixtures) | the command line against diffusers |
+| `test_cli_lora_scale_zero_is_the_run_without_one`, `test_cli_lora_gives_the_same_rows_with_the_modulation_cache_on_and_off` (×2) | bit-identical rows |
+| `test_cli_lora_plan_only_names_the_adapter_and_opens_no_weights` | the plan's entry with every loader raising |
+| `test_cli_lora_record_and_redecode` | the record, the event's place, the rows' source, a re-decode |
+| `test_cli_lora_refuses_at_the_arguments` (ten cases), `test_cli_redecode_refuses_generation_options` (two more cases) | argument errors |
+| `test_cli_lora_refuses_a_broken_adapter_before_the_text_encoder` | a NaN in the file; a file that changed while it was read |
+| `test_cli_lora_with_quantize_quantizes_the_base_and_keeps_the_adapter` (×2) | `--quantize` with `--lora`, 8 and 4 bits |
+
+## 13. What each test would catch
 
 Each wrong implementation below was made on a copy of the sources and run against the tests; the named test failed.
 
@@ -1885,7 +2058,7 @@ value before its cast is one such: for a float32 sample it rounds to the same fl
 subtraction is a single correctly rounded operation either way, and only the bf16 cases fail, where the timestep
 must be cast to bf16 before the subtraction.
 
-## 13. Not done, and open
+## 14. Not done, and open
 
 **What a first run on real weights would still need.** None of it is built or measured:
 
@@ -1902,8 +2075,11 @@ must be cast to bf16 before the subtraction.
 - **Pictures as they come.** The script takes each example's size from the dataset file and refuses a picture of
   another shape. There is no bucketing by aspect ratio, no cropping, no captioning, no augmentation and no batch
   larger than one.
-- **A way to look at the result.** There are no sample pictures during training and no validation loss. An adapter
-  from a checkpoint can be attached and sampled with the existing pipeline by hand; the script does not do it.
+- **Samples while it trains.** The sampling script takes a trained adapter (§12), and a checkpoint's
+  `adapter.safetensors` is one, so a run can be looked at by hand. The training script does not sample, and it
+  computes no validation loss.
+- **The sampler with an adapter, on real weights.** §12 is tested on tiny float32 models. No trained adapter has
+  been sampled over the real bf16 transformer, quantized or not.
 - **The assistant adapter on real weights.** `--assistant` attaches a frozen adapter and is tested on random ones.
   The public training adapter was read by its header only (§5.4), never loaded onto real weights.
 - **A step-distilled base.** P-H3-Image samples in 8 steps without guidance. Whether a plain flow-matching loss on it
@@ -1953,4 +2129,7 @@ Open, and not specific to a first run:
 - **Real files.** No published adapter's tensors were read by this code; the tests write their own. Layout details of
   real files that the converter's docstring does not mention would not be caught.
 - **Routing between partitions.** `h3mlx.lora` returns an adapter and the caller attaches it to the weights it means.
-  diffusers' routing of a file to `transformer` or `transformer_ref` is not ported.
+  diffusers' routing of a file to `transformer` or `transformer_ref` is not ported. The sampling script's `--lora`
+  takes a file with one component, and refuses one that holds both.
+- **One adapter at sampling.** `--lora` is given once. The package stacks named adapters (§5) and `attach` scales
+  each; the sampling script does not offer it.
