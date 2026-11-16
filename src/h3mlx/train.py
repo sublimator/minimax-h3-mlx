@@ -1,5 +1,5 @@
 """Pieces of a flow-matching trainer for the MLX transformer: the forward process, the target, the loss, one training
-example and its loss and gradient, and sampling the noise level. No training loop here.
+example and its loss and gradient, the optimizer step, and sampling the noise level. No training loop here.
 
 MiniMax H3's transformer predicts a data-ward velocity. Its scheduler (diffusers `scheduling_minimax_h3.py`) works in
 `t = 1 - sigma`, with `t = 1` clean: `scale_noise` mixes `x_t = t * x_0 + (1 - t) * noise`, and `step` recovers
@@ -13,9 +13,11 @@ own `ops.flow_sigmas`. Random draws come from a torch generator, as the sampling
 """
 
 import math
+import numbers
 from dataclasses import dataclass
 
 import mlx.core as mx
+import mlx.optimizers as optim
 import numpy as np
 
 from . import lora, ops
@@ -291,6 +293,50 @@ def loss_and_gradients(trainable: dict, frozen: dict, cfg: dict, example: Exampl
     weights and any other adapter in `frozen` are constants of the differentiation and get none."""
     check_inputs(trainable, frozen, cfg, example, text)
     return mx.value_and_grad(example_loss)(trainable, frozen, cfg, example, text, weight)
+
+
+# --- the optimizer step ------------------------------------------------------------------------------------------------
+
+
+def adamw(*, learning_rate, betas, eps: float, weight_decay: float) -> optim.AdamW:
+    """MLX's AdamW set up to compute `torch.optim.AdamW`'s update: with `bias_correction=True`. MLX leaves the bias
+    correction out by default, and its first step is then `(1 - beta1) / sqrt(1 - beta2)` times torch's, 3.2 times
+    for betas of (0.9, 0.999). No hyper-parameter has a default here: every one is the caller's to give."""
+    return optim.AdamW(learning_rate=learning_rate, betas=list(betas), eps=eps, weight_decay=weight_decay,
+                       bias_correction=True)
+
+
+def optimizer_step(optimizer, trainable: dict, grads: dict, *, max_grad_norm: float) -> tuple[dict, float]:
+    """One step: (the updated matrices, the gradients' global norm before clipping), both evaluated.
+
+    The gradients are scaled down to a global norm of `max_grad_norm` when theirs is larger, as torch's
+    `clip_grad_norm_` scales them (`math.inf` clips nothing), and the optimizer applies them. Refused before any
+    matrix is touched:
+
+    * matrices that are not float32. At a learning rate of 1e-4 a bf16 element of magnitude 2**-5 or more does not
+      move at all, because the update is under half its spacing, and a smaller one moves by whole steps of its
+      spacing; in float16 the second moment of small gradients underflows and the update is NaN. So the trainable
+      matrices are float32 over whatever base (`lora.attach(..., keep_dtype=True)`).
+    * gradients whose keys are not the matrices' keys;
+    * a `max_grad_norm` that is not a positive number;
+    * a gradient norm that is not finite, which torch's clip refuses under `error_if_nonfinite` and otherwise lets
+      through into the weights."""
+    if not trainable or set(grads) != set(trainable):
+        raise ValueError(f"the gradients' keys must be the trainable matrices' keys: {len(grads)} against {len(trainable)}")
+    narrow = sorted(k for k, v in trainable.items() if v.dtype != mx.float32)
+    if narrow:
+        raise ValueError(f"the trainable matrices must be float32; {len(narrow)} are not, e.g. {narrow[0]} "
+                         f"({trainable[narrow[0]].dtype}): half-precision matrices do not take updates of this size")
+    if not isinstance(max_grad_norm, numbers.Real) or isinstance(max_grad_norm, bool) or not max_grad_norm > 0:
+        raise ValueError(f"max_grad_norm must be a positive number (math.inf to clip nothing), got {max_grad_norm!r}")
+    clipped, norm = optim.clip_grad_norm(grads, float(max_grad_norm))
+    norm = float(norm)
+    if not math.isfinite(norm):
+        raise ValueError(f"the gradients' norm is {norm}: not applied")
+    updated = optimizer.apply_gradients(clipped, trainable)
+    updated = {k: updated[k] for k in trainable}
+    mx.eval(updated, optimizer.state)
+    return updated, norm
 
 
 # --- sampling the noise level ------------------------------------------------------------------------------------------

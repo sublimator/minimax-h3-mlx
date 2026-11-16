@@ -39,11 +39,11 @@ def setup(n_refs=1, sigma=0.5, seed=2, cfg=TINY, std=0.3, subject_modules=SUBJEC
                 example=ours(picture, refs, sigma, seed=seed), want=theirs(picture, refs, sigma, seed=seed))
 
 
-def torch_side(s, tmp_path, base=None, stacked=True, target=None):
-    """(loss, {parameter name: gradient or None}, the PEFT model): the subject's parameters trainable and float32,
-    everything else frozen. Loading an adapter into a bf16 model rounds its matrices to bf16, and
-    `cast_training_params` widens the dtype without bringing the values back; a trainer's matrices are not on that
-    grid after their first step, so the subject's float32 values are put back, the ones our side holds."""
+def torch_model(s, tmp_path, base=None, stacked=True):
+    """The PEFT model a trainer holds: the subject's parameters trainable and float32, everything else frozen.
+    Loading an adapter into a bf16 model rounds its matrices to bf16, and `cast_training_params` widens the dtype
+    without bringing the values back; a trainer's matrices are not on that grid after their first step, so the
+    subject's float32 values are put back, the ones our side holds."""
     names = ("assistant", "subject") if stacked else ("subject",)
     m = activate(peft_stack(s["model"] if base is None else base, tmp_path, s["assistant"], s["subject"]), names)
     for name, prm in m.named_parameters():
@@ -54,12 +54,21 @@ def torch_side(s, tmp_path, base=None, stacked=True, target=None):
     with torch.no_grad():
         for name, value in exact.items():
             parameters[name].copy_(torch.from_numpy(to_np(value.astype(mx.float32))))
-    w = s["want"]
-    video_pred, _ = m(w["video_rows"][None], w["audio_rows"][None], s["text"], w["timestep"], w["indices"],
+    return m
+
+
+def torch_loss(m, w, text, target=None):
+    """`mse_loss` on the generated video rows of the model's forward on an example from diffusers' functions (`theirs`)."""
+    video_pred, _ = m(w["video_rows"][None], w["audio_rows"][None], text, w["timestep"], w["indices"],
                       token_tags=w["token_tags"], position_ids=w["position_ids"], video_indices=w["video_indices"],
                       audio_indices=w["audio_indices"], text_indices=w["text_indices"], return_dict=False)
-    target = w["target"] if target is None else target
-    loss = torch.nn.functional.mse_loss(video_pred[:, w["n_cond"]:].float(), target[None])
+    return torch.nn.functional.mse_loss(video_pred[:, w["n_cond"]:].float(), (w["target"] if target is None else target)[None])
+
+
+def torch_side(s, tmp_path, base=None, stacked=True, target=None):
+    """(loss, {parameter name: gradient or None}, the PEFT model) after one `backward`."""
+    m = torch_model(s, tmp_path, base, stacked)
+    loss = torch_loss(m, s["want"], s["text"], target)
     loss.backward()
     return float(loss.detach()), {n: p.grad for n, p in m.named_parameters()}, m
 
