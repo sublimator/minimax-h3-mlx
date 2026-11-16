@@ -249,7 +249,7 @@ The original:
 The port is the same algorithm in numpy (float64 positions, int64 indices). It reads each reference's geometry from a
 shape rather than a tensor, so it needs no torch:
 
-📍 [`src/h3mlx/packing.py:112-192`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/packing.py#L112-L192)
+📍 [`src/h3mlx/packing.py:112-192`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/packing.py#L112-L192)
 ```python
  112 def build_ref2va_packed_sequence(
  113     text_token_tags,
@@ -371,14 +371,14 @@ The rotary grids themselves:
   97     )
   98     return origin + torch.cat([torch.zeros(1, dtype=torch.float64), spans[:-1].cumsum(0)])
 ```
-📍 [`src/h3mlx/ops.py:303-308`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L303-L308)
+📍 [`src/h3mlx/ops.py:328-333`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L328-L333)
 ```python
- 303 def temporal_position_grid(num_latent_frames: int, origin: float) -> np.ndarray:
- 304     spans = np.array(
- 305         [ROPE_FRAME_RESCALE * ROPE_FRAMES_PER_LATENT[i % len(ROPE_FRAMES_PER_LATENT)] for i in range(num_latent_frames)],
- 306         dtype=np.float64,
- 307     )
- 308     return origin + np.concatenate([np.zeros(1), np.cumsum(spans[:-1])])
+ 328 def temporal_position_grid(num_latent_frames: int, origin: float) -> np.ndarray:
+ 329     spans = np.array(
+ 330         [ROPE_FRAME_RESCALE * ROPE_FRAMES_PER_LATENT[i % len(ROPE_FRAMES_PER_LATENT)] for i in range(num_latent_frames)],
+ 331         dtype=np.float64,
+ 332     )
+ 333     return origin + np.concatenate([np.zeros(1), np.cumsum(spans[:-1])])
 ```
 
 ---
@@ -420,14 +420,14 @@ One `inv_freq` vector serves all three axes. The `(t, h, w)` angle blocks are co
   73     return torch.cat((hidden_states_rotary, hidden_states_pass), dim=-1).contiguous()
 ```
 
-📍 [`src/h3mlx/ops.py:18-21`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L18-L21)
+📍 [`src/h3mlx/ops.py:18-21`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L18-L21)
 ```python
   18 def rope_inv_freq(rope_freq_dim: int = 16, rope_theta: float = 10000.0) -> mx.array:
   19     """Built in numpy float32: bit-identical to torch's `theta ** (arange / 2f)`; MLX's pow is 1 ulp off at f=16."""
   20     exps = np.arange(0, 2 * rope_freq_dim, 2, dtype=np.float32) / np.float32(2 * rope_freq_dim)
   21     return mx.array((np.float32(1) / np.power(np.float32(rope_theta), exps)).astype(np.float32))
 ```
-📍 [`src/h3mlx/ops.py:24-30`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L24-L30)
+📍 [`src/h3mlx/ops.py:24-30`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L24-L30)
 ```python
   24 def rope_cos_sin(position_ids: mx.array, inv_freq: mx.array) -> tuple[mx.array, mx.array]:
   25     """(seq, 3) positions -> cos, sin of shape (seq, 2 * 3 * rope_freq_dim), float32."""
@@ -437,7 +437,7 @@ One `inv_freq` vector serves all three axes. The `(t, h, w)` angle blocks are co
   29     freqs = mx.concatenate([freqs, freqs], axis=-1)
   30     return mx.cos(freqs), mx.sin(freqs)
 ```
-📍 [`src/h3mlx/ops.py:33-41`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L33-L41)
+📍 [`src/h3mlx/ops.py:33-41`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L33-L41)
 ```python
   33 def apply_rotary(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
   34     """x: (batch, seq, heads, head_dim); rotates the leading cos.shape[-1] channels (rotate_half), passes the rest."""
@@ -469,34 +469,36 @@ its pair with `timestep_index · 3 + modality_tag`.
  130         temb = temb.view(-1, 6 * self.hidden_size)
  131         return temb.chunk(6, dim=-1)
 ```
-📍 [`src/h3mlx/ops.py:144-150`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L144-L150)
+📍 [`src/h3mlx/ops.py:149-155`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L149-L155)
 ```python
- 144 def adaln_modulation(temb: mx.array, w: mx.array, b: mx.array, hidden_size: int) -> list[mx.array]:
- 145     """MiniMaxH3AdaLayerNormModulation: (num_t, temb_dim) -> 6 x (num_t * 3, hidden), rows [t0m0, t0m1, t0m2, t1m0..].
- 146
- 147     Order: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp. silu at temb's precision, then cast to
- 148     the projection's dtype.
- 149     """
- 150     return adaln_tables(temb, {"linear.weight": w, "linear.bias": b}, hidden_size, "linear")
+ 149 def adaln_modulation(temb: mx.array, w: mx.array, b: mx.array, hidden_size: int) -> list[mx.array]:
+ 150     """MiniMaxH3AdaLayerNormModulation: (num_t, temb_dim) -> 6 x (num_t * 3, hidden), rows [t0m0, t0m1, t0m2, t1m0..].
+ 151
+ 152     Order: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp. silu at temb's precision, then cast to
+ 153     the projection's dtype.
+ 154     """
+ 155     return adaln_tables(temb, {"linear.weight": w, "linear.bias": b}, hidden_size, "linear")
 ```
-📍 [`src/h3mlx/ops.py:153-158`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L153-L158)
+📍 [`src/h3mlx/ops.py:158-163`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L158-L163)
 ```python
- 153 def adaln_tables(temb: mx.array, p: dict, hidden_size: int, name: str = "adaln_proj.linear") -> list[mx.array]:
- 154     """`adaln_modulation` from the weights dict `p`: the projection `name` goes through `plinear`, so a LoRA on it
- 155     counts (diffusers loads one onto this Linear like any other)."""
- 156     out = plinear(silu(temb).astype(p[name + ".weight"].dtype), p, name, bias=True)
- 157     out = out.reshape(-1, 6 * hidden_size)
- 158     return mx.split(out, 6, axis=-1)
+ 158 def adaln_tables(temb: mx.array, p: dict, hidden_size: int, name: str = "adaln_proj.linear") -> list[mx.array]:
+ 159     """`adaln_modulation` from the weights dict `p`: the projection `name` goes through `plinear`, so a LoRA on it
+ 160     counts (diffusers loads one onto this Linear like any other)."""
+ 161     out = plinear(silu(temb).astype(p[name + ".weight"].dtype), p, name, bias=True)
+ 162     out = out.reshape(-1, 6 * hidden_size)
+ 163     return mx.split(out, 6, axis=-1)
 ```
-📍 [`src/h3mlx/ops.py:161-163`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L161-L163)
+📍 [`src/h3mlx/ops.py:186-188`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L186-L188)
 ```python
- 161 def modulate(x: mx.array, shift: mx.array, scale: mx.array, rows: mx.array) -> mx.array:
- 162     """x * (1 + scale[rows]) + shift[rows]; x is (batch, seq, hidden), rows (seq,) index the AdaLN table."""
- 163     return x * (1.0 + mx.take(scale, rows, axis=0)) + mx.take(shift, rows, axis=0)
+ 186 def modulate(x: mx.array, shift: mx.array, scale: mx.array, rows: mx.array, take=take_rows) -> mx.array:
+ 187     """x * (1 + scale[rows]) + shift[rows]; x is (batch, seq, hidden), rows (seq,) index the AdaLN table."""
+ 188     return x * (1.0 + take(scale, rows)) + take(shift, rows)
 ```
 
 (`adaln_tables` is the projection read from the weight dict. It goes through `plinear`, which without a LoRA is exactly
-`linear`; a LoRA on the projection is covered in `docs/porting-lora-training.md`.)
+`linear`; a LoRA on the projection is covered in `docs/porting-lora-training.md`. `modulate`'s `take` is the gather of
+a table's rows: `take_rows`, which is `mx.take` along the first axis, unless a caller passes another. Only the
+training forward does, for the sake of the gather's gradient; that guide's §7.1 has the reason.)
 
 The `silu` here runs on the f32 timestep embedding, and only its result is cast to the bf16 projection, as the
 original's comment explains. The place where a bf16 `silu` could round differently is the feed-forward gate. There our
@@ -504,15 +506,15 @@ original's comment explains. The place where a bf16 `silu` could round different
 bf16 values in [−5, 5]. (`plinear(x, p, "net.0.proj")` below is exactly `linear(x, p["net.0.proj.weight"])` unless the
 weight dict also carries a LoRA for that name; only HyperFlow does, see §9.)
 
-📍 [`src/h3mlx/ops.py:224-228`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L224-L228)
+📍 [`src/h3mlx/ops.py:249-253`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L249-L253)
 ```python
- 224 def swiglu_ff(x: mx.array, p: dict) -> mx.array:
- 225     """diffusers FeedForward(activation_fn="swiglu", bias=False): proj -> (h, gate) -> h * silu(gate) -> out."""
- 226     h = plinear(x, p, "net.0.proj")
- 227     h, gate = mx.split(h, 2, axis=-1)
- 228     return plinear(h * silu(gate), p, "net.2")
+ 249 def swiglu_ff(x: mx.array, p: dict) -> mx.array:
+ 250     """diffusers FeedForward(activation_fn="swiglu", bias=False): proj -> (h, gate) -> h * silu(gate) -> out."""
+ 251     h = plinear(x, p, "net.0.proj")
+ 252     h, gate = mx.split(h, 2, axis=-1)
+ 253     return plinear(h * silu(gate), p, "net.2")
 ```
-📍 [`src/h3mlx/ops.py:54-58`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L54-L58)
+📍 [`src/h3mlx/ops.py:54-58`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L54-L58)
 ```python
   54 def silu(x: mx.array) -> mx.array:
   55     """torch's silu rounds once: compute in float32, cast back (a bf16 x * sigmoid(x) is off by one ulp at ~30% of
@@ -573,40 +575,40 @@ LoRA-aware `linear`.
  208         hidden_states = attn.to_out[1](hidden_states)
  209         return hidden_states
 ```
-📍 [`src/h3mlx/ops.py:202-221`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L202-L221)
+📍 [`src/h3mlx/ops.py:227-246`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L227-L246)
 ```python
- 202 def attn_block(
- 203     x: mx.array,
- 204     p: dict,
- 205     heads: int,
- 206     qk_eps: float,
- 207     rotary: tuple[mx.array, mx.array] | None,
- 208     mask: mx.array | None = None,
- 209 ) -> mx.array:
- 210     """MiniMaxH3AttnProcessor with separate to_q/to_k/to_v (no bias), per-head RMSNorm on q/k, rope, to_out."""
- 211     b, s, _ = x.shape
- 212     q = plinear(x, p, "to_q").reshape(b, s, heads, -1)
- 213     k = plinear(x, p, "to_k").reshape(b, s, heads, -1)
- 214     v = plinear(x, p, "to_v").reshape(b, s, heads, -1)
- 215     q = rms_norm(q, p["norm_q.weight"], qk_eps)
- 216     k = rms_norm(k, p["norm_k.weight"], qk_eps)
- 217     if rotary is not None:
- 218         q = apply_rotary(q, *rotary)
- 219         k = apply_rotary(k, *rotary)
- 220     o = attention(q, k, v, mask).reshape(b, s, -1)
- 221     return plinear(o, p, "to_out.0")
+ 227 def attn_block(
+ 228     x: mx.array,
+ 229     p: dict,
+ 230     heads: int,
+ 231     qk_eps: float,
+ 232     rotary: tuple[mx.array, mx.array] | None,
+ 233     mask: mx.array | None = None,
+ 234 ) -> mx.array:
+ 235     """MiniMaxH3AttnProcessor with separate to_q/to_k/to_v (no bias), per-head RMSNorm on q/k, rope, to_out."""
+ 236     b, s, _ = x.shape
+ 237     q = plinear(x, p, "to_q").reshape(b, s, heads, -1)
+ 238     k = plinear(x, p, "to_k").reshape(b, s, heads, -1)
+ 239     v = plinear(x, p, "to_v").reshape(b, s, heads, -1)
+ 240     q = rms_norm(q, p["norm_q.weight"], qk_eps)
+ 241     k = rms_norm(k, p["norm_k.weight"], qk_eps)
+ 242     if rotary is not None:
+ 243         q = apply_rotary(q, *rotary)
+ 244         k = apply_rotary(k, *rotary)
+ 245     o = attention(q, k, v, mask).reshape(b, s, -1)
+ 246     return plinear(o, p, "to_out.0")
 ```
-📍 [`src/h3mlx/ops.py:184-192`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L184-L192)
+📍 [`src/h3mlx/ops.py:209-217`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L209-L217)
 ```python
- 184 def attention(q: mx.array, k: mx.array, v: mx.array, mask: mx.array | None = None) -> mx.array:
- 185     """Full self-attention. q, k, v: (batch, seq, heads, head_dim) as diffusers lays them out; returns the same layout.
- 186
- 187     `mask` is an additive or boolean mask broadcastable to (batch, heads, seq_q, seq_k); the model itself passes none.
- 188     """
- 189     scale = 1.0 / math.sqrt(q.shape[-1])
- 190     qt, kt, vt = (t.transpose(0, 2, 1, 3) for t in (q, k, v))
- 191     o = mx.fast.scaled_dot_product_attention(qt, kt, vt, scale=scale, mask=mask)
- 192     return o.transpose(0, 2, 1, 3)
+ 209 def attention(q: mx.array, k: mx.array, v: mx.array, mask: mx.array | None = None) -> mx.array:
+ 210     """Full self-attention. q, k, v: (batch, seq, heads, head_dim) as diffusers lays them out; returns the same layout.
+ 211
+ 212     `mask` is an additive or boolean mask broadcastable to (batch, heads, seq_q, seq_k); the model itself passes none.
+ 213     """
+ 214     scale = 1.0 / math.sqrt(q.shape[-1])
+ 215     qt, kt, vt = (t.transpose(0, 2, 1, 3) for t in (q, k, v))
+ 216     o = mx.fast.scaled_dot_product_attention(qt, kt, vt, scale=scale, mask=mask)
+ 217     return o.transpose(0, 2, 1, 3)
 ```
 
 The original packs one request into one unpadded document, so no mask is passed. diffusers' comment says MiniMax's own
@@ -645,33 +647,36 @@ shows the two give the same rows in MLX, with a junk tail that does change the o
  372
  373         return hidden_states
 ```
-📍 [`src/h3mlx/ops.py:374-395`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L374-L395)
+📍 [`src/h3mlx/ops.py:399-422`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L399-L422)
 ```python
- 374 def dit_block(
- 375     x: mx.array,
- 376     temb: mx.array,
- 377     adaln_indices: mx.array,
- 378     rotary: tuple[mx.array, mx.array],
- 379     p: dict,
- 380     heads: int,
- 381     hidden_size: int,
- 382     norm_eps: float = 1e-5,
- 383     qk_eps: float = 1e-5,
- 384     modulation: list[mx.array] | None = None,
- 385 ) -> mx.array:
- 386     """Pre-norm attention and SwiGLU FF, each shift/scale-modulated and gated per row from the (t, modality) table.
- 387     `modulation`: the six precomputed tables (from `ModulationCache`) instead of projecting `temb` here."""
- 388     if modulation is None:
- 389         modulation = adaln_tables(temb, p, hidden_size)
- 390     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation
- 391     sub = lambda prefix: {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}  # noqa: E731
- 392     h = modulate(rms_norm(x, p["norm1.weight"], norm_eps), shift_msa, scale_msa, adaln_indices)
- 393     x = x + mx.take(gate_msa, adaln_indices, axis=0) * attn_block(h, sub("attn."), heads, qk_eps, rotary)
- 394     h = modulate(rms_norm(x, p["norm2.weight"], norm_eps), shift_mlp, scale_mlp, adaln_indices)
- 395     return x + mx.take(gate_mlp, adaln_indices, axis=0) * swiglu_ff(h, sub("ff."))
+ 399 def dit_block(
+ 400     x: mx.array,
+ 401     temb: mx.array,
+ 402     adaln_indices: mx.array,
+ 403     rotary: tuple[mx.array, mx.array],
+ 404     p: dict,
+ 405     heads: int,
+ 406     hidden_size: int,
+ 407     norm_eps: float = 1e-5,
+ 408     qk_eps: float = 1e-5,
+ 409     modulation: list[mx.array] | None = None,
+ 410     take=take_rows,
+ 411 ) -> mx.array:
+ 412     """Pre-norm attention and SwiGLU FF, each shift/scale-modulated and gated per row from the (t, modality) table.
+ 413     `modulation`: the six precomputed tables (from `ModulationCache`) instead of projecting `temb` here. `take`: the
+ 414     gather of a table's rows, `take_rows_for_training` in a forward that is differentiated."""
+ 415     if modulation is None:
+ 416         modulation = adaln_tables(temb, p, hidden_size)
+ 417     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation
+ 418     sub = lambda prefix: {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}  # noqa: E731
+ 419     h = modulate(rms_norm(x, p["norm1.weight"], norm_eps), shift_msa, scale_msa, adaln_indices, take)
+ 420     x = x + take(gate_msa, adaln_indices) * attn_block(h, sub("attn."), heads, qk_eps, rotary)
+ 421     h = modulate(rms_norm(x, p["norm2.weight"], norm_eps), shift_mlp, scale_mlp, adaln_indices, take)
+ 422     return x + take(gate_mlp, adaln_indices) * swiglu_ff(h, sub("ff."))
 ```
 
-`modulation=` lets a precomputed table replace the per-step projection (§2.6).
+`modulation=` lets a precomputed table replace the per-step projection (§2.6). `take=` is the gather of the tables'
+rows, as in `modulate`.
 
 ### 2.5 The whole forward
 
@@ -783,20 +788,22 @@ shows the two give the same rows in MLX, with a junk tail that does change the o
  666         return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
 ```
 
-The port, stage by stage. Each modality is projected at its own weights' dtype, the text goes through the 2-layer token
-refiner, and the rows are scattered into the packed buffer:
+The port, stage by stage. The first stage and the last are functions of their own, `dit_inputs` and `dit_outputs`,
+which `dit_forward` calls and the training forward shares (`docs/porting-lora-training.md`, §7.1). Each modality is
+projected at its own weights' dtype, the text goes through the 2-layer token refiner, and the rows are scattered into
+the packed buffer:
 
-📍 [`src/h3mlx/ops.py:441-449`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L441-L449)
+📍 [`src/h3mlx/ops.py:448-456`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L448-L456)
 ```python
- 441     v = plinear(video.astype(p["proj_in.weight"].dtype), p, "proj_in", bias=True)
- 442     a = plinear(audio.astype(p["audio_proj_in.weight"].dtype), p, "audio_proj_in", bias=True)
- 443     t = plinear(text.astype(p["context_embedder.weight"].dtype), p, "context_embedder", bias=True)
- 444     t = token_refiner(t, _sub(p, "token_refiner."), cfg["num_refiner_layers"], heads, eps, qk_eps, final_eps)
- 445
- 446     x = mx.zeros((t.shape[0], seq, t.shape[-1]), dtype=t.dtype)
- 447     x[:, text_indices] = t
- 448     x[:, video_indices] = v.astype(t.dtype)
- 449     x[:, audio_indices] = a.astype(t.dtype)
+ 448     v = plinear(video.astype(p["proj_in.weight"].dtype), p, "proj_in", bias=True)
+ 449     a = plinear(audio.astype(p["audio_proj_in.weight"].dtype), p, "audio_proj_in", bias=True)
+ 450     t = plinear(text.astype(p["context_embedder.weight"].dtype), p, "context_embedder", bias=True)
+ 451     t = token_refiner(t, _sub(p, "token_refiner."), cfg["num_refiner_layers"], heads, eps, qk_eps, final_eps)
+ 452
+ 453     x = mx.zeros((t.shape[0], seq, t.shape[-1]), dtype=t.dtype)
+ 454     x[:, text_indices] = t
+ 455     x[:, video_indices] = v.astype(t.dtype)
+ 456     x[:, audio_indices] = a.astype(t.dtype)
 ```
 
 The AdaLN rows, then the 50 blocks. Each block is evaluated before the next is built, so MLX's lazy graph never spans
@@ -804,35 +811,34 @@ more than one block. This does not cap the sequence length or the total memory. 
 `None` and `two_time_embedding` is exactly `timestep_embedding` (time_proj, then time_embedder); with it, it is
 HyperFlow's two-time embedder (§9 and `docs/porting-hyperflow.md` §3):
 
-📍 [`src/h3mlx/ops.py:453-467`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L453-L467)
+📍 [`src/h3mlx/ops.py:502-516`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L502-L516)
 ```python
- 453     mx.eval(x)  # projections + refiner + scatter as their own graph, before the first block
- 454     if cache is None:
- 455         temb = two_time_embedding(timestep, endpoint, p, cfg)
- 456         t_rows = timestep_indices
- 457     else:
- 458         if endpoint is not None or "endpoint_time_embedder.linear_1.weight" in p:
- 459             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
- 460         temb = None
- 461         call_blocks, call_out = cache.call(timestep)  # this call's own tables: the same rows as computing them here
- 462         t_rows = timestep_indices
- 463     adaln_indices = t_rows * MODALITY_NUM + token_tags
- 464     for i in range(cfg["num_layers"]):
- 465         x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps,
- 466                       modulation=None if cache is None else call_blocks[i])
- 467         mx.eval(x)  # one block's graph at a time: bounds activation memory at 20-50k rows
+ 502     mx.eval(x)  # projections + refiner + scatter as their own graph, before the first block
+ 503     if cache is None:
+ 504         temb = two_time_embedding(timestep, endpoint, p, cfg)
+ 505         t_rows = timestep_indices
+ 506     else:
+ 507         if endpoint is not None or "endpoint_time_embedder.linear_1.weight" in p:
+ 508             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
+ 509         temb = None
+ 510         call_blocks, call_out = cache.call(timestep)  # this call's own tables: the same rows as computing them here
+ 511         t_rows = timestep_indices
+ 512     adaln_indices = t_rows * MODALITY_NUM + token_tags
+ 513     for i in range(cfg["num_layers"]):
+ 514         x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps,
+ 515                       modulation=None if cache is None else call_blocks[i])
+ 516         mx.eval(x)  # one block's graph at a time: bounds activation memory at 20-50k rows
 ```
 
 The final shift/scale norm, the cast to the f32 heads, and gathering the video and audio rows:
 
-📍 [`src/h3mlx/ops.py:471-476`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L471-L476)
+📍 [`src/h3mlx/ops.py:466-470`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L466-L470)
 ```python
- 471     shift, scale = norm_out_tables(temb, p) if cache is None else call_out
- 472     h = rms_norm(x, p["norm_out.norm.weight"], final_eps)
- 473     x = h * (1.0 + mx.take(scale, t_rows, axis=0)) + mx.take(shift, t_rows, axis=0)
- 474     x = x.astype(p["proj_out.weight"].dtype)
- 475     vid = plinear(x, p, "proj_out", bias=True)[:, video_indices]
- 476     aud = plinear(x, p, "audio_proj_out", bias=True)[:, audio_indices]
+ 466     h = rms_norm(x, p["norm_out.norm.weight"], cfg["final_norm_eps"])
+ 467     x = h * (1.0 + take(scale, t_rows)) + take(shift, t_rows)
+ 468     x = x.astype(p["proj_out.weight"].dtype)
+ 469     vid = plinear(x, p, "proj_out", bias=True)[:, video_indices]
+ 470     aud = plinear(x, p, "audio_proj_out", bias=True)[:, audio_indices]
 ```
 
 The port leaves out the original's input shape checks, the LoRA scale hook and the output class. It is a forward
@@ -876,86 +882,86 @@ one bf16 step in 165 entries of the first block, and 8 steps turned that into a 
 - **On that larger model at each of the schedule's 49 timestep plans:** cached and uncached are bit-identical, and
   uncached stays within 1.25× torch-bf16's own error against an f32 run, plus 0.0001 (worst observed 1.06×).
 
-📍 [`src/h3mlx/ops.py:484-559`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L484-L559)
+📍 [`src/h3mlx/ops.py:526-601`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L526-L601)
 ```python
- 484 class ModulationCache:
- 485     """Every block's six AdaLN tables (and norm_out's shift/scale) for each model call of a run, computed up front.
- 486
- 487     The modulation depends only on a call's timesteps and the weights, never on the latents, so a sampling run can
- 488     precompute it and drop the `adaln_proj` weights (~26 GB of transformer_ref's ~66 GB in bf16). `calls` lists each
- 489     call's distinct timesteps as `denoise` passes them (`schedule_calls`). Each call's tables are computed from exactly
- 490     that array, so they are bit-identical to what `dit_block` and `norm_out` compute inside the call. (One product over
- 491     the union of all timesteps is the same maths but rounds differently in bf16, and over 8 steps that drew a different
- 492     picture from the same seed.) A call's table rows are [t0m0, t0m1, t0m2, t1m0, ...], as `adaln_modulation` returns.
- 493
- 494     `drop=True` pops each projection from `p` as soon as its tables are evaluated (what `drop_weights` returns, done in
- 495     place). With lazily loaded weights and no other reference to them, only one block's projection is then resident
- 496     at a time, even when the rest of the transformer already is (a quantized one: 11-21 GB, plus all 26 GB of
- 497     projections otherwise). Popping can't free arrays someone else still holds.
- 498     """
- 499
- 500     def __init__(self, p: dict, cfg: dict, calls, drop: bool = False):
- 501         if "endpoint_time_embedder.linear_1.weight" in p:
- 502             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
- 503         arrays = {}
- 504         for u in calls:  # distinct calls, in first-seen order; float32, as `denoise` passes them
- 505             a = self.row(u)
- 506             arrays.setdefault(tuple(a.tolist()), a)
- 507         self._index = {k: c for c, k in enumerate(arrays)}
- 508         self.t = np.unique(np.concatenate(list(arrays.values()))) if arrays else np.zeros(0, np.float32)
- 509         tembs = [timestep_embedding(mx.array(a), _sub(p, "time_embedder."), cfg["freq_dim"]) for a in arrays.values()]
- 510         mx.eval(tembs)
- 511         hidden = cfg["hidden_size"]
- 512         self.blocks = [[] for _ in arrays]  # [call][block] -> the six tables
- 513         for i in range(cfg["num_layers"]):
- 514             name = f"transformer_blocks.{i}.adaln_proj.linear"
- 515             tables = [adaln_tables(temb, p, hidden, name) for temb in tembs]
- 516             mx.eval(tables)
- 517             for c, tab in enumerate(tables):
- 518                 self.blocks[c].append(tab)
- 519             if drop:
- 520                 for k in self._projection_keys(p, name):
- 521                     del p[k]
- 522         self.out = [norm_out_tables(temb, p) for temb in tembs]
- 523         mx.eval(self.out)
- 524         if drop:
- 525             for k in self._projection_keys(p, "norm_out.linear"):
- 526                 del p[k]
- 527
- 528     @staticmethod
- 529     def _projection_keys(p: dict, name: str) -> list[str]:
- 530         """The keys of one projection the cache replaces: its weight, its bias, and any LoRA on it (which the tables
- 531         already include)."""
- 532         return [k for k in p if k in (name + ".weight", name + ".bias") or k.startswith(name + ".lora_")]
- 533
- 534     @staticmethod
- 535     def row(timestep) -> np.ndarray:
- 536         """A call's distinct timesteps as one row of float32 (what `row_timesteps` returns and `dit_forward` embeds),
- 537         from a list, a numpy array or an mx.array of any float dtype."""
- 538         if isinstance(timestep, mx.array):
- 539             timestep = np.array(timestep.astype(mx.float32))
- 540         a = np.asarray(timestep, dtype=np.float32)
- 541         if a.ndim != 1:
- 542             raise ValueError(f"a call's timesteps are one row of distinct values, got shape {a.shape}")
- 543         return a
- 544
- 545     def call(self, timestep: mx.array) -> tuple[list, list]:
- 546         """(each block's six tables, norm_out's [shift, scale]) for the call with these distinct timesteps."""
- 547         k = tuple(self.row(timestep).tolist())
- 548         if k not in self._index:
- 549             raise KeyError(f"timesteps {k} are not one of the {len(self._index)} calls the cache was built for")
- 550         c = self._index[k]
- 551         return self.blocks[c], self.out[c]
- 552
- 553     @staticmethod
- 554     def drop_weights(p: dict, cfg: dict) -> dict:
- 555         """A new dict without the projections the cache replaces. The memory is freed only when nothing else (e.g. the
- 556         caller's original dict) still references those arrays."""
- 557         names = [f"transformer_blocks.{i}.adaln_proj.linear" for i in range(cfg["num_layers"])] + ["norm_out.linear"]
- 558         gone = {k for name in names for k in ModulationCache._projection_keys(p, name)}
- 559         return {k: v for k, v in p.items() if k not in gone}
+ 526 class ModulationCache:
+ 527     """Every block's six AdaLN tables (and norm_out's shift/scale) for each model call of a run, computed up front.
+ 528
+ 529     The modulation depends only on a call's timesteps and the weights, never on the latents, so a sampling run can
+ 530     precompute it and drop the `adaln_proj` weights (~26 GB of transformer_ref's ~66 GB in bf16). `calls` lists each
+ 531     call's distinct timesteps as `denoise` passes them (`schedule_calls`). Each call's tables are computed from exactly
+ 532     that array, so they are bit-identical to what `dit_block` and `norm_out` compute inside the call. (One product over
+ 533     the union of all timesteps is the same maths but rounds differently in bf16, and over 8 steps that drew a different
+ 534     picture from the same seed.) A call's table rows are [t0m0, t0m1, t0m2, t1m0, ...], as `adaln_modulation` returns.
+ 535
+ 536     `drop=True` pops each projection from `p` as soon as its tables are evaluated (what `drop_weights` returns, done in
+ 537     place). With lazily loaded weights and no other reference to them, only one block's projection is then resident
+ 538     at a time, even when the rest of the transformer already is (a quantized one: 11-21 GB, plus all 26 GB of
+ 539     projections otherwise). Popping can't free arrays someone else still holds.
+ 540     """
+ 541
+ 542     def __init__(self, p: dict, cfg: dict, calls, drop: bool = False):
+ 543         if "endpoint_time_embedder.linear_1.weight" in p:
+ 544             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
+ 545         arrays = {}
+ 546         for u in calls:  # distinct calls, in first-seen order; float32, as `denoise` passes them
+ 547             a = self.row(u)
+ 548             arrays.setdefault(tuple(a.tolist()), a)
+ 549         self._index = {k: c for c, k in enumerate(arrays)}
+ 550         self.t = np.unique(np.concatenate(list(arrays.values()))) if arrays else np.zeros(0, np.float32)
+ 551         tembs = [timestep_embedding(mx.array(a), _sub(p, "time_embedder."), cfg["freq_dim"]) for a in arrays.values()]
+ 552         mx.eval(tembs)
+ 553         hidden = cfg["hidden_size"]
+ 554         self.blocks = [[] for _ in arrays]  # [call][block] -> the six tables
+ 555         for i in range(cfg["num_layers"]):
+ 556             name = f"transformer_blocks.{i}.adaln_proj.linear"
+ 557             tables = [adaln_tables(temb, p, hidden, name) for temb in tembs]
+ 558             mx.eval(tables)
+ 559             for c, tab in enumerate(tables):
+ 560                 self.blocks[c].append(tab)
+ 561             if drop:
+ 562                 for k in self._projection_keys(p, name):
+ 563                     del p[k]
+ 564         self.out = [norm_out_tables(temb, p) for temb in tembs]
+ 565         mx.eval(self.out)
+ 566         if drop:
+ 567             for k in self._projection_keys(p, "norm_out.linear"):
+ 568                 del p[k]
+ 569
+ 570     @staticmethod
+ 571     def _projection_keys(p: dict, name: str) -> list[str]:
+ 572         """The keys of one projection the cache replaces: its weight, its bias, and any LoRA on it (which the tables
+ 573         already include)."""
+ 574         return [k for k in p if k in (name + ".weight", name + ".bias") or k.startswith(name + ".lora_")]
+ 575
+ 576     @staticmethod
+ 577     def row(timestep) -> np.ndarray:
+ 578         """A call's distinct timesteps as one row of float32 (what `row_timesteps` returns and `dit_forward` embeds),
+ 579         from a list, a numpy array or an mx.array of any float dtype."""
+ 580         if isinstance(timestep, mx.array):
+ 581             timestep = np.array(timestep.astype(mx.float32))
+ 582         a = np.asarray(timestep, dtype=np.float32)
+ 583         if a.ndim != 1:
+ 584             raise ValueError(f"a call's timesteps are one row of distinct values, got shape {a.shape}")
+ 585         return a
+ 586
+ 587     def call(self, timestep: mx.array) -> tuple[list, list]:
+ 588         """(each block's six tables, norm_out's [shift, scale]) for the call with these distinct timesteps."""
+ 589         k = tuple(self.row(timestep).tolist())
+ 590         if k not in self._index:
+ 591             raise KeyError(f"timesteps {k} are not one of the {len(self._index)} calls the cache was built for")
+ 592         c = self._index[k]
+ 593         return self.blocks[c], self.out[c]
+ 594
+ 595     @staticmethod
+ 596     def drop_weights(p: dict, cfg: dict) -> dict:
+ 597         """A new dict without the projections the cache replaces. The memory is freed only when nothing else (e.g. the
+ 598         caller's original dict) still references those arrays."""
+ 599         names = [f"transformer_blocks.{i}.adaln_proj.linear" for i in range(cfg["num_layers"])] + ["norm_out.linear"]
+ 600         gone = {k for name in names for k in ModulationCache._projection_keys(p, name)}
+ 601         return {k: v for k, v in p.items() if k not in gone}
 ```
-📍 [`src/h3mlx/denoise.py:149-155`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/denoise.py#L149-L155)
+📍 [`src/h3mlx/denoise.py:149-155`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/denoise.py#L149-L155)
 ```python
  149 def schedule_calls(layout: Layout, schedules: Schedules) -> list[np.ndarray]:
  150     """Each model call's distinct timesteps over the whole run, exactly as `denoise` passes them: what a
@@ -1026,42 +1032,42 @@ calls**. diffusers' default of 50 runs 49 forwards. The tests' "3" and "5" run 2
  169         self._step_index = None
  170         self._begin_index = None
 ```
-📍 [`src/h3mlx/ops.py:347-357`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L347-L357)
+📍 [`src/h3mlx/ops.py:372-382`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L372-L382)
 ```python
- 347 def flow_sigmas(num_inference_steps: int, shift: float) -> np.ndarray:
- 348     """linspace(1, 0, n) in float32, exponential shift, consecutive duplicates collapsed. Terminal 0 included."""
- 349     if num_inference_steps is None or num_inference_steps < 2:
- 350         raise ValueError(f"num_inference_steps must be >= 2, got {num_inference_steps}")
- 351     if not usable_shift(shift):
- 352         raise ValueError(f"shift must be positive and finite, got {shift}")
- 353     base = torch_linspace_f32(1.0, 0.0, num_inference_steps)
- 354     shift32 = np.float32(shift)
- 355     sig = (shift32 * base / (np.float32(1) + (shift32 - np.float32(1)) * base)).astype(np.float32)
- 356     keep = np.concatenate([[True], sig[1:] != sig[:-1]])
- 357     return sig[keep]
+ 372 def flow_sigmas(num_inference_steps: int, shift: float) -> np.ndarray:
+ 373     """linspace(1, 0, n) in float32, exponential shift, consecutive duplicates collapsed. Terminal 0 included."""
+ 374     if num_inference_steps is None or num_inference_steps < 2:
+ 375         raise ValueError(f"num_inference_steps must be >= 2, got {num_inference_steps}")
+ 376     if not usable_shift(shift):
+ 377         raise ValueError(f"shift must be positive and finite, got {shift}")
+ 378     base = torch_linspace_f32(1.0, 0.0, num_inference_steps)
+ 379     shift32 = np.float32(shift)
+ 380     sig = (shift32 * base / (np.float32(1) + (shift32 - np.float32(1)) * base)).astype(np.float32)
+ 381     keep = np.concatenate([[True], sig[1:] != sig[:-1]])
+ 382     return sig[keep]
 ```
 
 On arm64, `torch.linspace` fills each half of the grid from its own end, with a fused multiply-add. So `np.linspace`
 differs in the last bit at nine positions for N = 50. The port reproduces torch's fill; `tests/test_ops.py` checks it
 bit-exact for every N from 2 to 1999.
 
-📍 [`src/h3mlx/ops.py:322-336`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L322-L336)
+📍 [`src/h3mlx/ops.py:347-361`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L347-L361)
 ```python
- 322 def torch_linspace_f32(start: float, end: float, steps: int) -> np.ndarray:
- 323     """torch.linspace(start, end, steps, dtype=float32) bit for bit (CPU, arm64): float32 step, the first half filled
- 324     from `start` and the second from `end`, each as one fused multiply-add (exact product, single rounding).
- 325     np.linspace differs by 1 ulp at e.g. steps=50."""
- 326     if steps < 2:
- 327         raise ValueError(f"steps must be >= 2, got {steps}")
- 328     start32, end32 = np.float32(start), np.float32(end)
- 329     step = np.float32((end32 - start32) / np.float32(steps - 1))
- 330     i = np.arange(steps, dtype=np.float64)
- 331     out = np.where(
- 332         i < steps // 2,
- 333         np.float64(start32) + np.float64(step) * i,
- 334         np.float64(end32) - np.float64(step) * (steps - 1 - i),
- 335     )
- 336     return out.astype(np.float32)
+ 347 def torch_linspace_f32(start: float, end: float, steps: int) -> np.ndarray:
+ 348     """torch.linspace(start, end, steps, dtype=float32) bit for bit (CPU, arm64): float32 step, the first half filled
+ 349     from `start` and the second from `end`, each as one fused multiply-add (exact product, single rounding).
+ 350     np.linspace differs by 1 ulp at e.g. steps=50."""
+ 351     if steps < 2:
+ 352         raise ValueError(f"steps must be >= 2, got {steps}")
+ 353     start32, end32 = np.float32(start), np.float32(end)
+ 354     step = np.float32((end32 - start32) / np.float32(steps - 1))
+ 355     i = np.arange(steps, dtype=np.float64)
+ 356     out = np.where(
+ 357         i < steps // 2,
+ 358         np.float64(start32) + np.float64(step) * i,
+ 359         np.float64(end32) - np.float64(step) * (steps - 1 - i),
+ 360     )
+ 361     return out.astype(np.float32)
 ```
 
 📍 [`diffusers:src/diffusers/schedulers/scheduling_minimax_h3.py:223-283`](https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/schedulers/scheduling_minimax_h3.py#L223-L283)
@@ -1128,17 +1134,17 @@ bit-exact for every N from 2 to 1999.
  282             return (prev_sample,)
  283         return MiniMaxH3SchedulerOutput(prev_sample=prev_sample)
 ```
-📍 [`src/h3mlx/ops.py:360-368`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/ops.py#L360-L368)
+📍 [`src/h3mlx/ops.py:385-393`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L385-L393)
 ```python
- 360 def flow_step(v: mx.array, t: float, x: mx.array, sigma: float, sigma_next: float) -> mx.array:
- 361     """x0 = x + (1 - t) * v (sigma from the timestep, in x's dtype); x_next = r*x + (1 - r)*x0, r = s_next / s, f32."""
- 362     st = (mx.array(1.0, dtype=x.dtype) - mx.array(t, dtype=x.dtype)).astype(x.dtype)
- 363     x0 = x + st * v
- 364     cdt = mx.float32 if x.dtype in (mx.float16, mx.bfloat16) else x.dtype
- 365     s = mx.array(sigma, dtype=cdt)
- 366     sn = mx.array(sigma_next, dtype=cdt)
- 367     r = sn / s
- 368     return (r * x.astype(cdt) + (1.0 - r) * x0.astype(cdt)).astype(x.dtype)
+ 385 def flow_step(v: mx.array, t: float, x: mx.array, sigma: float, sigma_next: float) -> mx.array:
+ 386     """x0 = x + (1 - t) * v (sigma from the timestep, in x's dtype); x_next = r*x + (1 - r)*x0, r = s_next / s, f32."""
+ 387     st = (mx.array(1.0, dtype=x.dtype) - mx.array(t, dtype=x.dtype)).astype(x.dtype)
+ 388     x0 = x + st * v
+ 389     cdt = mx.float32 if x.dtype in (mx.float16, mx.bfloat16) else x.dtype
+ 390     s = mx.array(sigma, dtype=cdt)
+ 391     sn = mx.array(sigma_next, dtype=cdt)
+ 392     r = sn / s
+ 393     return (r * x.astype(cdt) + (1.0 - r) * x0.astype(cdt)).astype(x.dtype)
 ```
 
 The original's scheduler also accepts custom sigma arrays and keeps a step index; the port's `flow_step` takes the two
@@ -1290,7 +1296,7 @@ diffusers builds the per-row plan once, then each loop step runs the transformer
 
 The port does all three in one loop:
 
-📍 [`src/h3mlx/denoise.py:69-77`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/denoise.py#L69-L77)
+📍 [`src/h3mlx/denoise.py:69-77`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/denoise.py#L69-L77)
 ```python
   69 def row_timesteps(layout: Layout, video_t: float, audio_t: float, cond_video_t: float, cond_audio_t: float):
   70     """Per-row timesteps reduced to (sorted distinct values, inverse index), like `build_row_timesteps`."""
@@ -1302,7 +1308,7 @@ The port does all three in one loop:
   76     uniq, inv = np.unique(rt, return_inverse=True)
   77     return uniq, inv
 ```
-📍 [`src/h3mlx/denoise.py:97-146`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/denoise.py#L97-L146)
+📍 [`src/h3mlx/denoise.py:97-146`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/denoise.py#L97-L146)
 ```python
   97 def denoise(
   98     params: dict,
@@ -1447,7 +1453,7 @@ The prompt follows verbatim, with no chat template.
  611         emit(text(prompt))
  612         return token_ids, token_tags
 ```
-📍 [`src/h3mlx/presentation.py:30-74`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/presentation.py#L30-L74)
+📍 [`src/h3mlx/presentation.py:30-74`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/presentation.py#L30-L74)
 ```python
   30 def build_presentation(
   31     tokenizer,
@@ -1542,7 +1548,7 @@ The prompt follows verbatim, with no chat template.
  488         ]
  489         return [frames[index] for index in indices], block_timestamps
 ```
-📍 [`src/h3mlx/presentation.py:12-27`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/presentation.py#L12-L27)
+📍 [`src/h3mlx/presentation.py:12-27`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/presentation.py#L12-L27)
 ```python
   12 def sample_video_condition_frames(num_frames: int, fps: float, sample_fps: float, temporal_patch: int):
   13     """Frame indices the conditioner reads (every fps/sample_fps-th, deduplicated) and one timestamp per merged block
@@ -1619,7 +1625,7 @@ token count per block:
  540
  541         return vision_inputs, image_token_counts, video_block_token_counts, video_block_timestamps
 ```
-📍 [`src/h3mlx/pipeline.py:155-178`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/pipeline.py#L155-L178)
+📍 [`src/h3mlx/pipeline.py:155-178`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/pipeline.py#L155-L178)
 ```python
  155 def vision_features(c: Components, refs):
  156     proc = c.processor
@@ -1748,7 +1754,7 @@ mlx-vlm's model to stop after layer 50 without the final norm, through the `enco
  184             apply_final_norm=False,
  185         )
 ```
-📍 [`src/h3mlx/load.py:171-210`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/load.py#L171-L210)
+📍 [`src/h3mlx/load.py:171-210`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/load.py#L171-L210)
 ```python
  171 def load_text_encoder(d, keep_layers: int = 50, dtype=None):
  172     """mlx-vlm Qwen3-VL from the release's `text_encoder/`, with only decoder layers [0, keep_layers) and no lm_head.
@@ -1800,7 +1806,7 @@ for every shard.
 `staged_text_encoder` loads, encodes and drops its own references. It does not unload anything else. To keep the text
 encoder and the transformer from being resident together, leave the transformer unevaluated until the text is done:
 
-📍 [`src/h3mlx/load.py:279-293`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/load.py#L279-L293)
+📍 [`src/h3mlx/load.py:279-293`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/load.py#L279-L293)
 ```python
  279 def staged_text_encoder(d, keep_layers: int = 50, dtype=None):
  280     """An `encode(token_ids, vision_inputs)` that loads the text encoder, runs it, and drops its own references before
@@ -1845,7 +1851,7 @@ encoder and the transformer from being resident together, leave the transformer 
   64             hidden_states = F.pad(hidden_states, (0, 0, 0, 0, self.temporal_padding, 0), mode="constant")
   65         return F.conv3d(hidden_states, self.weight, self.bias, stride=self.stride, padding=0, dilation=self.dilation)
 ```
-📍 [`src/h3mlx/vae_ops.py:25-41`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae_ops.py#L25-L41)
+📍 [`src/h3mlx/vae_ops.py:25-41`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae_ops.py#L25-L41)
 ```python
   25 def causal_conv3d(
   26     x: mx.array,
@@ -1865,7 +1871,7 @@ encoder and the transformer from being resident together, leave the transformer 
   40     y = mx.conv3d(x, w, stride=stride, padding=0)
   41     return y + b if b is not None else y
 ```
-📍 [`src/h3mlx/vae_ops.py:15-22`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae_ops.py#L15-L22)
+📍 [`src/h3mlx/vae_ops.py:15-22`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae_ops.py#L15-L22)
 ```python
   15 def reflect_pad(x: mx.array, axis: int, before: int, after: int) -> mx.array:
   16     """torch F.pad(mode="reflect") along one axis (edge sample not repeated)."""
@@ -1887,7 +1893,7 @@ encoder and the transformer from being resident together, leave the transformer 
   79         hidden_states = hidden_states.view(batch_size, num_frames, num_channels, height, width)
   80         return hidden_states.permute(0, 2, 1, 3, 4).contiguous()
 ```
-📍 [`src/h3mlx/vae_ops.py:44-52`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae_ops.py#L44-L52)
+📍 [`src/h3mlx/vae_ops.py:44-52`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae_ops.py#L44-L52)
 ```python
   44 def group_norm_per_frame(x: mx.array, groups: int, weight: mx.array, bias: mx.array, eps: float) -> mx.array:
   45     """MiniMaxH3VideoGroupNorm: GroupNorm with statistics per (batch, frame), never across frames. Biased variance,
@@ -1934,7 +1940,7 @@ public `encode` pads it.
  801             moments = moments[:, :, : -self.config.token_drop]
  802         return moments
 ```
-📍 [`src/h3mlx/vae.py:167-182`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae.py#L167-L182)
+📍 [`src/h3mlx/vae.py:167-182`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae.py#L167-L182)
 ```python
  167     def encode_moments(self, x):
  168         """Pixels (B, F, H, W, 3) -> moments (B, F', H', W', 2 * latent). One frame: spatial encoder alone."""
@@ -1984,7 +1990,7 @@ holds all of their graphs at once. Tiles are blended linearly across each overla
  676             tile_start_indices.append(tile_start_indices[-1] + tile_size - overlaps[i])
  677         return tile_start_indices, [tile_size] * num_tiles, overlaps
 ```
-📍 [`src/h3mlx/vae.py:77-90`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae.py#L77-L90)
+📍 [`src/h3mlx/vae.py:77-90`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae.py#L77-L90)
 ```python
   77 def split_tiles(length: int, tile: int, min_overlap: int, ratio: int):
   78     if tile >= length:
@@ -2028,7 +2034,7 @@ holds all of their graphs at once. Tiles are blended linearly across each overla
  743         latent_x_overlaps = [overlap // self.spatial_compression_ratio for overlap in x_overlaps]
  744         return self._stitch_tiles(rows, latent_y_overlaps, latent_x_overlaps)
 ```
-📍 [`src/h3mlx/vae.py:156-165`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae.py#L156-L165)
+📍 [`src/h3mlx/vae.py:156-165`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae.py#L156-L165)
 ```python
  156     def encode_clip(self, x):
  157         c = self.cfg
@@ -2065,7 +2071,7 @@ holds all of their graphs at once. Tiles are blended linearly across each overla
  718             result_rows.append(torch.cat(result_row, dim=-1))
  719         return torch.cat(result_rows, dim=-2)
 ```
-📍 [`src/h3mlx/vae.py:113-128`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae.py#L113-L128)
+📍 [`src/h3mlx/vae.py:113-128`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae.py#L113-L128)
 ```python
  113 def stitch_tiles(tiles, h_overlaps, w_overlaps, h_axis=2, w_axis=3):
  114     rows = []
@@ -2106,7 +2112,7 @@ holds all of their graphs at once. Tiles are blended linearly across each overla
  696         slice_rest[dim] = slice(blend_extent, None)
  697         return torch.cat([blended, b[tuple(slice_rest)]], dim=dim)
 ```
-📍 [`src/h3mlx/vae.py:99-110`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae.py#L99-L110)
+📍 [`src/h3mlx/vae.py:99-110`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae.py#L99-L110)
 ```python
   99 def blend(a: mx.array, b: mx.array, extent: int, axis: int) -> mx.array:
  100     """Linear cross-fade of a's tail into b's head over `extent` along `axis`; ramp built in b's dtype."""
@@ -2177,7 +2183,7 @@ holds all of their graphs at once. Tiles are blended linearly across each overla
  852             dec = dec[:, :, :-pad_frames]
  853         return dec
 ```
-📍 [`src/h3mlx/vae.py:210-244`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae.py#L210-L244)
+📍 [`src/h3mlx/vae.py:210-244`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae.py#L210-L244)
 ```python
  210     def decode(self, z):
  211         """Latents (B, F, H, W, latent) -> pixels (B, frames, H*r, W*r, 3), chunked and cross-faded like `_decode`.
@@ -2234,7 +2240,7 @@ by learned layer scales:
  396         hidden_states = hidden_states + self.ff(norm_hidden_states) * self.scale2
  397         return hidden_states
 ```
-📍 [`src/h3mlx/vae_ops.py:177-185`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae_ops.py#L177-L185)
+📍 [`src/h3mlx/vae_ops.py:177-185`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae_ops.py#L177-L185)
 ```python
  177 def vit_block(x: mx.array, p: dict, heads: int, eps: float, rotary) -> mx.array:
  178     """Norms in float32, residual stream float32, attention/FF at the projections' dtype, layer scales."""
@@ -2303,7 +2309,7 @@ by learned layer scales:
  501             width * patch_size,
  502         )
 ```
-📍 [`src/h3mlx/vae_ops.py:188-208`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae_ops.py#L188-L208)
+📍 [`src/h3mlx/vae_ops.py:188-208`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae_ops.py#L188-L208)
 ```python
  188 def vit_decoder(
  189     z: mx.array, p: dict, num_layers: int, heads: int, patch_size: int, patch_size_t: int, out_channels: int,
@@ -2373,7 +2379,7 @@ by learned layer scales:
  135     latents = latents.to(torch.float16).float().cpu()
  136     return (latents - latents_mean) / latents_std
 ```
-📍 [`src/h3mlx/vae.py:253-264`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/vae.py#L253-L264)
+📍 [`src/h3mlx/vae.py:253-264`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/vae.py#L253-L264)
 ```python
  253 def encode_condition(vae: VideoVAE, pixels_u8: mx.array, pixel_mean, pixel_std, latents_mean, latents_std, noise_fn,
  254                      float16_round: bool = True):
@@ -2466,7 +2472,7 @@ become 22, not the nearer 39). A clip under 22 frames is kept whole, since the s
  769         self.set_block_state(state, block_state)
  770         return components, state
 ```
-📍 [`src/h3mlx/pipeline.py:181-205`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/pipeline.py#L181-L205)
+📍 [`src/h3mlx/pipeline.py:181-205`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/pipeline.py#L181-L205)
 ```python
  181 def encode_references(c: Components, refs):
  182     cond, audio_rows = [], []
@@ -2494,7 +2500,7 @@ become 22, not the nearer 39). A clip under 22 frames is kept whole, since the s
  204             audio_rows.append(((lat - a_mean) / a_std).reshape(-1, lat.shape[-1]))
  205     return cond, audio_rows
 ```
-📍 [`src/h3mlx/audio_vae.py:202-209`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/audio_vae.py#L202-L209)
+📍 [`src/h3mlx/audio_vae.py:202-209`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/audio_vae.py#L202-L209)
 ```python
  202     def encode_mean(self, wave: mx.array) -> mx.array:
  203         """(B, samples, 1) mono -> posterior mean (B, samples / hop, latent_channels); right-pads to the hop."""
@@ -2521,7 +2527,7 @@ MLX's grouped `conv_transpose1d` for the upsampling and reads the Kaiser filters
  190         )
  191         return hidden_states[..., self.pad_left : -self.pad_right]
 ```
-📍 [`src/h3mlx/audio_vae.py:73-82`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/audio_vae.py#L73-L82)
+📍 [`src/h3mlx/audio_vae.py:73-82`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/audio_vae.py#L73-L82)
 ```python
   73 def upsample(x, filt: mx.array, ratio: int):
   74     """ratio * conv_transpose1d(replicate-pad(x, pad), filter, stride=ratio, groups=C), then crop."""
@@ -2534,7 +2540,7 @@ MLX's grouped `conv_transpose1d` for the upsampling and reads the Kaiser filters
   81     y = ratio * mx.conv_transpose1d(x, _depthwise(filt, c), stride=ratio, groups=c)
   82     return y[:, pad_left : y.shape[1] - pad_right]
 ```
-📍 [`src/h3mlx/audio_vae.py:85-90`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/audio_vae.py#L85-L90)
+📍 [`src/h3mlx/audio_vae.py:85-90`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/audio_vae.py#L85-L90)
 ```python
   85 def activation1d(x, p, ratio: int = 2):
   86     """Alias-free SnakeBeta: upsample x2, activate, low-pass downsample x2. Filters are the checkpoint's buffers
@@ -2574,7 +2580,7 @@ dimension:
  337         hidden_states = F.adaptive_avg_pool1d(hidden_states, attn.out_dim)
  338         return attn.proj(hidden_states)
 ```
-📍 [`src/h3mlx/audio_vae.py:151-158`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/audio_vae.py#L151-L158)
+📍 [`src/h3mlx/audio_vae.py:151-158`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/audio_vae.py#L151-L158)
 ```python
  151 def causal_attention(x, p, heads, out_dim):
  152     b, n, c = x.shape
@@ -2588,7 +2594,7 @@ dimension:
 
 **Weights.** Weight-norm pairs are folded once. The transposed-convolution weights get their own layout rule:
 
-📍 [`src/h3mlx/audio_vae.py:17-31`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/audio_vae.py#L17-L31)
+📍 [`src/h3mlx/audio_vae.py:17-31`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/audio_vae.py#L17-L31)
 ```python
   17 def fold_weight_norm(sd: dict) -> dict:
   18     """torch.nn.utils.weight_norm (dim=0): weight = g * v / ||v|| with the norm over every axis but 0."""
@@ -2606,7 +2612,7 @@ dimension:
   30             out[k] = np.asarray(v)
   31     return out
 ```
-📍 [`src/h3mlx/audio_vae.py:34-42`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/audio_vae.py#L34-L42)
+📍 [`src/h3mlx/audio_vae.py:34-42`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/audio_vae.py#L34-L42)
 ```python
   34 def to_mlx_layout(sd: dict, transpose_conv_prefixes=("decoder.ups.",)) -> dict:
   35     """numpy torch-layout weights -> MLX arrays in MLX conv layout. 3-D `weight`s are convs."""
@@ -2786,7 +2792,7 @@ latents; the port does not.
  521         self.set_block_state(state, block_state)
  522         return components, state
 ```
-📍 [`src/h3mlx/pipeline.py:115-152`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/pipeline.py#L115-L152)
+📍 [`src/h3mlx/pipeline.py:115-152`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/pipeline.py#L115-L152)
 ```python
  115 def setup(c: Components, references, height, width, num_frames):
  116     """`MiniMaxH3Ref2VASetupStep`: validate, resolve the canvas and frame count, normalise references in order."""
@@ -2913,7 +2919,7 @@ target audio rows. That order is part of what a seed reproduces:
  897         self.set_block_state(state, block_state)
  898         return components, state
 ```
-📍 [`src/h3mlx/pipeline.py:268-282`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/pipeline.py#L268-L282)
+📍 [`src/h3mlx/pipeline.py:268-282`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/pipeline.py#L268-L282)
 ```python
  268     gen = Noise(seed)
  269     patch = tuple(c.dit_cfg["patch_size"])
@@ -3023,7 +3029,7 @@ The port does all three in one block:
  255         self.set_block_state(state, block_state)
  256         return components, state
 ```
-📍 [`src/h3mlx/pipeline.py:216-223`](https://github.com/sublimator/minimax-h3-mlx/blob/e21abaaba73c450c82d6739b9a51301f09c91bc6/src/h3mlx/pipeline.py#L216-L223)
+📍 [`src/h3mlx/pipeline.py:216-223`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/pipeline.py#L216-L223)
 ```python
  216     v_lat = ops.unpatchify(video_rows[ncv:], lat_ch, lf, lh, lw, patch)  # (1, C, F, H, W)
  217     v_lat = v_lat.transpose(0, 2, 3, 4, 1) * mx.array(c.vae_latents_std) + mx.array(c.vae_latents_mean)
