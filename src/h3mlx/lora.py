@@ -280,8 +280,10 @@ def check_trainable(trainable: dict, frozen: dict) -> None:
     `ops.plinear` reads a named adapter's matrices only where the Linear lists that name as active. Matrices under a
     file's names, for a name that was never attached, or for an adapter that `set_active` switched off are merged
     into the weights and then ignored: the loss comes out without them and their gradients are exactly zero, with no
-    error. (A file's names on a Linear with no named adapter are read, but as an unnamed adapter of scaling 1.) So: `trainable` is not empty; each of its keys is a runtime name, `<module>.lora_A/B.<name>.weight`; that
-    name is in `frozen`'s list of active adapters for that module; and each module's two matrices come together."""
+    error. (A file's names on a Linear with no named adapter are read, but as an unnamed adapter of scaling 1.)
+
+    So: `trainable` is not empty; each of its keys is a runtime name, `<module>.lora_A/B.<name>.weight`; that name is
+    in `frozen`'s list of active adapters for that module; and each module's two matrices come together."""
     if not trainable:
         raise ValueError("no trainable matrices: `trainable` is empty")
     seen: dict = {}

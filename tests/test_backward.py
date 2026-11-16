@@ -183,10 +183,13 @@ def test_a_checkpointed_function_gives_no_gradient_to_what_it_captures():
     assert np.array_equal(np.array(through), np.array(mx.grad(lambda x: (mx.tanh(x @ w) ** 2).sum())(x)))
 
 
-def chain_peak(checkpoint: bool, evaluate: bool, blocks: int = 16, rows: int = 1024, width: int = 256) -> tuple[float, float]:
-    """(peak of MLX's active memory in MB over the start, the value) of one gradient through a chain of blocks, run on
-    the CPU stream, where a buffer is released as soon as nothing needs it."""
-    with mx.stream(mx.cpu):
+def chain_peak(checkpoint: bool, evaluate: bool, blocks: int = 16, rows: int = 1024, width: int = 256,
+               device=mx.cpu) -> tuple[float, float]:
+    """(peak of MLX's active memory in MB over the start, the value) of one gradient through a chain of blocks. By
+    default on the CPU stream, where a buffer is released as soon as nothing needs it; `device=None` is the default
+    device."""
+
+    def run():
         mx.random.seed(0)
         weights = [mx.random.normal((width, width)) * 0.05 for _ in range(blocks)]
         a, b = mx.random.normal((4, width)) * 0.05, mx.random.normal((width, 4)) * 0.05
@@ -213,14 +216,20 @@ def chain_peak(checkpoint: bool, evaluate: bool, blocks: int = 16, rows: int = 1
         mx.eval(value, grads)
         return (mx.get_peak_memory() - start) / 1e6, float(value)
 
+    if device is None:
+        return run()
+    with mx.stream(device):
+        return run()
+
 
 def test_an_eval_in_the_loop_defeats_the_checkpoint():
     """A chain of sixteen blocks, differentiated four ways. Checkpointed, with nothing evaluated inside, the peak is
     below the plain gradient's: block intermediates are recomputed, not kept. Put the sampling forward's `mx.eval`
     after each block and the saving is gone: an array evaluated while it is being traced keeps its whole graph, so the
     checkpointed chain peaks where the plain one with the same evals does, above both chains without them. The values
-    are the same four times. Measured on the CPU stream; on the GPU one evaluation holds its buffers until they are
-    committed, and on this chain the checkpoint saves nothing there either way."""
+    are the same four times. Measured on the CPU stream. On the default device one evaluation holds its buffers
+    until the device has run them, and on this chain the checkpoint saves nothing there either way
+    (`bench/train_backward_memory.py` prints both)."""
     plain, value = chain_peak(checkpoint=False, evaluate=False)
     checkpointed, same = chain_peak(checkpoint=True, evaluate=False)
     plain_eval, _ = chain_peak(checkpoint=False, evaluate=True)
