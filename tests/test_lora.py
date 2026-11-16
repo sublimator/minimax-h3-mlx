@@ -677,6 +677,73 @@ def test_saved_metadata_is_strict_json(tmp_path, monkeypatch):
     assert not (tmp_path / "nan.safetensors").exists()
 
 
+def test_an_adapter_must_match_its_own_modules(tmp_path):
+    """An `Adapter` is a dict of tensors and a dict of alphas. If they disagree (a stray tensor, half a pair, a pair
+    with no alpha, an alpha with no pair), `check` says so, and with it `attach`, `merge` and `save`: `save` used to
+    write such a file, which `load` then refused, and a missing matrix was a bare KeyError."""
+    model = randomised(TINY, 0)
+    cfg, base = dict(model.config), state_mx(model)
+    good = random_adapter(cfg, {m: 4 for m in MODULES[:4]}, {m: 4 for m in MODULES[:4]})
+    first, other = MODULES[0], MODULES[5]
+    a, b = first + ".lora_A.weight", first + ".lora_B.weight"
+    wrong = {
+        "a stray tensor": lora.Adapter({**good.tensors, "stray": mx.zeros((2, 2))}, dict(good.alpha)),
+        "no lora_B": lora.Adapter({k: v for k, v in good.tensors.items() if k != b}, dict(good.alpha)),
+        "no lora_A": lora.Adapter({k: v for k, v in good.tensors.items() if k != a}, dict(good.alpha)),
+        "a pair without an alpha": lora.Adapter(dict(good.tensors), {m: v for m, v in good.alpha.items() if m != first}),
+        "an alpha without a pair": lora.Adapter(dict(good.tensors), {**good.alpha, other: 4}),
+    }
+    for what, adapter in wrong.items():
+        for n, use in enumerate((lambda: lora.check_keys(adapter), lambda: lora.check(adapter, cfg),
+                                 lambda: lora.attach(base, cfg, adapter), lambda: lora.merge(base, cfg, adapter),
+                                 lambda: lora.save(tmp_path / f"{n}.safetensors", adapter))):
+            with pytest.raises(ValueError, match="do not match its modules"):
+                use()
+    assert not list(tmp_path.iterdir()), "nothing written"
+    lora.save(tmp_path / "good.safetensors", good)
+    assert lora.load(tmp_path / "good.safetensors").modules == good.modules
+
+
+def test_an_empty_prefix_is_refused(tmp_path):
+    """`prefix=""` is not `prefix=None`. diffusers takes it as a real prefix: its filter keeps keys that start with a
+    dot, so it loads nothing from an ordinary file, and written that way every key gets a leading dot. Ours refuses."""
+    model = randomised(TINY, 0)
+    adapter = random_adapter(dict(TINY), {m: 4 for m in MODULES[:4]}, {m: 4 for m in MODULES[:4]})
+    plain = {k: torch.from_numpy(to_np(v)) for k, v in adapter.tensors.items()}
+    theirs = copy.deepcopy(model)
+    theirs.load_lora_adapter(dict(plain), prefix="")
+    assert not peft_layers(theirs), "diffusers: nothing loaded"
+    with pytest.raises(ValueError, match="empty prefix"):
+        lora.save(tmp_path / "a.safetensors", adapter, prefix="")
+    assert not (tmp_path / "a.safetensors").exists()
+    with pytest.raises(ValueError, match="empty prefix"):
+        lora.read(adapter.tensors, prefix="")
+
+
+@pytest.mark.parametrize("bias", ["all", "lora_only"])
+def test_a_bias_setting_other_than_none_is_refused(bias):
+    """With `bias="all"` or `"lora_only"` PEFT also trains base-layer biases and writes them with the adapter (shown:
+    the state dict then holds `.bias` tensors). Metadata that says so describes more than the two matrices the port
+    reads. diffusers loads such metadata without a word; ours refuses it, with the other settings it does not
+    implement. `"none"`, and no entry at all, are fine."""
+    model = randomised(TINY, 0)
+    modules = ["time_embedder.linear_1", "transformer_blocks.0.attn.to_q"]
+    theirs = copy.deepcopy(model)
+    theirs.add_adapter(LoraConfig(r=4, lora_alpha=4, target_modules=modules, bias=bias))
+    written = get_peft_model_state_dict(theirs)
+    assert any(k.endswith(".bias") for k in written), "PEFT saves biases with this setting"
+    adapter = random_adapter(dict(TINY), {m: 4 for m in modules}, {m: 4 for m in modules})
+    described = lora.config(adapter)
+    loaded = copy.deepcopy(model)
+    loaded.load_lora_adapter({k: torch.from_numpy(to_np(v)) for k, v in adapter.tensors.items()}, prefix=None,
+                             metadata={**described, "bias": bias})
+    assert sorted(peft_layers(loaded)) == sorted(modules), "diffusers: loaded, no complaint"
+    with pytest.raises(NotImplementedError, match=f"bias='{bias}'"):
+        lora.read(adapter.tensors, {lora.METADATA_KEY: json.dumps({**described, "bias": bias})})
+    for fine in ({**described, "bias": "none"}, {k: v for k, v in described.items() if k != "bias"}):
+        assert lora.read(adapter.tensors, {lora.METADATA_KEY: json.dumps(fine)}).modules == sorted(modules)
+
+
 def test_refusals(tmp_path):
     model = randomised(TINY, 0)
     cfg = dict(model.config)

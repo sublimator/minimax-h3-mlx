@@ -29,7 +29,7 @@ KEY_RE = re.compile(r"^(?P<module>.+)\.lora_(?P<matrix>[AB])\.weight$")
 BLOCK_TARGETS = hyperflow.BLOCK_TARGETS
 SCALING = ".lora_scaling"
 ORIGINAL_PREFIXES = ("diffusion_model.", "blocks.", "token_refiner.blocks.", "final_layer.", "lora_unet_")
-UNSUPPORTED = ("use_dora", "use_rslora", "lora_bias", "fan_in_fan_out")
+UNSUPPORTED = ("use_dora", "use_rslora", "lora_bias", "fan_in_fan_out")  # metadata flags the port does not implement
 
 
 @dataclass
@@ -82,12 +82,22 @@ def check_alpha(what: str, alpha) -> None:
         raise ValueError(f"{what}: lora_alpha is {alpha!r}; it must be a positive, finite number")
 
 
-def check(adapter: Adapter, cfg: dict) -> None:
-    """Every module is a Linear the forward applies a LoRA to (PEFT would wrap any `nn.Linear` a file names; a LoRA on
-    `proj_in` or `adaln_proj` would be silently ignored here, so it is refused), each pair fits it, and each alpha is a
-    positive, finite number."""
+def check_keys(adapter: Adapter) -> None:
+    """The tensors are the two matrices of each module that has an alpha, and nothing else: no stray tensor, no half
+    pair, no pair without an alpha. An `Adapter` is two plain dicts, so nothing else keeps them in step."""
     if not adapter.alpha:
         raise ValueError("no LoRA tensors in this adapter")
+    want = {f"{module}.lora_{matrix}.weight" for module in adapter.alpha for matrix in "AB"}
+    missing, extra = sorted(want - set(adapter.tensors)), sorted(set(adapter.tensors) - want)
+    if missing or extra:
+        raise ValueError(f"the adapter's tensors do not match its modules: missing {missing[:4]}, unexpected {extra[:4]}")
+
+
+def check(adapter: Adapter, cfg: dict) -> None:
+    """Every module is a Linear the forward applies a LoRA to (PEFT would wrap any `nn.Linear` a file names; a LoRA on
+    `proj_in` or `adaln_proj` would be silently ignored here, so it is refused), the tensors are exactly those
+    modules' pairs, each pair fits its Linear, and each alpha is a positive, finite number."""
+    check_keys(adapter)
     wired = wired_shapes(cfg)
     unwired = sorted(m for m in adapter.alpha if m not in wired)
     if unwired:
@@ -386,6 +396,8 @@ def pattern_key(pattern_keys, key_to_match: str) -> str:
 def _component(tensors: dict, prefix: str | None) -> tuple[dict, str | None]:
     """The keys of one component with its prefix removed (`load_lora_adapter(prefix=...)`'s filter), and that prefix.
     With no `prefix` given the file must hold one component, prefixed or not."""
+    if prefix == "":
+        raise ValueError("an empty prefix names no component: pass None for a file without prefixes")
     found = [p for p in PREFIXES if any(k.startswith(p + ".") for k in tensors)]
     if prefix is None:
         if len(found) > 1:
@@ -423,7 +435,8 @@ def read(tensors: dict, header: dict | None = None, prefix: str | None = None, h
     Alpha, per module: from the `lora_adapter_metadata` diffusers writes (`r`, `lora_alpha`, `rank_pattern`,
     `alpha_pattern`, resolved as PEFT resolves them); else from a plain `alpha` entry in the header, taken as one
     network alpha for every module; else the module's own rank (scaling 1), which is `get_peft_kwargs`' rule. DoRA,
-    rsLoRA, a LoRA bias, `fan_in_fan_out` and an alpha that is not positive and finite are refused, not ignored."""
+    rsLoRA, a LoRA bias, a `bias` setting other than none, `fan_in_fan_out` and an alpha that is not positive and
+    finite are refused, not ignored."""
     header = dict(header or {})
     tensors = dict(tensors)
     has_alpha_tensors = any(k.endswith(".alpha") for k in tensors)
@@ -456,6 +469,8 @@ def read(tensors: dict, header: dict | None = None, prefix: str | None = None, h
         if "r" not in config or "lora_alpha" not in config:
             raise ValueError(f"the file's {METADATA_KEY} has no `r` / `lora_alpha`" + (f" under `{prefix}.`" if prefix else ""))
         on = [k for k in UNSUPPORTED if config.get(k)]
+        if config.get("bias") not in (None, "none"):  # PEFT then trains and saves base-layer biases as well
+            on.append(f"bias={config['bias']!r}")
         if on:
             raise NotImplementedError(f"this adapter was saved with {on}, which the port does not implement")
         rank_pattern, alpha_pattern = config.get("rank_pattern") or {}, config.get("alpha_pattern") or {}
@@ -518,12 +533,13 @@ def save(path, adapter: Adapter, prefix: str | None = "transformer") -> None:
     `format: pt` plus the `LoraConfig` arguments as JSON under `lora_adapter_metadata` (each key prefixed too). That is
     `save_lora_weights`' file, which `load_lora_adapter` reads by default. `prefix=None` writes `save_lora_adapter`'s:
     no prefixes, read back with `load_lora_adapter(..., prefix=None)`. Tensors keep their dtype. Nothing is written
-    for an adapter with an alpha that is not positive and finite."""
+    for an adapter whose tensors do not match its modules, or with an alpha that is not positive and finite."""
     path = Path(path)
     if path.suffix != ".safetensors":
         raise ValueError(f"expected a .safetensors path, got {path}")
-    if not adapter.alpha:
-        raise ValueError("no LoRA tensors in this adapter")
+    if prefix == "":
+        raise ValueError("an empty prefix would put a leading dot on every key: pass None for no prefix")
+    check_keys(adapter)
     for module in adapter.modules:
         check_alpha(module, adapter.alpha[module])
     lead = "" if prefix is None else prefix + "."
