@@ -52,8 +52,8 @@ port takes an argument and has no default.
 | the example's loss and gradient | `train.example_loss`, `train.loss_and_gradients` | torch autograd on diffusers' transformer with PEFT's layers | `tests/test_train_gradients.py` (31) |
 | a bounded backward pass | `src/h3mlx/backward.py` | the plain gradient of the row above | `tests/test_backward.py` (39) |
 | the optimizer step | `train.adamw`, `train.optimizer_step` | `torch.optim.AdamW`, `clip_grad_norm_` | `tests/test_train_optimizer.py` (32) |
-| the cache of encoded examples | `src/h3mlx/cache.py`, `src/h3mlx/files.py` | diffusers `p_h3_image/before_encoder.py` for one sizing rule; the recipe for the other | `tests/test_cache.py` (89, two of them on release fixtures) |
-| the training script | `scripts/train_lora.py`, `src/h3mlx/trainer.py` | none: the pieces above, in order | `tests/test_train_lora.py` (90, one of them on release fixtures) |
+| the cache of encoded examples | `src/h3mlx/cache.py`, `src/h3mlx/files.py` | diffusers `p_h3_image/before_encoder.py` for one sizing rule; the recipe for the other | `tests/test_cache.py` (96, three of them on release fixtures) |
+| the training script | `scripts/train_lora.py`, `src/h3mlx/trainer.py` | none: the pieces above, in order | `tests/test_train_lora.py` (100, one of them on release fixtures) |
 
 ## 1. LoRA adapters
 
@@ -105,7 +105,7 @@ PEFT sets the scaling when it builds the layer, and applies it in the forward:
 rank and `hyperflow.attach` refuses anything else. A general adapter needs it, so `plinear` now multiplies when the
 weights carry a scaling, and is unchanged when they don't:
 
-📍 [`src/h3mlx/ops.py:100-105`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/ops.py#L100-L105)
+📍 [`src/h3mlx/ops.py:100-105`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/ops.py#L100-L105)
 ```python
  100 def times_scalar(x: mx.array, s) -> mx.array:
  101     """torch's `tensor * python_float`. A half-precision tensor is multiplied in float32 by the float32 scalar and
@@ -114,7 +114,7 @@ weights carry a scaling, and is unchanged when they don't:
  104         return (x.astype(mx.float32) * s).astype(x.dtype)
  105     return x * s
 ```
-📍 [`src/h3mlx/ops.py:108-146`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/ops.py#L108-L146)
+📍 [`src/h3mlx/ops.py:108-146`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/ops.py#L108-L146)
 ```python
  108 def plinear(x: mx.array, p: dict, name: str, bias: bool = False) -> mx.array:
  109     """The Linear `name` of state dict `p`, plus its LoRA when `name.lora_A.weight` / `name.lora_B.weight` are present.
@@ -193,7 +193,7 @@ alone and must equal PEFT's bit for bit in bf16 and float16; it also checks that
 `kaiming_uniform_(a=sqrt(5))` is a uniform draw in ±bound with bound = √3 · gain / √fan_in and gain = √(2 / (1 + a²)),
 which comes to 1 / √in. `lora_B` is zero, so a new adapter does nothing until it is trained.
 
-📍 [`src/h3mlx/lora.py:138-148`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L138-L148)
+📍 [`src/h3mlx/lora.py:138-148`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L138-L148)
 ```python
  138 def kaiming_uniform(shape, generator) -> np.ndarray:
  139     """`nn.init.kaiming_uniform_(weight, a=math.sqrt(5))` for a (rank, in) `lora_A`, drawn from a torch generator so the
@@ -207,7 +207,7 @@ which comes to 1 / √in. `lora_B` is zero, so a new adapter does nothing until 
  147     bound = math.sqrt(3.0) * std
  148     return torch.empty(tuple(shape), dtype=torch.float32).uniform_(-bound, bound, generator=generator).numpy()
 ```
-📍 [`src/h3mlx/lora.py:151-173`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L151-L173)
+📍 [`src/h3mlx/lora.py:151-173`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L151-L173)
 ```python
  151 def init(cfg: dict, rank: int, alpha: float | None = None, modules=None, seed: int = 0) -> Adapter:
  152     """A new adapter as PEFT initialises one (`init_lora_weights=True`): `lora_A` Kaiming-uniform, `lora_B` zero, so it
@@ -252,7 +252,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
 
 ### 1.3 Attaching, and the dtype
 
-📍 [`src/h3mlx/lora.py:38-63`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L38-L63)
+📍 [`src/h3mlx/lora.py:38-63`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L38-L63)
 ```python
   38 @dataclass
   39 class Adapter:
@@ -281,7 +281,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   62         """`lora_alpha / r`, as PEFT's `update_layer` sets it (without rsLoRA)."""
   63         return self.alpha[module] / self.rank(module)
 ```
-📍 [`src/h3mlx/lora.py:69-82`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L69-L82)
+📍 [`src/h3mlx/lora.py:69-82`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L69-L82)
 ```python
   69 def wired_shapes(cfg: dict) -> dict:
   70     """{module: (out, in)} for every Linear of the transformer, all of which the forward runs through `ops.plinear`:
@@ -298,7 +298,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   81                 "proj_out": (patch_dim, hidden), "audio_proj_out": (cfg["audio_in_channels"], hidden)})
   82     return out
 ```
-📍 [`src/h3mlx/lora.py:114-132`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L114-L132)
+📍 [`src/h3mlx/lora.py:114-132`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L114-L132)
 ```python
  114 def check(adapter: Adapter, cfg: dict) -> None:
  115     """Every module is a Linear of the transformer (the forward applies a LoRA on each of them, and on nothing else: a
@@ -320,7 +320,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
  131             raise ValueError(f"{module}: LoRA rank must be positive, got {a[0]}")
  132         check_alpha(module, adapter.alpha[module])
 ```
-📍 [`src/h3mlx/lora.py:198-240`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L198-L240)
+📍 [`src/h3mlx/lora.py:198-240`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L198-L240)
 ```python
  198 def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None) -> dict:
  199     """The transformer's weights with the adapter beside them, for `ops.plinear`; `params` is not modified.
@@ -388,7 +388,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   refuses them, and so do `init`, `read` and `save` (§1.5). `test_alpha_must_be_positive_and_finite` shows PEFT's
   layer taking each of the four and ours refusing it at every entry and exit.
 
-📍 [`src/h3mlx/lora.py:91-100`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L91-L100)
+📍 [`src/h3mlx/lora.py:91-100`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L91-L100)
 ```python
   91 def check_alpha(what: str, alpha) -> None:
   92     """An alpha is a positive, finite number. PEFT takes any: zero leaves an adapter that does nothing and cannot
@@ -401,7 +401,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   99     if not ok:
  100         raise ValueError(f"{what}: lora_alpha is {alpha!r}; it must be a positive, finite number")
 ```
-📍 [`src/h3mlx/lora.py:103-111`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L103-L111)
+📍 [`src/h3mlx/lora.py:103-111`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L103-L111)
 ```python
  103 def check_keys(adapter: Adapter) -> None:
  104     """The tensors are the two matrices of each module that has an alpha, and nothing else: no stray tensor, no half
@@ -491,7 +491,7 @@ float32 run at most 1.5× torch's own, plus 1e-3). Measured relative errors, tor
 1008                         base_layer.weight.data += delta_weight
 ```
 
-📍 [`src/h3mlx/lora.py:374-382`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L374-L382)
+📍 [`src/h3mlx/lora.py:374-382`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L374-L382)
 ```python
  374 def delta_weight(a: mx.array, b: mx.array, scaling: float) -> mx.array:
  375     """PEFT's `Linear.get_delta_weight` on CPU: `(B @ A) * scaling`, with half-precision factors multiplied in float32
@@ -503,7 +503,7 @@ float32 run at most 1.5× torch's own, plus 1e-3). Measured relative errors, tor
  381     out = (b @ a) * scaling
  382     return out.astype(dtype) if half else out
 ```
-📍 [`src/h3mlx/lora.py:385-406`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L385-L406)
+📍 [`src/h3mlx/lora.py:385-406`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L385-L406)
 ```python
  385 def merge(params: dict, cfg: dict, adapter: Adapter) -> dict:
  386     """The transformer's plain weights with the adapter added into them (PEFT's `Linear.merge`: `weight +=
@@ -827,7 +827,7 @@ The pipeline mixin adds three more rules before any of that, which matter for fi
 
 Ours is one reader for all of it, and one writer:
 
-📍 [`src/h3mlx/lora.py:577-583`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L577-L583)
+📍 [`src/h3mlx/lora.py:577-583`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L577-L583)
 ```python
  577 def pattern_key(pattern_keys, key_to_match: str) -> str:
  578     """PEFT's `get_pattern_key`: the first `rank_pattern` / `alpha_pattern` key that matches the module name as a
@@ -837,7 +837,7 @@ Ours is one reader for all of it, and one writer:
  582             return key
  583     return key_to_match
 ```
-📍 [`src/h3mlx/lora.py:586-601`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L586-L601)
+📍 [`src/h3mlx/lora.py:586-601`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L586-L601)
 ```python
  586 def _component(tensors: dict, prefix: str | None) -> tuple[dict, str | None]:
  587     """The keys of one component with its prefix removed (`load_lora_adapter(prefix=...)`'s filter), and that prefix.
@@ -856,7 +856,7 @@ Ours is one reader for all of it, and one writer:
  600         return dict(tensors), None
  601     return {k.removeprefix(prefix + "."): v for k, v in tensors.items() if k.startswith(prefix + ".")}, prefix
 ```
-📍 [`src/h3mlx/lora.py:604-608`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L604-L608)
+📍 [`src/h3mlx/lora.py:604-608`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L604-L608)
 ```python
  604 def _refuse_dora(keys) -> None:
  605     """DoRA is not implemented: refuse its keys (diffusers drops a kohya `dora_scale` with a warning, and loads PEFT's
@@ -864,7 +864,7 @@ Ours is one reader for all of it, and one writer:
  607     if any("dora_scale" in k or "lora_magnitude_vector" in k for k in keys):
  608         raise NotImplementedError("DoRA adapters are not supported")
 ```
-📍 [`src/h3mlx/lora.py:611-684`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L611-L684)
+📍 [`src/h3mlx/lora.py:611-684`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L611-L684)
 ```python
  611 def read(tensors: dict, header: dict | None = None, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
  612     """An adapter from a LoRA file's tensors and its safetensors header (`__metadata__`), as diffusers would load it.
@@ -941,7 +941,7 @@ Ours is one reader for all of it, and one writer:
  683             check_alpha("the file header's `alpha`", network_alpha)
  684     return Adapter(tensors, {m: (rank if network_alpha is None else network_alpha) for m, rank in ranks.items()})
 ```
-📍 [`src/h3mlx/lora.py:697-718`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L697-L718)
+📍 [`src/h3mlx/lora.py:697-718`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L697-L718)
 ```python
  697 def config(adapter: Adapter) -> dict:
  698     """The `LoraConfig` arguments that describe the adapter, as `get_peft_kwargs` derives them: the most common rank and
@@ -966,7 +966,7 @@ Ours is one reader for all of it, and one writer:
  717         "fan_in_fan_out": False,
  718     }
 ```
-📍 [`src/h3mlx/lora.py:721-739`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L721-L739)
+📍 [`src/h3mlx/lora.py:721-739`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L721-L739)
 ```python
  721 def save(path, adapter: Adapter, prefix: str | None = "transformer") -> None:
  722     """Write the adapter as diffusers does: `<prefix>.<module>.lora_A/B.weight` tensors and, in the safetensors header,
@@ -1154,7 +1154,7 @@ prefixes against the mixin's two loaders.
 3403         state_dict = unflattened
 ```
 
-📍 [`src/h3mlx/lora.py:411-422`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L411-L422)
+📍 [`src/h3mlx/lora.py:411-422`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L411-L422)
 ```python
  411 _FLATTENED = [  # musubi-tuner's `lora_unet_` names, every `.` collapsed to `_`
  412     (r"blocks_(\d+)_attn_(qkv|out)_proj", r"blocks.\1.attn.\2_proj"),
@@ -1202,7 +1202,7 @@ musubi-tuner's flattened names against the same ten patterns.
 A kohya-style file stores an `.alpha` scalar beside each pair. The converter multiplies `alpha / rank` into the two
 matrices, balancing the factor between them, and drops the scalar. The result therefore has scaling 1.
 
-📍 [`src/h3mlx/lora.py:499-508`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L499-L508)
+📍 [`src/h3mlx/lora.py:499-508`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L499-L508)
 ```python
  499         alpha = sd.pop(base + ".alpha", None)
  500         if alpha is not None:
@@ -1269,7 +1269,7 @@ matrices, balancing the factor between them, and drops the scalar. The result th
 3495                     converted_state_dict[f"{target}.attn.{proj}.lora_B.weight"] = up_proj.contiguous()
 ```
 
-📍 [`src/h3mlx/lora.py:529-547`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L529-L547)
+📍 [`src/h3mlx/lora.py:529-547`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L529-L547)
 ```python
  529             qkv = pull(f"{source}.attn.qkv_proj")
  530             if qkv is not None:
@@ -1343,7 +1343,7 @@ checkpoint's row order, q, k and v interleaved per head, and is reordered first.
 3532     return {f"transformer.{k}": v for k, v in converted_state_dict.items()}
 ```
 
-📍 [`src/h3mlx/lora.py:551-559`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L551-L559)
+📍 [`src/h3mlx/lora.py:551-559`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L551-L559)
 ```python
  551             fc1 = pull(f"{source}.mlp.fc1")
  552             if fc1 is not None:
@@ -1355,7 +1355,7 @@ checkpoint's row order, q, k and v interleaved per head, and is reordered first.
  558                 out[f"{target}.ff.net.0.proj.lora_A.weight"] = down
  559                 out[f"{target}.ff.net.0.proj.lora_B.weight"] = mx.concatenate([up_value, up_gate], axis=0)
 ```
-📍 [`src/h3mlx/lora.py:423-432`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L423-L432)
+📍 [`src/h3mlx/lora.py:423-432`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L423-L432)
 ```python
  423 _STANDALONE = {  # the projections outside the block stack
  424     "video_patch_proj": "proj_in",
@@ -1453,7 +1453,7 @@ The scheduler works in `t = 1 − sigma`, with `t = 1` clean. Its own notes stat
  256         return timestep * sample + (1.0 - timestep) * noise
 ```
 
-📍 [`src/h3mlx/train.py:30-54`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L30-L54)
+📍 [`src/h3mlx/train.py:30-54`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L30-L54)
 ```python
   30 def scale_noise(sample: mx.array, timestep, noise: mx.array) -> mx.array:
   31     """`MiniMaxH3Scheduler.scale_noise`: `x_t = t * x_0 + (1 - t) * noise`, `t` in [0, 1] and 1 clean.
@@ -1529,7 +1529,7 @@ diffusers has no function for the training target of this model. It is fixed by 
  328         ratio = sigma_next / sigma
  329         prev_sample = ratio * sample.to(dtype=compute_dtype) + (1.0 - ratio) * denoised.to(dtype=compute_dtype)
 ```
-📍 [`src/h3mlx/ops.py:388-396`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/ops.py#L388-L396)
+📍 [`src/h3mlx/ops.py:388-396`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/ops.py#L388-L396)
 ```python
  388 def flow_step(v: mx.array, t: float, x: mx.array, sigma: float, sigma_next: float) -> mx.array:
  389     """x0 = x + (1 - t) * v (sigma from the timestep, in x's dtype); x_next = r*x + (1 - r)*x0, r = s_next / s, f32."""
@@ -1545,7 +1545,7 @@ diffusers has no function for the training target of this model. It is fixed by 
 With `x_t = t·x_0 + (1 − t)·noise` and `x_0 = x_t + (1 − t)·v`, the model's output must satisfy
 `(1 − t)·v = (1 − t)·(x_0 − noise)`. So the target is `x_0 − noise` at every `t`.
 
-📍 [`src/h3mlx/train.py:57-61`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L57-L61)
+📍 [`src/h3mlx/train.py:57-61`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L57-L61)
 ```python
   57 def velocity_target(sample: mx.array, noise: mx.array) -> mx.array:
   58     """What the transformer is trained to predict for `scale_noise(sample, t, noise)`, at every `t`: `x_0 - noise`.
@@ -1567,7 +1567,7 @@ velocity with the other sign, and the wrong one for this model. Three tests fail
 
 ### 3.3 The loss
 
-📍 [`src/h3mlx/train.py:64-87`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L64-L87)
+📍 [`src/h3mlx/train.py:64-87`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L64-L87)
 ```python
   64 def flow_match_loss(pred: mx.array, target: mx.array, weight=None) -> mx.array:
   65     """`mean(weight * (pred - target) ** 2)` over every element, in float32 whatever the inputs' dtypes. `weight` is a
@@ -1642,7 +1642,7 @@ velocity with the other sign, and the wrong one for this model. Three tests fail
  390     return u
 ```
 
-📍 [`src/h3mlx/train.py:436-462`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L436-L462)
+📍 [`src/h3mlx/train.py:436-462`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L436-L462)
 ```python
  436 def density_for_timestep_sampling(weighting_scheme: str, batch_size: int, logit_mean: float | None = None,
  437                                   logit_std: float | None = None, mode_scale: float | None = None,
@@ -1716,7 +1716,7 @@ The parameters, case by case (`test_density_parameters_are_required_and_finite`)
  408     return weighting
 ```
 
-📍 [`src/h3mlx/train.py:465-489`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L465-L489)
+📍 [`src/h3mlx/train.py:465-489`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L465-L489)
 ```python
  465 def loss_weighting_for_sd3(weighting_scheme: str, sigmas) -> np.ndarray:
  466     """diffusers' `compute_loss_weighting_for_sd3`, on float32 or float64 noise levels (numpy, or an `mx.array`).
@@ -1775,7 +1775,7 @@ MiniMax H3's scheduler has a sampling grid and no training grid. The port builds
  178             # The shift compresses the grid near sigma = 1; collapse any float32 collisions it creates.
  179             sigmas = torch.unique_consecutive(sigmas)
 ```
-📍 [`src/h3mlx/ops.py:375-385`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/ops.py#L375-L385)
+📍 [`src/h3mlx/ops.py:375-385`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/ops.py#L375-L385)
 ```python
  375 def flow_sigmas(num_inference_steps: int, shift: float) -> np.ndarray:
  376     """linspace(1, 0, n) in float32, exponential shift, consecutive duplicates collapsed. Terminal 0 included."""
@@ -1790,7 +1790,7 @@ MiniMax H3's scheduler has a sampling grid and no training grid. The port builds
  385     return sig[keep]
 ```
 
-📍 [`src/h3mlx/train.py:492-501`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L492-L501)
+📍 [`src/h3mlx/train.py:492-501`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L492-L501)
 ```python
  492 def training_sigmas(num_points: int, shift: float) -> np.ndarray:
  493     """`num_points` noise levels to train at, from 1.0 (pure noise) down, float32: the scheduler's own shifted grid
@@ -1803,7 +1803,7 @@ MiniMax H3's scheduler has a sampling grid and no training grid. The port builds
  500                          f"({len(grid)} distinct): ask for fewer points")
  501     return grid
 ```
-📍 [`src/h3mlx/train.py:504-523`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L504-L523)
+📍 [`src/h3mlx/train.py:504-523`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L504-L523)
 ```python
  504 def sample_sigmas(u, grid) -> tuple[np.ndarray, np.ndarray]:
  505     """One noise level per `u`: `grid[floor(u * len(grid))]`, the multiplication in float32 (an SD3-style trainer's
@@ -1885,20 +1885,20 @@ PEFT keeps each adapter's matrices under the adapter's name, so its state dict h
 file has `<module>.lora_A.weight`, whichever adapter it was. The port uses the same two spellings in the same two
 places:
 
-📍 [`src/h3mlx/lora.py:179-182`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L179-L182)
+📍 [`src/h3mlx/lora.py:179-182`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L179-L182)
 ```python
  179 def runtime_key(module: str, matrix: str, name: str | None = None) -> str:
  180     """A matrix's key in the weights dict: `<module>.lora_A.weight`, or for a named adapter PEFT's runtime name,
  181     `<module>.lora_A.<name>.weight`. (In a file neither carries a name: `Adapter.tensors`.)"""
  182     return f"{module}.lora_{matrix}.weight" if name is None else f"{module}.lora_{matrix}.{name}.weight"
 ```
-📍 [`src/h3mlx/lora.py:357-359`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L357-L359)
+📍 [`src/h3mlx/lora.py:357-359`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L357-L359)
 ```python
  357 def runtime_tensors(adapter: Adapter, name: str) -> dict:
  358     """An adapter's tensors under their runtime names for `name` (what `split` returns as `trainable`)."""
  359     return {runtime_key(m, x, name): adapter.tensors[f"{m}.lora_{x}.weight"] for m in adapter.modules for x in "AB"}
 ```
-📍 [`src/h3mlx/lora.py:362-371`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L362-L371)
+📍 [`src/h3mlx/lora.py:362-371`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L362-L371)
 ```python
  362 def file_tensors(tensors: dict, name: str) -> dict:
  363     """The reverse: a named adapter's matrices back under the names they have in a file and in `Adapter.tensors`,
@@ -1939,7 +1939,7 @@ get wrong:
 
 `plinear` (§1.1) follows it to the letter. An unnamed adapter, HyperFlow's included, takes the old path untouched.
 
-📍 [`src/h3mlx/lora.py:198-240`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L198-L240)
+📍 [`src/h3mlx/lora.py:198-240`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L198-L240)
 ```python
  198 def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None) -> dict:
  199     """The transformer's weights with the adapter beside them, for `ops.plinear`; `params` is not modified.
@@ -1985,7 +1985,7 @@ get wrong:
  239             out[module + ADAPTERS] = params.get(module + ADAPTERS, ()) + (name,)
  240     return out
 ```
-📍 [`src/h3mlx/lora.py:248-261`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L248-L261)
+📍 [`src/h3mlx/lora.py:248-261`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L248-L261)
 ```python
  248 def set_active(params: dict, names) -> dict:
  249     """The weights with the adapters `names` active, in that order, and every other named adapter switched off: PEFT's
@@ -2026,7 +2026,7 @@ In PEFT itself the two orders give different bits in both cases; the test checks
 
 ### 5.3 Two groups of weights
 
-📍 [`src/h3mlx/lora.py:264-274`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L264-L274)
+📍 [`src/h3mlx/lora.py:264-274`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L264-L274)
 ```python
  264 def split(params: dict, name: str) -> tuple[dict, dict]:
  265     """(frozen, trainable): the weights without the two matrices of the adapter `name`, and those matrices alone under
@@ -2064,7 +2064,7 @@ rather than left to go wrong quietly (`test_the_frozen_half_of_a_split_is_not_a_
 - `attach` under the same name onto the frozen half is refused: the name is still in use there, by a list entry or a
   scaling. Accepted, it would list the adapter twice on each `Linear` and apply it twice.
 
-📍 [`src/h3mlx/lora.py:349-354`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L349-L354)
+📍 [`src/h3mlx/lora.py:349-354`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L349-L354)
 ```python
  349 def join(frozen: dict, trainable: dict) -> dict:
  350     """The reverse of `split`: the two groups as one dict of weights again, for a forward outside the loss (a
@@ -2073,7 +2073,7 @@ rather than left to go wrong quietly (`test_the_frozen_half_of_a_split_is_not_a_
  353     check_trainable(trainable, frozen)
  354     return {**frozen, **trainable}
 ```
-📍 [`src/h3mlx/lora.py:277-318`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L277-L318)
+📍 [`src/h3mlx/lora.py:277-318`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L277-L318)
 ```python
  277 def check_trainable(trainable: dict, frozen: dict) -> None:
  278     """Refuses a pair of groups in which `trainable` would not be what the forward trains.
@@ -2136,7 +2136,7 @@ It also looks at the pair as a whole (`test_the_two_groups_share_nothing_and_mak
   group that holds only some of the split adapter's modules is refused here, not part of the way through a forward.
   (The rest of the adapter moved to the frozen side is fine: that is training some modules and freezing the others.)
 
-📍 [`src/h3mlx/lora.py:321-346`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/lora.py#L321-L346)
+📍 [`src/h3mlx/lora.py:321-346`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/lora.py#L321-L346)
 ```python
  321 def check_config(trainable: dict, frozen: dict, cfg: dict) -> None:
  322     """Refuses weights or trainable matrices that are not this config's transformer's.
@@ -2322,7 +2322,7 @@ the base-class method its audio rows pass through, and its own packing of the se
  944         return torch.unique(row_timesteps, sorted=True, return_inverse=True)
 ```
 
-📍 [`src/h3mlx/train.py:98-118`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L98-L118)
+📍 [`src/h3mlx/train.py:98-118`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L98-L118)
 ```python
   98 @dataclass
   99 class Example:
@@ -2346,7 +2346,7 @@ the base-class method its audio rows pass through, and its own packing of the se
  117         taken over, against `target`. The rows are told apart by their place in the layout, as `denoise` does it."""
  118         return video_pred[:, self.num_condition_rows:]
 ```
-📍 [`src/h3mlx/train.py:140-212`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L140-L212)
+📍 [`src/h3mlx/train.py:140-212`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L140-L212)
 ```python
  140 def build_example(cfg: dict, text_token_tags, latents: mx.array, sigma, noise, *, condition_t: float,
  141                   condition_latents=(), audio_sigma=None) -> Example:
@@ -2458,7 +2458,7 @@ Three inputs are refused that would otherwise build a wrong example without an e
 
 ### 6.3 The loss mask
 
-📍 [`src/h3mlx/train.py:121-127`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L121-L127)
+📍 [`src/h3mlx/train.py:121-127`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L121-L127)
 ```python
  121 def loss_mask(layout: Layout) -> np.ndarray:
  122     """True at the packed-sequence rows a picture's loss covers: the generated video rows. Text rows, audio rows and
@@ -2489,7 +2489,7 @@ on, and the layout's mask is unchanged.
   65     return (latents - latents_mean) / latents_std
 ```
 
-📍 [`src/h3mlx/vae.py:253-264`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/vae.py#L253-L264)
+📍 [`src/h3mlx/vae.py:253-264`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/vae.py#L253-L264)
 ```python
  253 def encode_condition(vae: VideoVAE, pixels_u8: mx.array, pixel_mean, pixel_std, latents_mean, latents_std, noise_fn,
  254                      float16_round: bool = True):
@@ -2504,7 +2504,7 @@ on, and the layout's mask is unchanged.
  263         lat = lat.astype(mx.float16).astype(mx.float32)
  264     return (lat - mx.array(latents_mean)) / mx.array(latents_std)
 ```
-📍 [`src/h3mlx/train.py:130-137`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L130-L137)
+📍 [`src/h3mlx/train.py:130-137`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L130-L137)
 ```python
  130 def encode_references(components, pictures, *, float16_round: bool) -> list:
  131     """The latents of an edit example's reference pictures: `image.encode_pictures` (a seed-42 posterior sample each),
@@ -2551,7 +2551,7 @@ one torch generator in the pipeline's order.
 
 ## 7. The example's loss and its gradient
 
-📍 [`src/h3mlx/train.py:218-236`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L218-L236)
+📍 [`src/h3mlx/train.py:218-236`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L218-L236)
 ```python
  218 def check_inputs(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array) -> None:
  219     """What every loss and gradient of an example checks first.
@@ -2573,7 +2573,7 @@ one torch generator in the pipeline's order.
  235         raise ValueError(f"text must be an array of shape {want} (1, the layout's text rows, text dim), got "
  236                          f"{tuple(text.shape) if hasattr(text, 'shape') else type(text).__name__}")
 ```
-📍 [`src/h3mlx/train.py:282-297`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L282-L297)
+📍 [`src/h3mlx/train.py:282-297`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L282-L297)
 ```python
  282 def example_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None) -> mx.array:
  283     """One example's loss: the transformer's forward on the example's rows with the weights `{**frozen, **trainable}`
@@ -2592,7 +2592,7 @@ one torch generator in the pipeline's order.
  296         x = forward.block(x, temb, ops._sub(p, f"transformer_blocks.{i}."))
  297     return forward.finish(x, temb, p)
 ```
-📍 [`src/h3mlx/train.py:300-304`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L300-L304)
+📍 [`src/h3mlx/train.py:300-304`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L300-L304)
 ```python
  300 def loss_and_gradients(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None):
  301     """(loss, gradients) of `example_loss`. The gradients are a dict with `trainable`'s keys and no others: the base
@@ -2624,7 +2624,7 @@ both gradients of §8:
 
 ### 7.1 The forward that is differentiated
 
-📍 [`src/h3mlx/train.py:239-279`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L239-L279)
+📍 [`src/h3mlx/train.py:239-279`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L239-L279)
 ```python
  239 class ExampleForward:
  240     """The transformer's forward on one example, for differentiating, in three stages: `start` (the projections, the
@@ -2690,13 +2690,13 @@ graph that made it, so every block's intermediates stay alive until the backward
  365         attn_output = self.attn(norm_hidden_states, rotary_emb, attention_mask)
  366         hidden_states = residual + gate_msa.index_select(0, adaln_indices) * attn_output
 ```
-📍 [`src/h3mlx/ops.py:166-168`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/ops.py#L166-L168)
+📍 [`src/h3mlx/ops.py:166-168`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/ops.py#L166-L168)
 ```python
  166 def take_rows(table: mx.array, rows: mx.array) -> mx.array:
  167     """table[rows] along the first axis: each sequence row's entry of a (t, modality) table."""
  168     return mx.take(table, rows, axis=0)
 ```
-📍 [`src/h3mlx/ops.py:171-183`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/ops.py#L171-L183)
+📍 [`src/h3mlx/ops.py:171-183`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/ops.py#L171-L183)
 ```python
  171 def take_rows_for_training(table: mx.array, rows: mx.array) -> mx.array:
  172     """`take_rows` for a forward that is differentiated: the same values bit for bit, with a half-precision table
@@ -2785,7 +2785,7 @@ the same matrices.
 **Float32 products, pinned.** The test above cannot tell float32 products from bf16 ones: with ordinary matrices
 either is within bf16's noise of the float32 run. An adapter whose rows cancel can:
 
-📍 [`tests/test_train_gradients.py:93-108`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/tests/test_train_gradients.py#L93-L108)
+📍 [`tests/test_train_gradients.py:93-108`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/tests/test_train_gradients.py#L93-L108)
 ```python
   93 def cancelling_adapter(cfg, modules, half, delta, seed, std=0.1):
   94     """An adapter that only float32 products get right. lora_A's second half is minus its first half plus
@@ -2870,7 +2870,7 @@ two other ways to get the same loss and the same gradients. There is no library 
 
 ### 8.1 Each block checkpointed
 
-📍 [`src/h3mlx/backward.py:41-57`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/backward.py#L41-L57)
+📍 [`src/h3mlx/backward.py:41-57`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/backward.py#L41-L57)
 ```python
   41 def checkpointed_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None) -> mx.array:
   42     """`train.example_loss` with each block run as an `mx.checkpoint` of (the block's input, the time embedding, the
@@ -2890,7 +2890,7 @@ two other ways to get the same loss and the same gradients. There is no library 
   56         x = mx.checkpoint(block)(x, temb, *[trainable[prefix + k] for k in names])
   57     return forward.finish(x, temb, p)
 ```
-📍 [`src/h3mlx/backward.py:60-65`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/backward.py#L60-L65)
+📍 [`src/h3mlx/backward.py:60-65`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/backward.py#L60-L65)
 ```python
   60 def loss_and_gradients_checkpointed(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array,
   61                                     weight=None):
@@ -2918,7 +2918,7 @@ has a minimal test:
 
 ### 8.2 Block by block, by hand
 
-📍 [`src/h3mlx/backward.py:68-125`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/backward.py#L68-L125)
+📍 [`src/h3mlx/backward.py:68-125`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/backward.py#L68-L125)
 ```python
   68 def loss_and_gradients_blockwise(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array,
   69                                  weight=None, after_stage=None):
@@ -2992,7 +2992,7 @@ and the time embedding's, summed over the blocks.
 - **What it skips.** With no trainable matrix before the blocks, nothing needs the time embedding's cotangent, and it
   is never evaluated.
 - **A place to stop.** `after_stage`, when given, is called after every evaluation. The training loop looks at MLX's
-  memory counter there and stops by raising (§11.6).
+  memory counter there and stops by raising (§11.7).
 
 ### 8.3 Both are the plain gradient
 
@@ -3083,7 +3083,7 @@ The checkpointed path is not asserted on the default device.
 
 ## 9. The optimizer step
 
-📍 [`src/h3mlx/train.py:314-334`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L314-L334)
+📍 [`src/h3mlx/train.py:314-334`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L314-L334)
 ```python
  314 def adamw(*, learning_rate: float, betas, eps: float, weight_decay: float) -> optim.AdamW:
  315     """MLX's AdamW set up to compute `torch.optim.AdamW`'s update: with `bias_correction=True`. MLX leaves the bias
@@ -3107,7 +3107,7 @@ The checkpointed path is not asserted on the default device.
  333     return optim.AdamW(learning_rate=learning_rate, betas=betas, eps=eps, weight_decay=weight_decay,
  334                        bias_correction=True)
 ```
-📍 [`src/h3mlx/train.py:337-377`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L337-L377)
+📍 [`src/h3mlx/train.py:337-377`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L337-L377)
 ```python
  337 def optimizer_step(optimizer, trainable: dict, grads: dict, *, max_grad_norm: float) -> tuple[dict, float]:
  338     """One step: (the updated matrices, the gradients' global norm before clipping), both evaluated.
@@ -3243,7 +3243,7 @@ float16 the optimizer's own state breaks first.
 
 ### 9.5 Saving the optimizer's state
 
-📍 [`src/h3mlx/train.py:380-392`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L380-L392)
+📍 [`src/h3mlx/train.py:380-392`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L380-L392)
 ```python
  380 def optimizer_state(optimizer, trainable: dict) -> dict:
  381     """The optimizer's state as a flat dict of arrays, for a checkpoint: the step count and, for each trainable
@@ -3259,7 +3259,7 @@ float16 the optimizer's own state breaks first.
  391         out["m." + key], out["v." + key] = state[key]["m"], state[key]["v"]
  392     return out
 ```
-📍 [`src/h3mlx/train.py:395-417`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/train.py#L395-L417)
+📍 [`src/h3mlx/train.py:395-417`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/train.py#L395-L417)
 ```python
  395 def restore_optimizer(optimizer, trainable: dict, saved: dict) -> None:
  396     """Put a saved state (`optimizer_state`) into a new optimizer made with the same hyper-parameters, so that its
@@ -3316,61 +3316,61 @@ What it takes from elsewhere are two rules for sizing a reference picture: diffu
 
 ### 10.1 The request is the key
 
-📍 [`src/h3mlx/cache.py:135-182`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/cache.py#L135-L182)
+📍 [`src/h3mlx/cache.py:149-196`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L149-L196)
 ```python
- 135 def request(*, picture: str, references, prompt: str, height: int, width: int, latent_seed: int,
- 136             latent_float16_round: bool, reference_sizing: str, reference_seed: int, reference_float16_round: bool,
- 137             vae_dtype: str, text_dtype: str, settings: dict, encoders: dict) -> dict:
- 138     """What one entry is asked to be. Every argument is required and none has a default.
- 139
- 140     `picture` and each of `references` are sha256 digests of the input files; `prompt` is the text as given.
- 141     `height` and `width` are the size the picture is trained at. `latent_seed` and `latent_float16_round` are the
- 142     seed of the picture's posterior sample and whether it is rounded through float16 before normalising; the
- 143     `reference_...` pair is the same for the reference pictures, and `reference_sizing` is one of `SIZING`.
- 144     `settings` holds the release's `reference_min_pixels`, `reference_max_pixels` and `vision_pixels` and the
- 145     `canvas_multiple`; `encoders` holds an identity (`identity`) for each of `ENCODERS`.
- 146
- 147     An example without references does not depend on the reference choices: its request leaves them out, and they
- 148     may be given as None."""
- 149     references = [_digest(f"references[{i}]", r) for i, r in enumerate(references)]
- 150     if not isinstance(prompt, str) or not prompt.strip():
- 151         raise ValueError("the prompt must be a string with something in it")
- 152     if set(settings) != set(SETTINGS) or not all(isinstance(settings[k], int) and settings[k] > 0 for k in SETTINGS):
- 153         raise ValueError(f"settings must hold positive integers for exactly {SETTINGS}, got {settings!r}")
- 154     multiple = settings["canvas_multiple"]
- 155     for what, side in (("height", height), ("width", width)):
- 156         if isinstance(side, bool) or not isinstance(side, int) or side <= 0 or side % multiple:
- 157             raise ValueError(f"{what} must be a positive multiple of {multiple}, got {side!r}")
- 158     for what, dtype in (("vae_dtype", vae_dtype), ("text_dtype", text_dtype)):
- 159         if dtype not in DTYPES:
- 160             raise ValueError(f"{what} is one of {sorted(DTYPES)}, got {dtype!r}")
- 161     if set(encoders) != set(ENCODERS) or not all(isinstance(v, str) and v for v in encoders.values()):
- 162         raise ValueError(f"encoders must name an identity for exactly {ENCODERS}, got {sorted(encoders)}")
- 163     reference = None
- 164     if references:
- 165         if reference_sizing not in SIZING:
- 166             raise ValueError(f"reference sizing is one of {SIZING}, got {reference_sizing!r}")
- 167         _seed("reference_seed", reference_seed)
- 168         _flag("reference_float16_round", reference_float16_round)
- 169         reference = {"sizing": reference_sizing, "seed": reference_seed, "float16_round": reference_float16_round,
- 170                      "resize": RESIZE, "min_pixels": settings["reference_min_pixels"],
- 171                      "max_pixels": settings["reference_max_pixels"], "vision_pixels": settings["vision_pixels"]}
- 172     return {
- 173         "format": FORMAT,
- 174         "inputs": {"picture": _digest("picture", picture), "references": references, "prompt": prompt},
- 175         "target": {"height": height, "width": width, "seed": _seed("latent_seed", latent_seed),
- 176                    "float16_round": _flag("latent_float16_round", latent_float16_round), "resize": RESIZE},
- 177         "references": reference,
- 178         "text": {"dtype": text_dtype, "workflow": "edit" if references else "text2image"},
- 179         "vae": {"dtype": vae_dtype, "canvas_multiple": multiple},
- 180         "encoders": {k: encoders[k] for k in ENCODERS},
- 181         "versions": versions(),
- 182     }
+ 149 def request(*, picture: str, references, prompt: str, height: int, width: int, latent_seed: int,
+ 150             latent_float16_round: bool, reference_sizing: str, reference_seed: int, reference_float16_round: bool,
+ 151             vae_dtype: str, text_dtype: str, settings: dict, encoders: dict) -> dict:
+ 152     """What one entry is asked to be. Every argument is required and none has a default.
+ 153
+ 154     `picture` and each of `references` are sha256 digests of the input files; `prompt` is the text as given.
+ 155     `height` and `width` are the size the picture is trained at. `latent_seed` and `latent_float16_round` are the
+ 156     seed of the picture's posterior sample and whether it is rounded through float16 before normalising; the
+ 157     `reference_...` pair is the same for the reference pictures, and `reference_sizing` is one of `SIZING`.
+ 158     `settings` holds the release's `reference_min_pixels`, `reference_max_pixels` and `vision_pixels` and the
+ 159     `canvas_multiple`; `encoders` holds an identity (`identity`) for each of `ENCODERS`.
+ 160
+ 161     An example without references does not depend on the reference choices: its request leaves them out, and they
+ 162     may be given as None."""
+ 163     references = [_digest(f"references[{i}]", r) for i, r in enumerate(references)]
+ 164     if not isinstance(prompt, str) or not prompt.strip():
+ 165         raise ValueError("the prompt must be a string with something in it")
+ 166     if set(settings) != set(SETTINGS) or not all(isinstance(settings[k], int) and settings[k] > 0 for k in SETTINGS):
+ 167         raise ValueError(f"settings must hold positive integers for exactly {SETTINGS}, got {settings!r}")
+ 168     multiple = settings["canvas_multiple"]
+ 169     for what, side in (("height", height), ("width", width)):
+ 170         if isinstance(side, bool) or not isinstance(side, int) or side <= 0 or side % multiple:
+ 171             raise ValueError(f"{what} must be a positive multiple of {multiple}, got {side!r}")
+ 172     for what, dtype in (("vae_dtype", vae_dtype), ("text_dtype", text_dtype)):
+ 173         if dtype not in DTYPES:
+ 174             raise ValueError(f"{what} is one of {sorted(DTYPES)}, got {dtype!r}")
+ 175     if set(encoders) != set(ENCODERS) or not all(isinstance(v, str) and v for v in encoders.values()):
+ 176         raise ValueError(f"encoders must name an identity for exactly {ENCODERS}, got {sorted(encoders)}")
+ 177     reference = None
+ 178     if references:
+ 179         if reference_sizing not in SIZING:
+ 180             raise ValueError(f"reference sizing is one of {SIZING}, got {reference_sizing!r}")
+ 181         _seed("reference_seed", reference_seed)
+ 182         _flag("reference_float16_round", reference_float16_round)
+ 183         reference = {"sizing": reference_sizing, "seed": reference_seed, "float16_round": reference_float16_round,
+ 184                      "resize": RESIZE, "min_pixels": settings["reference_min_pixels"],
+ 185                      "max_pixels": settings["reference_max_pixels"], "vision_pixels": settings["vision_pixels"]}
+ 186     return {
+ 187         "format": FORMAT,
+ 188         "inputs": {"picture": _digest("picture", picture), "references": references, "prompt": prompt},
+ 189         "target": {"height": height, "width": width, "seed": _seed("latent_seed", latent_seed),
+ 190                    "float16_round": _flag("latent_float16_round", latent_float16_round), "resize": RESIZE},
+ 191         "references": reference,
+ 192         "text": {"dtype": text_dtype, "workflow": "edit" if references else "text2image"},
+ 193         "vae": {"dtype": vae_dtype, "canvas_multiple": multiple},
+ 194         "encoders": {k: encoders[k] for k in ENCODERS},
+ 195         "versions": versions(),
+ 196     }
 ```
-📍 [`src/h3mlx/cache.py:185-186`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/cache.py#L185-L186)
+📍 [`src/h3mlx/cache.py:199-200`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L199-L200)
 ```python
- 185 def key(request: dict) -> str:
- 186     return files.sha256_json(request)
+ 199 def key(request: dict) -> str:
+ 200     return files.sha256_json(request)
 ```
 
 An entry is asked for by a *request*: one JSON value with everything the entry's numbers depend on. Its sha256 is the
@@ -3384,145 +3384,243 @@ entry's key, and the two files are named by it. So an entry made any other way i
 | text | the dtype the rows are kept in, and whether the prompt is presented as text-to-image or as an edit |
 | VAE | the dtype policy it was loaded with, and the canvas multiple |
 | encoders | an identity for each of the VAE, the text encoder, the connector, the tokenizer and the processor |
-| versions | a digest of this package's source, and the versions of MLX, numpy, torch, Pillow, transformers, tokenizers and safetensors |
+| versions | a digest of this package's source, and the versions of MLX, mlx-vlm, numpy, torch, torchvision, Pillow, transformers, tokenizers and safetensors |
 
 No argument of `request` has a default.
 
 - **The code version** is `code_digest`: the name and sha256 of every `.py` file of the package. It is deliberately
   wide. Any change to the package, a comment included, makes every entry a miss, and encoding again is cheap beside
-  training on entries made by other code. The libraries are there because the encode runs through them: torch draws
-  the posterior's noise, Pillow resizes, the tokenizer tokenizes.
+  training on entries made by other code.
+- **The digest covers the package and not the scripts,** and that is enough because a script cannot change what an
+  entry holds for a given request. How a picture file is opened and oriented (`load_picture`), how the encoders are
+  loaded (`load_encoders`) and how they are run (`encode`) are all in the package. What the training script does
+  decide, each picture's posterior seed, the sizes and the choices, goes into the request and so into the key
+  (`test_what_turns_a_request_into_an_entry_is_in_the_package`).
+- **The libraries** are the ones the encode path computes with: mlx-vlm runs the text encoder, torchvision is the
+  processor's image backend, torch draws the posterior's noise, Pillow opens and resizes the pictures, the tokenizer
+  tokenizes.
 - **An encoder's identity** is `identity`: each small file by its sha256, each `.safetensors` file by its name and
-  size. **It does not read the weights,** and so it does not see a weight file replaced by a different one of the same
-  name and size. Hashing the weights at every start would see it; that is not done.
+  size.
+  - It notices a different release, a changed config, tokenizer or processor file, a file added, removed or renamed,
+    and a weight file of another size.
+  - **It does not read the weights,** and so it does not notice a weight file replaced by a different one of the same
+    name and size. Hashing the weights at every start would; that is not done.
+  - It ignores hidden files and everything under a hidden directory. A download tool keeps bookkeeping of its own
+    there, inside the folders it fills, and that changes without the component changing: counted, it would make
+    every entry a miss and every resume a refusal for no reason.
 
-📍 [`src/h3mlx/cache.py:45-52`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/cache.py#L45-L52)
+📍 [`src/h3mlx/cache.py:53-60`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L53-L60)
 ```python
-  45 def code_digest(package: Path | None = None) -> str:
-  46     """A digest of this package's source: every `.py` file's name and bytes. Any change to the code gives another
-  47     digest, so an entry is never read by code other than the code that wrote it."""
-  48     package = Path(__file__).resolve().parent if package is None else Path(package)
-  49     sources = sorted(p for p in package.rglob("*.py"))
-  50     if not sources:
-  51         raise ValueError(f"no source files in {package}")
-  52     return files.sha256_json([[str(p.relative_to(package)), files.sha256_file(p)] for p in sources])
+  53 def code_digest(package: Path | None = None) -> str:
+  54     """A digest of this package's source: every `.py` file's name and bytes. Any change to the code gives another
+  55     digest, so an entry is never read by code other than the code that wrote it."""
+  56     package = Path(__file__).resolve().parent if package is None else Path(package)
+  57     sources = sorted(p for p in package.rglob("*.py"))
+  58     if not sources:
+  59         raise ValueError(f"no source files in {package}")
+  60     return files.sha256_json([[str(p.relative_to(package)), files.sha256_file(p)] for p in sources])
 ```
-📍 [`src/h3mlx/cache.py:67-78`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/cache.py#L67-L78)
+📍 [`src/h3mlx/cache.py:75-92`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L75-L92)
 ```python
-  67 def identity(directory) -> str:
-  68     """A digest that identifies one component of a release without reading its weights: every file's name, with the
-  69     file's sha256, except that a `.safetensors` file is taken by its name and size alone. A different release, a
-  70     changed config or tokenizer, or a weight file of another size gives another digest. A weight file replaced by a
-  71     different one of the same name and size does not; hashing 66 GB at every start is the price of noticing that,
-  72     and it is not paid here."""
-  73     directory = Path(directory)
-  74     listed = sorted(p for p in directory.rglob("*") if p.is_file() and not p.name.startswith("."))
-  75     if not listed:
-  76         raise ValueError(f"nothing to identify in {directory}")
-  77     return files.sha256_json([[str(p.relative_to(directory)), p.stat().st_size if p.suffix == ".safetensors"
-  78                                else files.sha256_file(p)] for p in listed])
+  75 def identity(directory) -> str:
+  76     """A digest that identifies one component of a release without reading its weights: every file's name, with the
+  77     file's sha256, except that a `.safetensors` file is taken by its name and size alone.
+  78
+  79     * It notices: a different release, a changed config, tokenizer or processor file, a file added, removed or
+  80       renamed, a weight file of another size.
+  81     * It does not notice: a weight file replaced by a different one of the same name and size (hashing 66 GB at every
+  82       start is the price of noticing that, and it is not paid here).
+  83     * It ignores, on purpose: hidden files, and everything under a hidden directory. A download tool keeps its own
+  84       bookkeeping there (`.cache/huggingface/...` inside a folder it filled), which changes without the component
+  85       changing."""
+  86     directory = Path(directory)
+  87     listed = sorted(p for p in directory.rglob("*")
+  88                     if p.is_file() and not any(part.startswith(".") for part in p.relative_to(directory).parts))
+  89     if not listed:
+  90         raise ValueError(f"nothing to identify in {directory}")
+  91     return files.sha256_json([[str(p.relative_to(directory)), p.stat().st_size if p.suffix == ".safetensors"
+  92                                else files.sha256_file(p)] for p in listed])
 ```
 
 ### 10.2 Two files, written whole, read with suspicion
 
-📍 [`src/h3mlx/cache.py:255-275`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/cache.py#L255-L275)
+📍 [`src/h3mlx/cache.py:269-308`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L269-L308)
 ```python
- 255 def write(directory, request: dict, tensors: dict) -> str:
- 256     """Write one entry and return its key. The tensors file goes in first and the record last, each atomically, so an
- 257     entry is there only once it is whole; a write that fails part way leaves no entry and no temporary file. An entry
- 258     is written once: a key that already has a record is refused (`FileExistsError`), not rewritten under a reader."""
- 259     directory = Path(directory)
- 260     arrays = check_tensors(request, tensors)
- 261     name = key(request)
- 262     directory.mkdir(parents=True, exist_ok=True)
- 263     if os.path.lexists(directory / f"{name}.json"):
- 264         raise FileExistsError(f"the cache already has an entry {name}")
- 265     tensors_path = directory / f"{name}.safetensors"
- 266     files.atomic_write(tensors_path, lambda tmp: mx.save_safetensors(str(tmp), arrays))
- 267     record = {"format": FORMAT, "key": name, "request": request,
- 268               "tensors": {"file": tensors_path.name, "sha256": files.sha256_file(tensors_path),
- 269                           "arrays": _described(arrays)}}
- 270     try:
- 271         files.atomic_json(directory / f"{name}.json", record)
- 272     except BaseException:
- 273         tensors_path.unlink(missing_ok=True)
- 274         raise
- 275     return name
+ 269 def write(directory, request: dict, tensors: dict, wait: float = 30.0) -> str:
+ 270     """Write one entry and return its key.
+ 271
+ 272     The tensors are written under a temporary name first. Then, holding the cache directory's lock (`files.exclusive`
+ 273     on `cache.lock`, waiting up to `wait` seconds for it), the entry is published: the tensors renamed into place,
+ 274     then the record written, atomically, last. So an entry is there only once it is whole, and one writer publishes
+ 275     at a time.
+ 276
+ 277     * An entry is written once. A key that already has a record is refused (`FileExistsError`), before the lock and
+ 278       again under it, in case another writer published meanwhile.
+ 279     * A writer that fails removes what it alone put there, and nothing else: its temporary file, and the tensors it
+ 280       renamed into place under the lock, where no record existed and no other writer could be. An entry that has
+ 281       its record is never touched.
+ 282     * When the lock stays held for `wait` seconds the write is refused with `files.Busy`, which says who holds it."""
+ 283     directory = Path(directory)
+ 284     arrays = check_tensors(request, tensors)
+ 285     name = key(request)
+ 286     directory.mkdir(parents=True, exist_ok=True)
+ 287     record_path, tensors_path = directory / f"{name}.json", directory / f"{name}.safetensors"
+ 288     if os.path.lexists(record_path):
+ 289         raise FileExistsError(f"the cache already has an entry {name}")
+ 290     staged = files.temporary(tensors_path)
+ 291     try:
+ 292         mx.save_safetensors(str(staged), arrays)
+ 293         files.sync_file(staged)
+ 294         record = {"format": FORMAT, "key": name, "request": request,
+ 295                   "tensors": {"file": tensors_path.name, "sha256": files.sha256_file(staged),
+ 296                               "arrays": _described(arrays)}}
+ 297         with files.exclusive(directory / LOCK, f"publishing cache entry {name[:12]}", wait=wait):
+ 298             if os.path.lexists(record_path):
+ 299                 raise FileExistsError(f"the cache already has an entry {name}")
+ 300             os.replace(staged, tensors_path)  # over nothing, or over tensors a dead writer left without a record
+ 301             try:
+ 302                 files.atomic_json(record_path, record)
+ 303             except BaseException:
+ 304                 tensors_path.unlink(missing_ok=True)
+ 305                 raise
+ 306     finally:
+ 307         staged.unlink(missing_ok=True)
+ 308     return name
 ```
-📍 [`src/h3mlx/files.py:55-67`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/files.py#L55-L67)
+📍 [`src/h3mlx/files.py:121-133`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/files.py#L121-L133)
 ```python
-  55 def atomic_write(path, write) -> None:
-  56     """`write(temporary_path)` makes the file; it is flushed and renamed onto `path`. If anything fails the
-  57     temporary file is removed and `path` is as it was."""
+ 121 def atomic_write(path, write) -> None:
+ 122     """`write(temporary_path)` makes the file; it is flushed and renamed onto `path`. If anything fails the
+ 123     temporary file is removed and `path` is as it was."""
+ 124     path = Path(path)
+ 125     tmp = temporary(path)
+ 126     try:
+ 127         write(tmp)
+ 128         sync_file(tmp)
+ 129         os.replace(tmp, path)
+ 130     except BaseException:
+ 131         tmp.unlink(missing_ok=True)
+ 132         raise
+ 133     sync_directory(path.parent)
+```
+📍 [`src/h3mlx/files.py:46-81`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/files.py#L46-L81)
+```python
+  46 @contextlib.contextmanager
+  47 def exclusive(path, what: str, wait: float = 0.0):
+  48     """Hold the lock file at `path` for the body, and nobody else: an exclusive `flock`.
+  49
+  50     * It cannot be left stuck. The lock is the kernel's, attached to this process's open file: when the process
+  51       ends, by returning, by an exception or by being killed, the lock is gone. The file stays, which means nothing.
+  52     * It says who holds it: the holder writes its process id, `what` it is doing and since when into the file, and
+  53       empties the file on release. A second taker is refused with `Busy`, which carries that.
+  54     * `wait` is how many seconds to keep trying before refusing; zero refuses at once.
+  55
+  56     Advisory and local: it stops other takers of this lock, not a process that ignores it, and it is not to be relied
+  57     on over a network filesystem."""
   58     path = Path(path)
-  59     tmp = temporary(path)
-  60     try:
-  61         write(tmp)
-  62         sync_file(tmp)
-  63         os.replace(tmp, path)
-  64     except BaseException:
-  65         tmp.unlink(missing_ok=True)
-  66         raise
-  67     sync_directory(path.parent)
+  59     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+  60     held = False
+  61     try:
+  62         deadline = time.monotonic() + wait
+  63         while True:
+  64             try:
+  65                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  66                 break
+  67             except BlockingIOError:
+  68                 if time.monotonic() >= deadline:
+  69                     raise Busy(path, lock_holder(path)) from None
+  70                 time.sleep(0.01)
+  71         held = True
+  72         os.ftruncate(fd, 0)
+  73         os.write(fd, json.dumps({"pid": os.getpid(), "what": what, "since": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+  74                                  "command": sys.argv[:1]}).encode())
+  75         os.fsync(fd)
+  76         yield
+  77     finally:
+  78         if held:
+  79             os.ftruncate(fd, 0)
+  80             fcntl.flock(fd, fcntl.LOCK_UN)
+  81         os.close(fd)
 ```
-📍 [`src/h3mlx/cache.py:278-308`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/cache.py#L278-L308)
+📍 [`src/h3mlx/cache.py:311-341`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L311-L341)
 ```python
- 278 def load(record_path, request: dict) -> Entry:
- 279     """The entry whose record is at `record_path`, if it is the one `request` asks for and whole; otherwise a
- 280     `CacheMismatch` that says what differs."""
- 281     record_path = Path(record_path)
- 282     try:
- 283         record = json.loads(record_path.read_text())
- 284     except (OSError, ValueError) as e:
- 285         raise CacheMismatch(f"{record_path.name}: the record cannot be read ({e})") from e
- 286     if not isinstance(record, dict) or record.get("format") != FORMAT:
- 287         raise CacheMismatch(f"{record_path.name}: not a {FORMAT} record")
- 288     apart = differences(request, record.get("request"))
- 289     if apart:
- 290         raise CacheMismatch(f"{record_path.name} is not the entry asked for: " + "; ".join(apart[:6])
- 291                             + (f"; and {len(apart) - 6} more" if len(apart) > 6 else ""))
- 292     described = record.get("tensors") or {}
- 293     if record.get("key") != key(request) or described.get("file") != f"{key(request)}.safetensors":
- 294         raise CacheMismatch(f"{record_path.name}: the record's key is not its request's")
- 295     tensors_path = record_path.with_name(described["file"])
- 296     if not tensors_path.is_file():
- 297         raise CacheMismatch(f"{record_path.name}: its tensors, {tensors_path.name}, are missing")
- 298     if files.sha256_file(tensors_path) != described.get("sha256"):
- 299         raise CacheMismatch(f"{tensors_path.name} is not the file its record describes (sha256 differs)")
- 300     try:
- 301         arrays = mx.load(str(tensors_path), format="safetensors")
- 302     except Exception as e:  # MLX raises its own types for a file that is not safetensors
- 303         raise CacheMismatch(f"{tensors_path.name} cannot be read as safetensors ({e})") from e
- 304     if _described(arrays) != described.get("arrays") or sorted(arrays) != sorted(_names(request)):
- 305         raise CacheMismatch(f"{tensors_path.name}: its arrays are not the ones its record lists")
- 306     count = len(request["inputs"]["references"])
- 307     return Entry(latents=arrays["latents"], condition_latents=[arrays[f"condition_latents.{i}"] for i in range(count)],
- 308                  text=arrays["text"], text_token_tags=np.array(arrays["text_token_tags"]), record=record)
+ 311 def load(record_path, request: dict) -> Entry:
+ 312     """The entry whose record is at `record_path`, if it is the one `request` asks for and whole; otherwise a
+ 313     `CacheMismatch` that says what differs."""
+ 314     record_path = Path(record_path)
+ 315     try:
+ 316         record = json.loads(record_path.read_text())
+ 317     except (OSError, ValueError) as e:
+ 318         raise CacheMismatch(f"{record_path.name}: the record cannot be read ({e})") from e
+ 319     if not isinstance(record, dict) or record.get("format") != FORMAT:
+ 320         raise CacheMismatch(f"{record_path.name}: not a {FORMAT} record")
+ 321     apart = differences(request, record.get("request"))
+ 322     if apart:
+ 323         raise CacheMismatch(f"{record_path.name} is not the entry asked for: " + "; ".join(apart[:6])
+ 324                             + (f"; and {len(apart) - 6} more" if len(apart) > 6 else ""))
+ 325     described = record.get("tensors") or {}
+ 326     if record.get("key") != key(request) or described.get("file") != f"{key(request)}.safetensors":
+ 327         raise CacheMismatch(f"{record_path.name}: the record's key is not its request's")
+ 328     tensors_path = record_path.with_name(described["file"])
+ 329     if not tensors_path.is_file():
+ 330         raise CacheMismatch(f"{record_path.name}: its tensors, {tensors_path.name}, are missing")
+ 331     if files.sha256_file(tensors_path) != described.get("sha256"):
+ 332         raise CacheMismatch(f"{tensors_path.name} is not the file its record describes (sha256 differs)")
+ 333     try:
+ 334         arrays = mx.load(str(tensors_path), format="safetensors")
+ 335     except Exception as e:  # MLX raises its own types for a file that is not safetensors
+ 336         raise CacheMismatch(f"{tensors_path.name} cannot be read as safetensors ({e})") from e
+ 337     if _described(arrays) != described.get("arrays") or sorted(arrays) != sorted(_names(request)):
+ 338         raise CacheMismatch(f"{tensors_path.name}: its arrays are not the ones its record lists")
+ 339     count = len(request["inputs"]["references"])
+ 340     return Entry(latents=arrays["latents"], condition_latents=[arrays[f"condition_latents.{i}"] for i in range(count)],
+ 341                  text=arrays["text"], text_token_tags=np.array(arrays["text_token_tags"]), record=record)
 ```
-📍 [`src/h3mlx/cache.py:311-317`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/cache.py#L311-L317)
+📍 [`src/h3mlx/cache.py:344-350`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L344-L350)
 ```python
- 311 def read(directory, request: dict) -> Entry | None:
- 312     """The entry for `request` in `directory`, or None when there is none. An entry that is there under the
- 313     request's key and is not what was asked, or not whole, is an error (`CacheMismatch`), never a miss."""
- 314     record_path = Path(directory) / f"{key(request)}.json"
- 315     if not os.path.lexists(record_path):
- 316         return None
- 317     return load(record_path, request)
+ 344 def read(directory, request: dict) -> Entry | None:
+ 345     """The entry for `request` in `directory`, or None when there is none. An entry that is there under the
+ 346     request's key and is not what was asked, or not whole, is an error (`CacheMismatch`), never a miss."""
+ 347     record_path = Path(directory) / f"{key(request)}.json"
+ 348     if not os.path.lexists(record_path):
+ 349         return None
+ 350     return load(record_path, request)
 ```
 
 - **Format.** `<key>.safetensors` holds the arrays, `<key>.json` the record: the request in full, the arrays' names,
   dtypes and shapes, and the tensors file's sha256. Nothing is pickled, and the reader loads the tensors as
   safetensors and as nothing else.
-- **Writing.** Each file is written under a temporary name and renamed, the tensors first and the record last, so an
-  entry exists only once it is whole. A write that fails at any of its four steps leaves nothing behind
-  (`test_a_write_that_fails_leaves_no_entry`); what a killed writer leaves is under a temporary name or without a
-  record, and is not an entry. An entry is written once: a key that already has a record is refused.
+- **Writing.** The tensors are written under a temporary name; then the entry is published, the tensors renamed into
+  place and the record written last, so an entry exists only once it is whole. A write that fails at any of its steps
+  leaves nothing behind (`test_a_write_that_fails_leaves_no_entry`); what a killed writer leaves is under a temporary
+  name or without a record, and is not an entry. An entry is written once: a key that already has a record is
+  refused.
+- **One writer publishes at a time.** Publication happens while holding the cache directory's lock, `cache.lock`.
+  Without it, two writers of one key could interleave: the second commits an entry between the first one's tensors
+  and its record, the first then fails, and its cleanup deletes the tensors under the second one's record. With it,
+  a writer that fails removes only what it alone put there, and an entry that has its record is never touched.
+  A writer waits up to thirty seconds for the lock and is then refused, told who holds it.
+- **The lock** is `files.exclusive`: the operating system's advisory lock on a file. It belongs to the process that
+  took it, so it ends when that process does, however it ends, and cannot be left stuck. The holder writes its
+  process id, what it is doing and since when into the lock file. It is advisory and local: it binds other users of
+  the same lock, and is not to be relied on over a network filesystem.
 - **What is refused before writing:** arrays that are not the request's (names, shapes, dtypes), a picture's latents
   that are not in the stated height-to-width ratio, tags that are not 0 or 1, and anything not finite.
 - **Reading.** No record under the key is a miss. A record that is there is checked: its request against the request
   asked, field by field; its key; the tensors file's digest; the arrays against the record's list. Anything that
   does not hold is a `CacheMismatch` that says what differs. It is never a miss, which would let a trainer encode
   over the evidence.
+
+Three tests of the lock around publication:
+
+- `test_a_writer_that_fails_cannot_break_another_writers_entry` starts a second writer of the same key from inside
+  the first one's publication, at the worst moment. The second is refused and leaves nothing; the first then fails
+  and removes its own files; the key can be written afterwards.
+- `test_an_entry_published_meanwhile_is_left_alone` is the other order: an entry is published between a writer's
+  staging and its turn at the lock. The writer finds the record, stops, and leaves the committed entry whole.
+- `test_two_processes_writing_one_key` does the first with two real processes. The other process is held in the
+  middle of its publication until this one says go, so the order does not depend on timing: this process's write is
+  refused, naming the other's process id; the other is released, fails and cleans up; this one then writes the key.
 
 `test_a_changed_input_or_choice_is_not_served_the_old_entry` writes one entry and asks for it with one thing changed,
 twenty-two times: the picture, a reference, their order, the prompt, the size, either seed, either rounding, the
@@ -3543,37 +3641,37 @@ same for the source digest and for each library.
   66     scale = math.sqrt(min(max(area, min_pixels), max_pixels) / area)
   67     return tuple(max(multiple, round(side * scale / multiple) * multiple) for side in (width, height))
 ```
-📍 [`src/h3mlx/cache.py:84-90`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/cache.py#L84-L90)
+📍 [`src/h3mlx/cache.py:98-104`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L98-L104)
 ```python
-  84 def scale_down_to_area(width: int, height: int, pixels: int, multiple: int) -> tuple[int, int]:
-  85     """(width, height) at the picture's own aspect ratio, scaled down to `pixels` when it has more and never scaled
-  86     up, each side rounded to `multiple`. The recipe's rule for a still reference (`ostris/ai-toolkit` at d6a18ad7,
-  87     `extensions_built_in/diffusion_models/minimax_h3/src/packing.py:112-124`)."""
-  88     scale = min(1.0, math.sqrt(pixels / float(width * height)))
-  89     return (max(multiple, round(width * scale / multiple) * multiple),
-  90             max(multiple, round(height * scale / multiple) * multiple))
+  98 def scale_down_to_area(width: int, height: int, pixels: int, multiple: int) -> tuple[int, int]:
+  99     """(width, height) at the picture's own aspect ratio, scaled down to `pixels` when it has more and never scaled
+ 100     up, each side rounded to `multiple`. The recipe's rule for a still reference (`ostris/ai-toolkit` at d6a18ad7,
+ 101     `extensions_built_in/diffusion_models/minimax_h3/src/packing.py:112-124`)."""
+ 102     scale = min(1.0, math.sqrt(pixels / float(width * height)))
+ 103     return (max(multiple, round(width * scale / multiple) * multiple),
+ 104             max(multiple, round(height * scale / multiple) * multiple))
 ```
-📍 [`src/h3mlx/cache.py:93-111`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/cache.py#L93-L111)
+📍 [`src/h3mlx/cache.py:107-125`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L107-L125)
 ```python
-  93 def reference_sizes(sizing: str, width: int, height: int, *, target_height: int, target_width: int,
-  94                     min_pixels: int, max_pixels: int, vision_pixels: int, multiple: int) -> tuple[tuple, tuple]:
-  95     """((width, height) the VAE encodes a reference at, (width, height) the text encoder sees it at).
-  96
-  97     * `"pipeline"`: what diffusers' edit pipeline does at sampling. For the VAE the picture keeps its own size,
-  98       brought to the nearer bound when its area is outside [`min_pixels`, `max_pixels`]; the text encoder sees it at
-  99       about `vision_pixels` (`image.size_in_area_range`, `image.size_at_area`). The target's size plays no part.
- 100     * `"recipe"`: what the training recipe does. For the VAE the picture is scaled down to the *target's* pixel area
- 101       when it has more, and never up; the text encoder sees it scaled down to `vision_pixels` (in whole thousands,
- 102       as the recipe writes it) when it has more, and never up (`p_h3_image.py:304-311` of the same commit).
- 103
- 104     The two differ whenever a reference is larger than the target, or smaller than the pipeline's lower bound."""
- 105     if sizing == "pipeline":
- 106         return (I.size_in_area_range(width, height, min_pixels, max_pixels, multiple),
- 107                 I.size_at_area(width, height, vision_pixels, multiple))
- 108     if sizing == "recipe":
- 109         return (scale_down_to_area(width, height, target_height * target_width, multiple),
- 110                 scale_down_to_area(width, height, 1000 * (vision_pixels // 1000), multiple))
- 111     raise ValueError(f"reference sizing is one of {SIZING}, got {sizing!r}")
+ 107 def reference_sizes(sizing: str, width: int, height: int, *, target_height: int, target_width: int,
+ 108                     min_pixels: int, max_pixels: int, vision_pixels: int, multiple: int) -> tuple[tuple, tuple]:
+ 109     """((width, height) the VAE encodes a reference at, (width, height) the text encoder sees it at).
+ 110
+ 111     * `"pipeline"`: what diffusers' edit pipeline does at sampling. For the VAE the picture keeps its own size,
+ 112       brought to the nearer bound when its area is outside [`min_pixels`, `max_pixels`]; the text encoder sees it at
+ 113       about `vision_pixels` (`image.size_in_area_range`, `image.size_at_area`). The target's size plays no part.
+ 114     * `"recipe"`: what the training recipe does. For the VAE the picture is scaled down to the *target's* pixel area
+ 115       when it has more, and never up; the text encoder sees it scaled down to `vision_pixels` (in whole thousands,
+ 116       as the recipe writes it) when it has more, and never up (`p_h3_image.py:304-311` of the same commit).
+ 117
+ 118     The two differ whenever a reference is larger than the target, or smaller than the pipeline's lower bound."""
+ 119     if sizing == "pipeline":
+ 120         return (I.size_in_area_range(width, height, min_pixels, max_pixels, multiple),
+ 121                 I.size_at_area(width, height, vision_pixels, multiple))
+ 122     if sizing == "recipe":
+ 123         return (scale_down_to_area(width, height, target_height * target_width, multiple),
+ 124                 scale_down_to_area(width, height, 1000 * (vision_pixels // 1000), multiple))
+ 125     raise ValueError(f"reference sizing is one of {SIZING}, got {sizing!r}")
 ```
 
 diffusers' edit pipeline and the recipe size a reference differently, and a cache has to say which it used:
@@ -3604,64 +3702,108 @@ recorded in the request, and it has one value.
 
 ### 10.4 The encode
 
-📍 [`src/h3mlx/cache.py:323-331`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/cache.py#L323-L331)
+📍 [`src/h3mlx/cache.py:356-360`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L356-L360)
 ```python
- 323 def target_picture(picture, height: int, width: int, multiple: int):
- 324     """The picture as RGB at (width, height), resized with Lanczos when it is another size. Its aspect ratio must be
- 325     the stated one to within one `multiple` a side: a picture of another shape is refused, not stretched or cropped."""
- 326     picture = picture.convert("RGB")
- 327     own_width, own_height = picture.size
- 328     if abs(own_width * height / own_height - width) > multiple or abs(own_height * width / own_width - height) > multiple:
- 329         raise ValueError(f"a {own_width}x{own_height} picture does not have the shape of the stated {width}x{height} "
- 330                          "(width x height): crop it first")
- 331     return I.resize(picture, (width, height))
+ 356 def oriented(picture):
+ 357     """The picture as RGB with its EXIF orientation applied. Every picture an entry is made from goes through this,
+ 358     whoever opened the file, so a photograph that says "rotate me" is encoded the way it is looked at, and once
+ 359     applied the orientation is no longer pending: doing it twice changes nothing."""
+ 360     return ImageOps.exif_transpose(picture).convert("RGB")
 ```
-📍 [`src/h3mlx/cache.py:334-374`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/cache.py#L334-L374)
+📍 [`src/h3mlx/cache.py:363-366`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L363-L366)
 ```python
- 334 def encode(components, request: dict, picture, references) -> dict:
- 335     """The tensors of the entry `request` asks for, from the pictures themselves (PIL images, the ones whose digests
- 336     the request names) and `components` (`image.Components`: the VAE, the text encoder's `encode_states`, the
- 337     connector, the tokenizer and the processor, loaded as the request says).
- 338
- 339     * The picture: resized to the stated size (`target_picture`), encoded, one posterior sample from a generator
- 340       seeded with the request's seed, rounded through float16 or not, normalised.
- 341     * Each reference: sized by the request's rule (`reference_sizes`), encoded the same way with the references'
- 342       seed and rounding.
- 343     * The text: the prompt as written for text-to-image; for an edit, the pipeline's presentation (a vision block per
- 344       reference, then the instruction with its "Edit <Picture 1>. " prefix), through the text encoder and the
- 345       connector, cast to the request's text dtype."""
- 346     references = [r.convert("RGB") for r in references]
- 347     if len(references) != len(request["inputs"]["references"]):
- 348         raise ValueError(f"the request names {len(request['inputs']['references'])} references, got {len(references)}")
- 349     if len(references) > I.MAX_EDIT_IMAGES:
- 350         raise ValueError(f"an edit takes at most {I.MAX_EDIT_IMAGES} pictures, got {len(references)}")
- 351     multiple, target = request["vae"]["canvas_multiple"], request["target"]
- 352     if components.canvas_multiple != multiple:
- 353         raise ValueError(f"the request was made for a canvas multiple of {multiple}; these components have "
- 354                          f"{components.canvas_multiple}")
- 355     resized = target_picture(picture, target["height"], target["width"], multiple)
- 356     out = {"latents": I.encode_pictures(components, [resized], float16_round=target["float16_round"],
- 357                                         seed=target["seed"])[0]}
- 358     prompt = request["inputs"]["prompt"]
- 359     if references:
- 360         choice = request["references"]
- 361         sizes = [reference_sizes(choice["sizing"], *r.size, target_height=target["height"], target_width=target["width"],
- 362                                  min_pixels=choice["min_pixels"], max_pixels=choice["max_pixels"],
- 363                                  vision_pixels=choice["vision_pixels"], multiple=multiple) for r in references]
- 364         latents = I.encode_pictures(components, [I.resize(r, vae_size) for r, (vae_size, _) in zip(references, sizes)],
- 365                                     float16_round=choice["float16_round"], seed=choice["seed"])
- 366         out.update({f"condition_latents.{i}": x for i, x in enumerate(latents)})
- 367         ids, tags, vision = I.edit_presentation(components, prompt, [I.resize(r, vision_size)
- 368                                                                      for r, (_, vision_size) in zip(references, sizes)])
- 369     else:
- 370         ids, tags, vision = I.text2image_presentation(components, prompt)
- 371     states = components.encode_states(ids, vision)
- 372     out["text"] = I.connect(components.connector, states, DTYPES[request["text"]["dtype"]])
- 373     out["text_token_tags"] = mx.array(np.asarray(tags, dtype=np.int64))
- 374     return out
+ 363 def load_picture(path):
+ 364     """A picture file as `encode` takes it: opened, oriented, RGB."""
+ 365     with Image.open(path) as opened:
+ 366         return oriented(opened)
+```
+📍 [`src/h3mlx/cache.py:404-413`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L404-L413)
+```python
+ 404 def target_picture(picture, height: int, width: int, multiple: int):
+ 405     """The picture, oriented and RGB (`oriented`), at (width, height), resized with Lanczos when it is another size.
+ 406     Its aspect ratio must be the stated one to within one `multiple` a side: a picture of another shape is refused,
+ 407     not stretched or cropped."""
+ 408     picture = oriented(picture)
+ 409     own_width, own_height = picture.size
+ 410     if abs(own_width * height / own_height - width) > multiple or abs(own_height * width / own_width - height) > multiple:
+ 411         raise ValueError(f"a {own_width}x{own_height} picture does not have the shape of the stated {width}x{height} "
+ 412                          "(width x height): crop it first")
+ 413     return I.resize(picture, (width, height))
+```
+📍 [`src/h3mlx/cache.py:385-401`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L385-L401)
+```python
+ 385 def load_encoders(weights, vae_dtype: str):
+ 386     """`image.Components` for `encode`, from a release folder: the VAE (loaded with `vae_dtype`'s policy), the text
+ 387     encoder as far as the connector's hidden states need, the connector, the tokenizer and the processor. This is
+ 388     the one place the encoders are loaded for the cache, so how they are loaded is part of the code digest. It needs
+ 389     the weights; the tokenizer and the processor are read from their local folders."""
+ 390     from transformers import AutoTokenizer, Qwen3VLProcessor
+ 391
+ 392     weights = Path(weights)
+ 393     transformer, _, settings = release_configs(weights)
+ 394     indices = tuple(json.loads((weights / "text_connector" / "config.json").read_text())["hidden_state_indices"])
+ 395     _, encode_states = loaders.load_text_encoder_states(weights / "text_encoder", indices)
+ 396     vae, mean, std = loaders.load_vae(weights / "vae", dtype=DTYPES[vae_dtype])
+ 397     return I.Components(
+ 398         tokenizer=AutoTokenizer.from_pretrained(str(weights / "tokenizer")),
+ 399         processor=Qwen3VLProcessor.from_pretrained(str(weights / "processor")), encode_states=encode_states,
+ 400         connector=loaders.load_safetensors(weights / "text_connector"), vae=vae, vae_latents_mean=mean,
+ 401         vae_latents_std=std, dit_params={}, dit_cfg=transformer, settings=settings)
+```
+📍 [`src/h3mlx/cache.py:416-457`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/cache.py#L416-L457)
+```python
+ 416 def encode(components, request: dict, picture, references) -> dict:
+ 417     """The tensors of the entry `request` asks for, from the pictures themselves (PIL images, the ones whose digests
+ 418     the request names; each is oriented by its EXIF tag here, `oriented`, so it does not matter whether the caller
+ 419     did) and `components` (`image.Components`: the VAE, the text encoder's `encode_states`, the connector, the
+ 420     tokenizer and the processor, loaded as the request says: `load_encoders`).
+ 421
+ 422     * The picture: resized to the stated size (`target_picture`), encoded, one posterior sample from a generator
+ 423       seeded with the request's seed, rounded through float16 or not, normalised.
+ 424     * Each reference: sized by the request's rule (`reference_sizes`), encoded the same way with the references'
+ 425       seed and rounding.
+ 426     * The text: the prompt as written for text-to-image; for an edit, the pipeline's presentation (a vision block per
+ 427       reference, then the instruction with its "Edit <Picture 1>. " prefix), through the text encoder and the
+ 428       connector, cast to the request's text dtype."""
+ 429     references = [oriented(r) for r in references]
+ 430     if len(references) != len(request["inputs"]["references"]):
+ 431         raise ValueError(f"the request names {len(request['inputs']['references'])} references, got {len(references)}")
+ 432     if len(references) > I.MAX_EDIT_IMAGES:
+ 433         raise ValueError(f"an edit takes at most {I.MAX_EDIT_IMAGES} pictures, got {len(references)}")
+ 434     multiple, target = request["vae"]["canvas_multiple"], request["target"]
+ 435     if components.canvas_multiple != multiple:
+ 436         raise ValueError(f"the request was made for a canvas multiple of {multiple}; these components have "
+ 437                          f"{components.canvas_multiple}")
+ 438     resized = target_picture(picture, target["height"], target["width"], multiple)
+ 439     out = {"latents": I.encode_pictures(components, [resized], float16_round=target["float16_round"],
+ 440                                         seed=target["seed"])[0]}
+ 441     prompt = request["inputs"]["prompt"]
+ 442     if references:
+ 443         choice = request["references"]
+ 444         sizes = [reference_sizes(choice["sizing"], *r.size, target_height=target["height"], target_width=target["width"],
+ 445                                  min_pixels=choice["min_pixels"], max_pixels=choice["max_pixels"],
+ 446                                  vision_pixels=choice["vision_pixels"], multiple=multiple) for r in references]
+ 447         latents = I.encode_pictures(components, [I.resize(r, vae_size) for r, (vae_size, _) in zip(references, sizes)],
+ 448                                     float16_round=choice["float16_round"], seed=choice["seed"])
+ 449         out.update({f"condition_latents.{i}": x for i, x in enumerate(latents)})
+ 450         ids, tags, vision = I.edit_presentation(components, prompt, [I.resize(r, vision_size)
+ 451                                                                      for r, (_, vision_size) in zip(references, sizes)])
+ 452     else:
+ 453         ids, tags, vision = I.text2image_presentation(components, prompt)
+ 454     states = components.encode_states(ids, vision)
+ 455     out["text"] = I.connect(components.connector, states, DTYPES[request["text"]["dtype"]])
+ 456     out["text_token_tags"] = mx.array(np.asarray(tags, dtype=np.int64))
+ 457     return out
 ```
 
-`encode` is the only function here that needs weights.
+`load_encoders` and `encode` are the only functions here that need weights.
+
+- **Every picture is oriented first.** A photograph can carry an EXIF tag that says how to turn it. `encode` applies
+  it to the picture and to each reference itself, so the same file gives the same entry whether the caller opened it
+  raw or through `load_picture`. Without that, one key could hold a picture the right way up or upside down
+  depending on the caller. `test_a_picture_is_encoded_the_way_it_is_looked_at` and
+  `test_a_reference_is_oriented_like_the_picture` check both ways in, with a tag that turns the picture upside down
+  (the same size, so nothing else would notice) and one that swaps its sides.
 
 - **The picture** is resized to the stated size and encoded as the pipeline encodes a reference (`vae.encode_condition`):
   one posterior sample, from a generator seeded with the request's seed, rounded through float16 or not. The recipe
@@ -3700,6 +3842,9 @@ is the encoders' business, and they are tested where they live.
 | `test_an_entry_put_under_another_requests_name_is_refused`, `test_differences_names_what_differs` | a stale entry made by hand, and the comparison it trips |
 | `test_a_damaged_entry_is_an_error_not_a_miss` (×11) | other tensors, a truncated file, no tensors, a bad record, a pickle or an npz with the record's blessing |
 | `test_a_write_that_fails_leaves_no_entry` (×4), `test_files_a_killed_writer_left_are_ignored`, `test_an_entry_is_written_once`, `test_atomic_write_keeps_the_old_file_when_the_new_one_fails` | whole or absent |
+| `test_a_writer_that_fails_cannot_break_another_writers_entry`, `test_an_entry_published_meanwhile_is_left_alone`, `test_two_processes_writing_one_key` | one writer publishes at a time; a failed writer removes only its own; in one process and in two |
+| `test_exclusive_is_released_when_its_holder_ends` | the lock: one holder, who it is, waiting, and a killed holder does not leave it held |
+| `test_a_picture_is_encoded_the_way_it_is_looked_at`, `test_a_reference_is_oriented_like_the_picture` (release fixtures), `test_what_turns_a_request_into_an_entry_is_in_the_package` | EXIF orientation applied in the cache; nothing about the encode left to a script |
 | `test_tensors_that_are_not_an_entry_are_not_written` (×12), `test_request_refusals` (×20), `test_a_request_has_no_defaults` | what is refused going in |
 | `test_pipeline_sizing_is_diffusers`, `test_recipe_sizing_scales_down_to_the_target_and_never_up` | the two rules |
 | `test_a_text_to_image_entry_is_the_direct_encode`, `test_an_edit_entry_is_the_pipelines_conditioning` (×2, release fixtures) | the encode on tiny encoders |
@@ -3740,76 +3885,76 @@ processor folder that is missing is an error and not a fetch.
 
 No learning-rate schedule: the rate is constant. The recipe's schedule and its optimizer settings were not read.
 
-📍 [`src/h3mlx/trainer.py:117-174`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/trainer.py#L117-L174)
+📍 [`src/h3mlx/trainer.py:126-183`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/trainer.py#L126-L183)
 ```python
- 117 def trajectory(*, cfg: dict, transformer: str, dataset, rank: int, alpha: float, targets, refiner: bool,
- 118                assistant: str | None, learning_rate: float, betas, eps: float, weight_decay: float,
- 119                max_grad_norm: float, shift: float, grid: int, density: str, logit_mean, logit_std, mode_scale,
- 120                weighting: str, condition_t: float, seed: int, backward: str) -> dict:
- 121     """Everything the trained weights depend on, checked, as one JSON value. No argument has a default.
- 122
- 123     `transformer` is the base weights' identity (`cache.identity`), `dataset` the examples' cache keys in order,
- 124     `assistant` the sha256 of a frozen adapter's file or None. The density's own parameters are required for its
- 125     scheme and must be None otherwise: `logit_mean` and `logit_std` for `"logit_normal"`, `mode_scale` for `"mode"`."""
- 126     dataset = list(dataset)
- 127     if not dataset or not all(isinstance(k, str) and len(k) == 64 for k in dataset):
- 128         raise ValueError("the dataset is a non-empty list of cache keys")
- 129     _count("rank", rank)
- 130     lora.check_alpha("alpha", alpha)
- 131     if not isinstance(refiner, bool):
- 132         raise ValueError(f"refiner must be True or False, got {refiner!r}")
- 133     modules = adapter_modules(cfg, targets, refiner)
- 134     betas = list(betas)
- 135     if len(betas) != 2 or not all(isinstance(b, float) and 0 <= b < 1 for b in betas):
- 136         raise ValueError(f"betas must be two numbers in [0, 1), got {betas}")
- 137     if not ops.usable_shift(shift):
- 138         raise ValueError(f"shift must be positive and finite, got {shift!r}")
- 139     train.training_sigmas(_count("grid", grid), shift)
- 140     if density not in DENSITY:
- 141         raise ValueError(f"density is one of {DENSITY}, got {density!r}")
- 142     wanted = {"uniform": (), "logit_normal": ("logit_mean", "logit_std"), "mode": ("mode_scale",)}[density]
- 143     for name, value in (("logit_mean", logit_mean), ("logit_std", logit_std), ("mode_scale", mode_scale)):
- 144         if name in wanted:
- 145             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
- 146                 raise ValueError(f"density {density!r} needs {name} as a finite number, got {value!r}")
- 147         elif value is not None:
- 148             raise ValueError(f"{name} is not used by density {density!r}: leave it out")
- 149     if density == "logit_normal":
- 150         _number("logit_std", logit_std)
- 151     if weighting not in WEIGHTING:
- 152         raise ValueError(f"weighting is one of {WEIGHTING}, got {weighting!r}")
- 153     if not isinstance(condition_t, float) or not 0 <= condition_t <= 1:
- 154         raise ValueError(f"condition_t must be a number in [0, 1], got {condition_t!r}")
- 155     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**63:
- 156         raise ValueError(f"seed must be an integer in [0, 2**63), got {seed!r}")
- 157     if backward not in BACKWARD:
- 158         raise ValueError(f"backward is one of {sorted(BACKWARD)}, got {backward!r}")
- 159     if assistant is not None and not (isinstance(assistant, str) and len(assistant) == 64):
- 160         raise ValueError(f"assistant is the sha256 of the frozen adapter's file, or None; got {assistant!r}")
- 161     return {
- 162         "model": {"transformer": transformer, "config": json.loads(files.canonical_json(cfg))},
- 163         "dataset": dataset,
- 164         "adapter": {"name": TRAINED, "rank": rank, "alpha": alpha, "targets": list(targets), "refiner": refiner,
- 165                     "modules": len(modules), "parameters": parameter_count(cfg, modules, rank)},
- 166         "assistant": assistant,
- 167         "hyper": {"learning_rate": _number("learning_rate", learning_rate), "betas": betas, "eps": _number("eps", eps),
- 168                   "weight_decay": _number("weight_decay", weight_decay, strict=False),
- 169                   "max_grad_norm": _number("max_grad_norm", max_grad_norm), "shift": shift, "grid": grid,
- 170                   "density": {"scheme": density, "logit_mean": logit_mean, "logit_std": logit_std, "mode_scale": mode_scale},
- 171                   "weighting": weighting, "condition_t": condition_t, "seed": seed, "backward": backward,
- 172                   "audio_level": "the picture's"},
- 173         "versions": cache.versions(),
- 174     }
+ 126 def trajectory(*, cfg: dict, transformer: str, dataset, rank: int, alpha: float, targets, refiner: bool,
+ 127                assistant: str | None, learning_rate: float, betas, eps: float, weight_decay: float,
+ 128                max_grad_norm: float, shift: float, grid: int, density: str, logit_mean, logit_std, mode_scale,
+ 129                weighting: str, condition_t: float, seed: int, backward: str) -> dict:
+ 130     """Everything the trained weights depend on, checked, as one JSON value. No argument has a default.
+ 131
+ 132     `transformer` is the base weights' identity (`cache.identity`), `dataset` the examples' cache keys in order,
+ 133     `assistant` the sha256 of a frozen adapter's file or None. The density's own parameters are required for its
+ 134     scheme and must be None otherwise: `logit_mean` and `logit_std` for `"logit_normal"`, `mode_scale` for `"mode"`."""
+ 135     dataset = list(dataset)
+ 136     if not dataset or not all(isinstance(k, str) and len(k) == 64 for k in dataset):
+ 137         raise ValueError("the dataset is a non-empty list of cache keys")
+ 138     _count("rank", rank)
+ 139     lora.check_alpha("alpha", alpha)
+ 140     if not isinstance(refiner, bool):
+ 141         raise ValueError(f"refiner must be True or False, got {refiner!r}")
+ 142     modules = adapter_modules(cfg, targets, refiner)
+ 143     betas = list(betas)
+ 144     if len(betas) != 2 or not all(isinstance(b, float) and 0 <= b < 1 for b in betas):
+ 145         raise ValueError(f"betas must be two numbers in [0, 1), got {betas}")
+ 146     if not ops.usable_shift(shift):
+ 147         raise ValueError(f"shift must be positive and finite, got {shift!r}")
+ 148     train.training_sigmas(_count("grid", grid), shift)
+ 149     if density not in DENSITY:
+ 150         raise ValueError(f"density is one of {DENSITY}, got {density!r}")
+ 151     wanted = {"uniform": (), "logit_normal": ("logit_mean", "logit_std"), "mode": ("mode_scale",)}[density]
+ 152     for name, value in (("logit_mean", logit_mean), ("logit_std", logit_std), ("mode_scale", mode_scale)):
+ 153         if name in wanted:
+ 154             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+ 155                 raise ValueError(f"density {density!r} needs {name} as a finite number, got {value!r}")
+ 156         elif value is not None:
+ 157             raise ValueError(f"{name} is not used by density {density!r}: leave it out")
+ 158     if density == "logit_normal":
+ 159         _number("logit_std", logit_std)
+ 160     if weighting not in WEIGHTING:
+ 161         raise ValueError(f"weighting is one of {WEIGHTING}, got {weighting!r}")
+ 162     if not isinstance(condition_t, float) or not 0 <= condition_t <= 1:
+ 163         raise ValueError(f"condition_t must be a number in [0, 1], got {condition_t!r}")
+ 164     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**63:
+ 165         raise ValueError(f"seed must be an integer in [0, 2**63), got {seed!r}")
+ 166     if backward not in BACKWARD:
+ 167         raise ValueError(f"backward is one of {sorted(BACKWARD)}, got {backward!r}")
+ 168     if assistant is not None and not (isinstance(assistant, str) and len(assistant) == 64):
+ 169         raise ValueError(f"assistant is the sha256 of the frozen adapter's file, or None; got {assistant!r}")
+ 170     return {
+ 171         "model": {"transformer": transformer, "config": json.loads(files.canonical_json(cfg))},
+ 172         "dataset": dataset,
+ 173         "adapter": {"name": TRAINED, "rank": rank, "alpha": alpha, "targets": list(targets), "refiner": refiner,
+ 174                     "modules": len(modules), "parameters": parameter_count(cfg, modules, rank)},
+ 175         "assistant": assistant,
+ 176         "hyper": {"learning_rate": _number("learning_rate", learning_rate), "betas": betas, "eps": _number("eps", eps),
+ 177                   "weight_decay": _number("weight_decay", weight_decay, strict=False),
+ 178                   "max_grad_norm": _number("max_grad_norm", max_grad_norm), "shift": shift, "grid": grid,
+ 179                   "density": {"scheme": density, "logit_mean": logit_mean, "logit_std": logit_std, "mode_scale": mode_scale},
+ 180                   "weighting": weighting, "condition_t": condition_t, "seed": seed, "backward": backward,
+ 181                   "audio_level": "the picture's"},
+ 182         "versions": cache.versions(),
+ 183     }
 ```
-📍 [`src/h3mlx/trainer.py:177-183`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/trainer.py#L177-L183)
+📍 [`src/h3mlx/trainer.py:186-192`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/trainer.py#L186-L192)
 ```python
- 177 def limits(*, max_steps: int, max_seconds: float, max_peak_memory_gb: float, checkpoint_every: int) -> dict:
- 178     """When a session stops, and how often it checkpoints. Each is required, and each stops the run: reaching
- 179     `max_steps` finishes it, and the wall clock or MLX's peak-memory counter going over its limit ends the session
- 180     with the run resumable. No argument has a default."""
- 181     return {"max_steps": _count("max_steps", max_steps), "max_seconds": _number("max_seconds", max_seconds),
- 182             "max_peak_memory_gb": _number("max_peak_memory_gb", max_peak_memory_gb),
- 183             "checkpoint_every": _count("checkpoint_every", checkpoint_every)}
+ 186 def limits(*, max_steps: int, max_seconds: float, max_peak_memory_gb: float, checkpoint_every: int) -> dict:
+ 187     """When a session stops, and how often it checkpoints. Each is required, and each stops the run: reaching
+ 188     `max_steps` finishes it, and the wall clock or MLX's peak-memory counter going over its limit ends the session
+ 189     with the run resumable. No argument has a default."""
+ 190     return {"max_steps": _count("max_steps", max_steps), "max_seconds": _number("max_seconds", max_seconds),
+ 191             "max_peak_memory_gb": _number("max_peak_memory_gb", max_peak_memory_gb),
+ 192             "checkpoint_every": _count("checkpoint_every", checkpoint_every)}
 ```
 
 The arguments fall into two groups. The **trajectory** is everything the trained weights depend on: the model's
@@ -3819,46 +3964,46 @@ the same trajectory; its limits may change.
 
 ### 11.2 `--plan-only`
 
-📍 [`src/h3mlx/trainer.py:217-254`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/trainer.py#L217-L254)
+📍 [`src/h3mlx/trainer.py:228-265`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/trainer.py#L228-L265)
 ```python
- 217 def plan(traj: dict, lim: dict, cfg: dict, examples: list, *, run_dir, cache_dir, weights: dict | None = None,
- 218          block_dtype: str | None = None) -> dict:
- 219     """What a run would do, from the arguments and the configs alone.
- 220
- 221     `examples` holds one dict per example: its cache key, whether the cache has it, its sizes and its rows
- 222     (`example_rows`). `weights` is `weights_summary` of the base weights' headers, and `block_dtype` the dtype the
- 223     headers give a block's matrices; both may be None, and the estimates that need them are then left out."""
- 224     adapter, hyper = traj["adapter"], traj["hyper"]
- 225     modules = adapter_modules(cfg, adapter["targets"], adapter["refiner"])
- 226     count = len(examples)
- 227     largest = max(e["sequence_rows"] or e["sequence_rows_without_text"] for e in examples)
- 228     steps = lim["max_steps"]
- 229     checkpoints = sorted(set(range(lim["checkpoint_every"], steps + 1, lim["checkpoint_every"])) | {steps})
- 230     sizes = {"adapter_bytes": 4 * adapter["parameters"], "optimizer_state_bytes": 8 * adapter["parameters"],
- 231              "checkpoint_bytes": 12 * adapter["parameters"], "checkpoints_bytes": 12 * adapter["parameters"] * len(checkpoints),
- 232              "largest_sequence_rows": largest,
- 233              "largest_sequence_is_without_text": any(e["sequence_rows"] is None for e in examples)}
- 234     if weights is not None:
- 235         sizes["base_weights_bytes"] = weights["bytes"]
- 236         sizes["base_weights_bytes_by_dtype"] = weights["bytes_by_dtype"]
- 237     if block_dtype is not None and hyper["backward"] == "blockwise":
- 238         sizes["saved_block_inputs_bytes"] = cfg["num_layers"] * largest * cfg["hidden_size"] * BYTES[block_dtype]
- 239     run_dir = Path(run_dir)
- 240     return {
- 241         "examples": {"count": count, "to_encode": sum(not e["cached"] for e in examples), "list": examples},
- 242         "steps": {"max_steps": steps, "passes_over_the_examples": round(steps / count, 3),
- 243                   "checkpoint_every": lim["checkpoint_every"], "checkpoints_at": checkpoints},
- 244         "adapter": {**adapter, "scaling": adapter["alpha"] / adapter["rank"], "first_modules": modules[:3],
- 245                     "last_module": modules[-1]},
- 246         "assistant": traj["assistant"],
- 247         "sizes": sizes,
- 248         "hyper": hyper,
- 249         "limits": lim,
- 250         "cache": {"directory": str(cache_dir), "keys": [e["key"] for e in examples]},
- 251         "writes": {"run_directory": str(run_dir), "record": str(run_dir / "run.json"),
- 252                    "checkpoints": str(run_dir / "checkpoints" / "step-NNNNNNNN"),
- 253                    "final_adapter": str(run_dir / "adapter.safetensors")},
- 254     }
+ 228 def plan(traj: dict, lim: dict, cfg: dict, examples: list, *, run_dir, cache_dir, weights: dict | None = None,
+ 229          block_dtype: str | None = None) -> dict:
+ 230     """What a run would do, from the arguments and the configs alone.
+ 231
+ 232     `examples` holds one dict per example: its cache key, whether the cache has it, its sizes and its rows
+ 233     (`example_rows`). `weights` is `weights_summary` of the base weights' headers, and `block_dtype` the dtype the
+ 234     headers give a block's matrices; both may be None, and the estimates that need them are then left out."""
+ 235     adapter, hyper = traj["adapter"], traj["hyper"]
+ 236     modules = adapter_modules(cfg, adapter["targets"], adapter["refiner"])
+ 237     count = len(examples)
+ 238     largest = max(e["sequence_rows"] or e["sequence_rows_without_text"] for e in examples)
+ 239     steps = lim["max_steps"]
+ 240     checkpoints = sorted(set(range(lim["checkpoint_every"], steps + 1, lim["checkpoint_every"])) | {steps})
+ 241     sizes = {"adapter_bytes": 4 * adapter["parameters"], "optimizer_state_bytes": 8 * adapter["parameters"],
+ 242              "checkpoint_bytes": 12 * adapter["parameters"], "checkpoints_bytes": 12 * adapter["parameters"] * len(checkpoints),
+ 243              "largest_sequence_rows": largest,
+ 244              "largest_sequence_is_without_text": any(e["sequence_rows"] is None for e in examples)}
+ 245     if weights is not None:
+ 246         sizes["base_weights_bytes"] = weights["bytes"]
+ 247         sizes["base_weights_bytes_by_dtype"] = weights["bytes_by_dtype"]
+ 248     if block_dtype is not None and hyper["backward"] == "blockwise":
+ 249         sizes["saved_block_inputs_bytes"] = cfg["num_layers"] * largest * cfg["hidden_size"] * BYTES[block_dtype]
+ 250     run_dir = Path(run_dir)
+ 251     return {
+ 252         "examples": {"count": count, "to_encode": sum(not e["cached"] for e in examples), "list": examples},
+ 253         "steps": {"max_steps": steps, "passes_over_the_examples": round(steps / count, 3),
+ 254                   "checkpoint_every": lim["checkpoint_every"], "checkpoints_at": checkpoints},
+ 255         "adapter": {**adapter, "scaling": adapter["alpha"] / adapter["rank"], "first_modules": modules[:3],
+ 256                     "last_module": modules[-1]},
+ 257         "assistant": traj["assistant"],
+ 258         "sizes": sizes,
+ 259         "hyper": hyper,
+ 260         "limits": lim,
+ 261         "cache": {"directory": str(cache_dir), "keys": [e["key"] for e in examples]},
+ 262         "writes": {"run_directory": str(run_dir), "record": str(run_dir / "run.json"),
+ 263                    "checkpoints": str(run_dir / "checkpoints" / "step-NNNNNNNN"),
+ 264                    "final_adapter": str(run_dir / "adapter.safetensors")},
+ 265     }
 ```
 
 `--plan-only` prints what a run would do and stops. It reads the configs, the dataset file, the pictures' bytes (for
@@ -3882,39 +4027,43 @@ against the example the builder makes.
 
 What the plan cannot say: peak memory and time. Those are measured, not computed.
 
+The base weights' bytes come from their safetensors headers, by dtype. Every dtype a header can name has a size
+there, and one that does not is reported as a bad argument is, with the tensor's name
+(`test_every_safetensors_dtype_has_a_size`).
+
 ### 11.3 What a step draws
 
-📍 [`src/h3mlx/trainer.py:56-60`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/trainer.py#L56-L60)
+📍 [`src/h3mlx/trainer.py:65-69`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/trainer.py#L65-L69)
 ```python
-  56 def step_seed(seed: int, step: int, stream: str) -> int:
-  57     """A seed for one of step `step`'s draws (`stream`: the example order, the noise level, the noise; `"init"` at
-  58     step 0 is the adapter's initialisation), from the run's seed. numpy's `SeedSequence` mixes the three numbers, so
-  59     neighbouring steps and streams share nothing. 63 bits, which is what a torch generator takes."""
-  60     return int(np.random.SeedSequence([seed, step, STREAMS[stream]]).generate_state(1, dtype=np.uint64)[0] >> 1)
+  65 def step_seed(seed: int, step: int, stream: str) -> int:
+  66     """A seed for one of step `step`'s draws (`stream`: the example order, the noise level, the noise; `"init"` at
+  67     step 0 is the adapter's initialisation), from the run's seed. numpy's `SeedSequence` mixes the three numbers, so
+  68     neighbouring steps and streams share nothing. 63 bits, which is what a torch generator takes."""
+  69     return int(np.random.SeedSequence([seed, step, STREAMS[stream]]).generate_state(1, dtype=np.uint64)[0] >> 1)
 ```
-📍 [`src/h3mlx/trainer.py:63-67`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/trainer.py#L63-L67)
+📍 [`src/h3mlx/trainer.py:72-76`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/trainer.py#L72-L76)
 ```python
-  63 def example_at(seed: int, step: int, count: int) -> int:
-  64     """Which example step `step` trains on: the examples in a new random order for every pass over them."""
-  65     epoch, position = divmod(step, count)
-  66     order = np.random.default_rng(np.random.SeedSequence([seed, epoch, STREAMS["order"]])).permutation(count)
-  67     return int(order[position])
+  72 def example_at(seed: int, step: int, count: int) -> int:
+  73     """Which example step `step` trains on: the examples in a new random order for every pass over them."""
+  74     epoch, position = divmod(step, count)
+  75     order = np.random.default_rng(np.random.SeedSequence([seed, epoch, STREAMS["order"]])).permutation(count)
+  76     return int(order[position])
 ```
-📍 [`src/h3mlx/trainer.py:70-82`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/trainer.py#L70-L82)
+📍 [`src/h3mlx/trainer.py:79-91`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/trainer.py#L79-L91)
 ```python
-  70 def noise_level(hyper: dict, grid: np.ndarray, step: int) -> tuple[np.float32, float | None]:
-  71     """(sigma, loss weight or None) for step `step`: one draw of the density from the step's own generator, looked up
-  72     in the grid, and the weighting of that level."""
-  73     import torch
-  74
-  75     density = hyper["density"]
-  76     generator = torch.Generator().manual_seed(step_seed(hyper["seed"], step, "level"))
-  77     u = train.density_for_timestep_sampling(density["scheme"], 1, density["logit_mean"], density["logit_std"],
-  78                                             density["mode_scale"], generator=generator)
-  79     sigma = train.sample_sigmas(u, grid)[0][0]
-  80     if hyper["weighting"] == "none":
-  81         return sigma, None
-  82     return sigma, float(train.loss_weighting_for_sd3(hyper["weighting"], np.float32([sigma]))[0])
+  79 def noise_level(hyper: dict, grid: np.ndarray, step: int) -> tuple[np.float32, float | None]:
+  80     """(sigma, loss weight or None) for step `step`: one draw of the density from the step's own generator, looked up
+  81     in the grid, and the weighting of that level."""
+  82     import torch
+  83
+  84     density = hyper["density"]
+  85     generator = torch.Generator().manual_seed(step_seed(hyper["seed"], step, "level"))
+  86     u = train.density_for_timestep_sampling(density["scheme"], 1, density["logit_mean"], density["logit_std"],
+  87                                             density["mode_scale"], generator=generator)
+  88     sigma = train.sample_sigmas(u, grid)[0][0]
+  89     if hyper["weighting"] == "none":
+  90         return sigma, None
+  91     return sigma, float(train.loss_weighting_for_sd3(hyper["weighting"], np.float32([sigma]))[0])
 ```
 
 No generator is carried from one step to the next. A step's example, its noise level and its noise each come from a
@@ -3925,7 +4074,96 @@ an uninterrupted run draws there. Nothing has to be restored, and nothing can be
 
 The examples are taken in a new random order on every pass, each once a pass.
 
-### 11.4 The loop is the pieces
+### 11.4 One session in a run directory, and the checks that come first
+
+📍 [`src/h3mlx/trainer.py:393-445`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/trainer.py#L393-L445)
+```python
+ 393 @contextlib.contextmanager
+ 394 def open_run(run_dir, traj: dict, lim: dict, cfg: dict, *, resume: bool):
+ 395     """Take a run directory for this process and check that the run can start or go on in it. Yields a `Session`.
+ 396
+ 397     Everything here is cheap and reads only the run directory: no weights are loaded, no example is encoded, and
+ 398     nothing in the directory is changed but its lock file. So a caller does it first, and a run that is refused
+ 399     costs nothing and leaves the directory as it was.
+ 400
+ 401     * **One session at a time.** The directory's lock file, `run.lock`, is held for as long as the session is open
+ 402       (`files.exclusive`: the lock is the process's, so a session that is killed does not leave it held). A second
+ 403       session on the same directory is refused, and told which process holds it.
+ 404     * **A new run** needs a directory that holds none of a run's outputs (`OUTPUTS`: `run.json`,
+ 405       `adapter.safetensors`, `checkpoints`), whether or not there is a record. Nothing is overwritten.
+ 406     * **A resume** needs the record, with exactly this trajectory; the latest checkpoint on disk, which must not be
+ 407       older than the latest one the record lists, and must be whole and this run's (`read_checkpoint`); and a
+ 408       `max_steps` that the run has not already passed. A run whose record lists no checkpoint and that has none on
+ 409       disk goes on from step 0, which is where its record says its last checkpoint is."""
+ 410     run_dir = Path(run_dir)
+ 411     if resume and not run_dir.is_dir():
+ 412         raise Refused(f"{run_dir / 'run.json'}: no readable run record to resume from (no such directory)")
+ 413     run_dir.mkdir(parents=True, exist_ok=True)
+ 414     with contextlib.ExitStack() as held:
+ 415         try:
+ 416             held.enter_context(files.exclusive(run_dir / LOCK, f"training in {run_dir.name}"))
+ 417         except files.Busy as busy:
+ 418             raise Refused(f"the run directory is in use: {busy}. One session trains in a run directory at a time") from None
+ 419         if not resume:
+ 420             there = [name for name in OUTPUTS if os.path.lexists(run_dir / name)]
+ 421             if there:
+ 422                 raise Refused(f"{run_dir} already holds {', '.join(there)}: a new run writes {', '.join(OUTPUTS)} "
+ 423                               "and overwrites none of them. Pass resume to go on with the run that is there, or "
+ 424                               "use another directory")
+ 425             record = {"format": RECORD, "trajectory": traj, "seed": traj["hyper"]["seed"],
+ 426                       "versions": traj["versions"], "sessions": [], "step": 0, "losses": [], "checkpoints": []}
+ 427             yield Session(run_dir, traj, lim, cfg, False, record, 0, None, None, [])
+ 428             return
+ 429         record = read_record(run_dir)
+ 430         apart = _differences(traj, record)
+ 431         if apart:
+ 432             raise Refused(f"{run_dir / 'run.json'} is another run: " + "; ".join(apart[:6])
+ 433                           + (f"; and {len(apart) - 6} more" if len(apart) > 6 else ""))
+ 434         listed = max(record.get("checkpoints") or [0])
+ 435         checkpoint = latest_checkpoint(run_dir)
+ 436         found = int(checkpoint.name[5:]) if checkpoint is not None else 0
+ 437         if found < listed:
+ 438             raise Refused(f"{run_dir / 'run.json'} lists a checkpoint at step {listed}, and the latest in "
+ 439                           f"{run_dir / 'checkpoints'} is " + (f"step {found}" if found else "none")
+ 440                           + ": the run is not gone back to an older checkpoint, or to its start, without being told to")
+ 441         step, matrices, saved, losses = (0, None, None, []) if checkpoint is None else read_checkpoint(checkpoint, traj, cfg)
+ 442         if step > lim["max_steps"]:
+ 443             raise Refused(f"the run is at step {step}, past a max_steps of {lim['max_steps']}: nothing to do, and "
+ 444                           "nothing is written")
+ 445         yield Session(run_dir, traj, lim, cfg, True, record, step, matrices, saved, losses)
+```
+
+Before anything heavy, the script takes the run directory for its process and checks that the run can start or go on
+there. `open_run` reads only the run directory. It loads no weights, encodes nothing, and changes nothing in the
+directory but its lock file, so **a run that is refused costs nothing and leaves the directory as it was**: the
+record of a finished run included.
+
+- **One session at a time.** The directory's lock file, `run.lock`, is held for the whole session (§10.2's
+  `files.exclusive`). A second session on the same directory, a resume started twice for instance, is refused and
+  told which process holds it. It does not get as far as clearing temporary checkpoint directories; without the lock
+  that clearing would delete the first session's checkpoint in the middle of being written. A session that is killed
+  does not leave the lock held.
+- **A new run overwrites nothing.** It needs a directory that holds none of a run's three outputs: `run.json`,
+  `adapter.safetensors`, `checkpoints`. A directory with someone's adapter in it and no record is refused like one
+  with a record. Other files are not the run's and do not matter.
+- **A resume** needs the record with this trajectory (§11.8), the checkpoint the record says is its latest, and room
+  to go on:
+  - It goes on from the latest checkpoint on disk, and that must not be older than the latest one the record lists.
+    With the newest checkpoint folder gone it does not roll back to an older one; with the whole folder gone it does
+    not start again from step 0. (A checkpoint newer than the record lists is the trace of a run stopped between the
+    two writes, and is resumed from.)
+  - A run already past the `--max-steps` given is refused, and nothing is written.
+- **The order.** The run directory first, then the examples the cache lacks, then the transformer. A `--resume` into
+  the wrong directory, or of another run, stops before an encoder is loaded.
+
+Tests: `test_one_session_in_a_run_directory_at_a_time` starts the second session from inside the first one's
+checkpoint rename; `test_a_second_process_is_refused_and_sigterm_stops_the_first_cleanly` does it with two real
+processes; `test_a_new_run_overwrites_nothing`; `test_a_resume_goes_on_from_the_records_latest_checkpoint_or_not_at_all`;
+`test_a_resume_past_its_max_steps_is_refused`; `test_a_refused_resume_encodes_nothing`. Where a run is refused
+(over existing outputs, with a checkpoint missing or damaged, past its limit, as another run), the tests compare
+every file of the run directory before and after, the lock file aside.
+
+### 11.5 The loop is the pieces
 
 `trainer.run` is, per step: `example_at`, `noise_level` (§4), `build_example` (§6), a bounded gradient (§8),
 `optimizer_step` (§9). `test_the_loop_is_the_pieces_in_order` runs six steps of the script with every hyper-parameter
@@ -3938,7 +4176,7 @@ levels with fixed noise falls from 2.74 to 1.94, and the record's own losses fro
 (the last 30). That is a tiny random model memorising noise. It shows the loop turns the loss down and nothing about
 what a real model learns.
 
-### 11.5 The record
+### 11.6 The record
 
 `run.json` in the run directory is written when the session starts and rewritten atomically (§10.2's
 `atomic_write`) after every step. It holds the trajectory (every argument that decides the weights), the limits,
@@ -3946,15 +4184,27 @@ the versions, the seed, the plan, the step reached, the status and why it stoppe
 span, and a line per step: the example, the noise level, the loss weight, the loss, the gradient's norm before
 clipping, the seconds and MLX's peak memory (`test_the_record_holds_the_run`).
 
-### 11.6 Limits stop the run
+### 11.7 Limits stop the run, and so does SIGTERM
 
 | limit | checked | what happens |
 | --- | --- | --- |
 | `--max-steps` | before each step | the run is finished: the final adapter is written, exit code 0 |
 | `--max-seconds` | before each step, against the session's wall clock | the session ends at the last completed step: a checkpoint, status `stopped`, exit code 3 |
 | `--max-peak-memory-gb` | against `mx.get_peak_memory()`, reset when the session starts: before the first step, after every step, and with the block-by-block gradient after every evaluated block | the step in progress is dropped; the session ends at the last completed step: a checkpoint, status `stopped`, exit code 3 |
+| SIGTERM | at the same places as the memory limit | the same: the step in progress is dropped, a checkpoint at the last completed step, status `stopped`, reason `terminated`, exit code 3 |
 
-None of them warns and goes on. `--max-steps` is a limit and not part of the trajectory: a finished run resumed with
+None of them warns and goes on. SIGTERM is what a supervisor, a job timeout or a closing terminal sends: the session
+takes it as a request to stop, and stops as it does at a limit, resumable. A signal that arrives in the middle of an
+optimizer update is acted on after it. The handler is the session's only; the one before it is put back when the
+session ends. Ctrl-C is not handled this way: it interrupts where it lands, and the run goes on from its last
+periodic checkpoint.
+
+- `test_sigterm_stops_at_the_next_boundary_with_a_checkpoint` sends the signal to the test's own process during the
+  fourth step's update (the session ends at step 4) and again in the middle of a backward pass (that step is
+  dropped), then resumes to the uninterrupted run's weights.
+- `test_a_second_process_is_refused_and_sigterm_stops_the_first_cleanly` sends it to the script running as a process
+  of its own: exit code 3, a checkpoint where it stopped, and a resume to the uninterrupted run's adapter, byte for
+  byte. `--max-steps` is a limit and not part of the trajectory: a finished run resumed with
 a higher one goes on, to the weights a run given the higher one from the start reaches.
 
 - `test_the_wall_clock_stops_the_session_and_the_run_resumes` uses a clock that advances a second a reading.
@@ -3964,70 +4214,70 @@ a higher one goes on, to the weights a run given the higher one from the start r
 - The memory limit is MLX's counter and nothing more. It does not see memory outside MLX, and it stops the run after
   the peak has happened, not before.
 
-### 11.7 Checkpoints, and resuming
+### 11.8 Checkpoints, and resuming
 
-📍 [`src/h3mlx/trainer.py:282-307`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/trainer.py#L282-L307)
+📍 [`src/h3mlx/trainer.py:293-318`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/trainer.py#L293-L318)
 ```python
- 282 def write_checkpoint(run_dir, step: int, traj: dict, trainable: dict, optimizer, losses: list) -> Path:
- 283     """One checkpoint: the adapter as a diffusers LoRA file, the optimizer's state, and a record with the step, the
- 284     losses so far and each file's digest. It is written as a directory under a temporary name and renamed into place,
- 285     so a checkpoint directory is there only when it is whole."""
- 286     final = checkpoint_path(run_dir, step)
- 287     final.parent.mkdir(parents=True, exist_ok=True)
- 288     tmp = files.temporary(final)
- 289     adapter = lora.Adapter(lora.file_tensors(trainable, TRAINED),
- 290                            {m: traj["adapter"]["alpha"] for m in {lora.RUNTIME_RE.match(k)["module"] for k in trainable}})
- 291     try:
- 292         tmp.mkdir()
- 293         lora.save(tmp / "adapter.safetensors", adapter)
- 294         mx.save_safetensors(str(tmp / "optimizer.safetensors"), train.optimizer_state(optimizer, trainable))
- 295         described = {"format": CHECKPOINT, "step": step, "trajectory": files.sha256_json(traj),
- 296                      "rng": {"scheme": "seeded per step", "seed": traj["hyper"]["seed"], "next_step": step},
- 297                      "files": {name: files.sha256_file(tmp / name) for name in ("adapter.safetensors", "optimizer.safetensors")},
- 298                      "losses": losses}
- 299         (tmp / "checkpoint.json").write_text(json.dumps(described, indent=1, sort_keys=True, allow_nan=False) + "\n")
- 300         for name in ("adapter.safetensors", "optimizer.safetensors", "checkpoint.json"):
- 301             files.sync_file(tmp / name)
- 302         os.rename(tmp, final)
- 303     except BaseException:
- 304         shutil.rmtree(tmp, ignore_errors=True)
- 305         raise
- 306     files.sync_directory(final.parent)
- 307     return final
+ 293 def write_checkpoint(run_dir, step: int, traj: dict, trainable: dict, optimizer, losses: list) -> Path:
+ 294     """One checkpoint: the adapter as a diffusers LoRA file, the optimizer's state, and a record with the step, the
+ 295     losses so far and each file's digest. It is written as a directory under a temporary name and renamed into place,
+ 296     so a checkpoint directory is there only when it is whole."""
+ 297     final = checkpoint_path(run_dir, step)
+ 298     final.parent.mkdir(parents=True, exist_ok=True)
+ 299     tmp = files.temporary(final)
+ 300     adapter = lora.Adapter(lora.file_tensors(trainable, TRAINED),
+ 301                            {m: traj["adapter"]["alpha"] for m in {lora.RUNTIME_RE.match(k)["module"] for k in trainable}})
+ 302     try:
+ 303         tmp.mkdir()
+ 304         lora.save(tmp / "adapter.safetensors", adapter)
+ 305         mx.save_safetensors(str(tmp / "optimizer.safetensors"), train.optimizer_state(optimizer, trainable))
+ 306         described = {"format": CHECKPOINT, "step": step, "trajectory": files.sha256_json(traj),
+ 307                      "rng": {"scheme": "seeded per step", "seed": traj["hyper"]["seed"], "next_step": step},
+ 308                      "files": {name: files.sha256_file(tmp / name) for name in ("adapter.safetensors", "optimizer.safetensors")},
+ 309                      "losses": losses}
+ 310         (tmp / "checkpoint.json").write_text(json.dumps(described, indent=1, sort_keys=True, allow_nan=False) + "\n")
+ 311         for name in ("adapter.safetensors", "optimizer.safetensors", "checkpoint.json"):
+ 312             files.sync_file(tmp / name)
+ 313         os.rename(tmp, final)
+ 314     except BaseException:
+ 315         shutil.rmtree(tmp, ignore_errors=True)
+ 316         raise
+ 317     files.sync_directory(final.parent)
+ 318     return final
 ```
-📍 [`src/h3mlx/trainer.py:318-348`](https://github.com/sublimator/minimax-h3-mlx/blob/586529b16d42d56a0138b03f639cf138831f3282/src/h3mlx/trainer.py#L318-L348)
+📍 [`src/h3mlx/trainer.py:329-359`](https://github.com/sublimator/minimax-h3-mlx/blob/1fe76febd748d7966745e99998eda071710274ff/src/h3mlx/trainer.py#L329-L359)
 ```python
- 318 def read_checkpoint(path: Path, traj: dict, cfg: dict) -> tuple[int, dict, dict, list]:
- 319     """(step, trainable matrices, optimizer state, losses) from a checkpoint directory, if it is whole and belongs to
- 320     this trajectory; otherwise `Refused`. Nothing falls back to an older checkpoint: a damaged one is to be looked
- 321     at, not skipped."""
- 322     try:
- 323         described = json.loads((path / "checkpoint.json").read_text())
- 324     except (OSError, ValueError) as e:
- 325         raise Refused(f"{path}: the checkpoint's record cannot be read ({e})") from e
- 326     if not isinstance(described, dict) or described.get("format") != CHECKPOINT:
- 327         raise Refused(f"{path} is not a {CHECKPOINT} checkpoint")
- 328     step = described.get("step")
- 329     if step != int(path.name[5:]) or described.get("trajectory") != files.sha256_json(traj):
- 330         raise Refused(f"{path} belongs to another run or another step (its record says step {step})")
- 331     for name, digest in described.get("files", {}).items():
- 332         if not (path / name).is_file() or files.sha256_file(path / name) != digest:
- 333             raise Refused(f"{path / name} is missing or is not the file the checkpoint describes")
- 334     if set(described.get("files", {})) != {"adapter.safetensors", "optimizer.safetensors"}:
- 335         raise Refused(f"{path}: the checkpoint does not list its two files")
- 336     adapter = lora.load(path / "adapter.safetensors")
- 337     spec = traj["adapter"]
- 338     modules = adapter_modules(cfg, spec["targets"], spec["refiner"])
- 339     lora.check(adapter, cfg)
- 340     if sorted(adapter.modules) != sorted(modules) or any(adapter.rank(m) != spec["rank"] or adapter.alpha[m] != spec["alpha"]
- 341                                                           for m in modules):
- 342         raise Refused(f"{path}: the saved adapter is not this run's (modules, rank or alpha differ)")
- 343     trainable = {k: v.astype(mx.float32) for k, v in lora.runtime_tensors(adapter, TRAINED).items()}
- 344     saved = mx.load(str(path / "optimizer.safetensors"), format="safetensors")
- 345     losses = described.get("losses")
- 346     if not isinstance(losses, list) or len(losses) != step:
- 347         raise Refused(f"{path}: {step} steps but {len(losses) if isinstance(losses, list) else 'no'} losses")
- 348     return step, trainable, saved, losses
+ 329 def read_checkpoint(path: Path, traj: dict, cfg: dict) -> tuple[int, dict, dict, list]:
+ 330     """(step, trainable matrices, optimizer state, losses) from a checkpoint directory, if it is whole and belongs to
+ 331     this trajectory; otherwise `Refused`. Nothing falls back to an older checkpoint: a damaged one is to be looked
+ 332     at, not skipped."""
+ 333     try:
+ 334         described = json.loads((path / "checkpoint.json").read_text())
+ 335     except (OSError, ValueError) as e:
+ 336         raise Refused(f"{path}: the checkpoint's record cannot be read ({e})") from e
+ 337     if not isinstance(described, dict) or described.get("format") != CHECKPOINT:
+ 338         raise Refused(f"{path} is not a {CHECKPOINT} checkpoint")
+ 339     step = described.get("step")
+ 340     if step != int(path.name[5:]) or described.get("trajectory") != files.sha256_json(traj):
+ 341         raise Refused(f"{path} belongs to another run or another step (its record says step {step})")
+ 342     for name, digest in described.get("files", {}).items():
+ 343         if not (path / name).is_file() or files.sha256_file(path / name) != digest:
+ 344             raise Refused(f"{path / name} is missing or is not the file the checkpoint describes")
+ 345     if set(described.get("files", {})) != {"adapter.safetensors", "optimizer.safetensors"}:
+ 346         raise Refused(f"{path}: the checkpoint does not list its two files")
+ 347     losses = described.get("losses")
+ 348     if not isinstance(losses, list) or len(losses) != step:
+ 349         raise Refused(f"{path}: {step} steps but {len(losses) if isinstance(losses, list) else 'no'} losses")
+ 350     adapter = lora.load(path / "adapter.safetensors")
+ 351     spec = traj["adapter"]
+ 352     modules = adapter_modules(cfg, spec["targets"], spec["refiner"])
+ 353     lora.check(adapter, cfg)
+ 354     if sorted(adapter.modules) != sorted(modules) or any(adapter.rank(m) != spec["rank"] or adapter.alpha[m] != spec["alpha"]
+ 355                                                           for m in modules):
+ 356         raise Refused(f"{path}: the saved adapter is not this run's (modules, rank or alpha differ)")
+ 357     trainable = {k: v.astype(mx.float32) for k, v in lora.runtime_tensors(adapter, TRAINED).items()}
+ 358     saved = mx.load(str(path / "optimizer.safetensors"), format="safetensors")
+ 359     return step, trainable, saved, losses
 ```
 
 A checkpoint is a directory, `checkpoints/step-NNNNNNNN/`: the adapter as a diffusers LoRA file (§1.5), the
@@ -4044,10 +4294,11 @@ steps and when a session ends.
   (`test_a_resume_that_is_another_run_is_refused`, `test_a_resume_under_other_code_or_into_nothing_is_refused`).
 - **It refuses a damaged checkpoint.** A file that is not the one the checkpoint describes, a missing record, a
   checkpoint of another trajectory or under another step's name: the resume stops and says so. It does not fall back
-  to an older checkpoint (`test_a_damaged_checkpoint_is_refused_not_skipped`).
+  to an older checkpoint, and it has loaded no weights and changed no file when it stops
+  (`test_a_damaged_checkpoint_is_refused_not_skipped`). A checkpoint that is missing altogether is §11.4's case.
 - **Steps after the last checkpoint are done again.** The record may be ahead of the checkpoint; the resumed session
   says how many steps it discards, and the losses come from the checkpoint.
-- A new run refuses a directory that already holds a record.
+- A new run refuses a directory that already holds any of a run's outputs (§11.4).
 
 Two tests of the same claim, that a resumed run ends where an uninterrupted one does:
 
@@ -4066,9 +4317,9 @@ Byte-for-byte equality here is on one machine, with adapters on attention and fe
 device a gradient that passes through a bf16 modulation table can differ by a rounding step from run to run (§7.1),
 so an adapter on those modules would resume to weights that close, not to the same bytes.
 
-### 11.8 From pictures
+### 11.9 From pictures
 
-When the cache lacks an example, the script loads the VAE and the text encoder once, encodes what is missing, writes
+When the cache lacks an example, the script loads the VAE and the text encoder once (`cache.load_encoders`), encodes what is missing, writes
 the entries and frees both before the transformer is loaded. `test_a_run_from_pictures_encodes_what_the_cache_lacks`
 runs that on the tiny release (it needs the release's tokenizer and processor files): a text-to-image example and an
 edit example from an empty cache, two entries written, three steps trained; a second run finds both entries, loads no
@@ -4076,7 +4327,7 @@ encoder and trains the same weights.
 
 On real weights this path has never run.
 
-### 11.9 The tests
+### 11.10 The tests
 
 | test | pins |
 | --- | --- |
@@ -4089,6 +4340,10 @@ On real weights this path has never run.
 | `test_the_record_holds_the_run` | every argument, the versions, the seed, the step, a line per step; each example once a pass |
 | `test_weighting_and_density_reach_the_loop`, `test_the_two_bounded_gradients_train_the_same_weights`, `test_a_frozen_assistant_is_used_and_not_saved`, `test_a_bf16_base_trains` | the options |
 | `test_the_wall_clock_stops_the_session_and_the_run_resumes`, `test_the_memory_limit_stops_the_session`, `test_max_steps_finishes_the_run_and_a_resume_can_extend_it` | each limit stops the run |
+| `test_sigterm_stops_at_the_next_boundary_with_a_checkpoint`, `test_a_second_process_is_refused_and_sigterm_stops_the_first_cleanly` | SIGTERM: a clean stop with a checkpoint, in this process and in another; two processes on one run directory |
+| `test_one_session_in_a_run_directory_at_a_time`, `test_a_new_run_overwrites_nothing` (×3) | the run directory's lock; a new run and the three outputs |
+| `test_a_resume_goes_on_from_the_records_latest_checkpoint_or_not_at_all`, `test_a_resume_past_its_max_steps_is_refused`, `test_a_refused_resume_encodes_nothing` | no rollback, no restart from nothing, no resume past the limit, nothing heavy before a refusal |
+| `test_every_safetensors_dtype_has_a_size` | the plan's size table |
 | `test_a_run_that_dies_resumes_to_the_uninterrupted_runs_weights`, `test_a_killed_process_resumes_to_the_same_weights` | resume, after a failure and after a kill |
 | `test_a_resume_that_is_another_run_is_refused` (×9), `test_a_resume_under_other_code_or_into_nothing_is_refused`, `test_a_damaged_checkpoint_is_refused_not_skipped` (×6) | what a resume refuses |
 | `test_checkpoints_are_whole_or_absent` | atomic checkpoints |
@@ -4191,6 +4446,15 @@ Each wrong implementation below was made on a copy of the sources and run agains
 | the record written only at the end | `test_a_killed_process_resumes_to_the_same_weights` |
 | the plan's parameters counted on one side, its rows without the references, its saved inputs sized for float32 whatever the base; `--plan-only` reading the weights or making the run directory | `test_plan_only_opens_no_weights_and_writes_nothing`, `test_a_bf16_base_trains` |
 | the shift or the rank given a default; unknown dataset keys ignored; the reference choices not required | `test_a_missing_argument_is_an_error_that_names_it`, `test_a_dataset_that_is_not_one_is_refused`, `test_arguments_that_do_not_make_a_run_are_refused` |
+| a lock that takes nothing, never waits, says nothing about its holder, or leaves the holder's note after release | `test_exclusive_is_released_when_its_holder_ends`, `test_a_writer_that_fails_cannot_break_another_writers_entry` |
+| a cache entry published without the lock, or without a second look for a record under it; a failed writer removing the final tensors whatever it found; a staged file left behind | `test_a_writer_that_fails_cannot_break_another_writers_entry`, `test_an_entry_published_meanwhile_is_left_alone`, `test_two_processes_writing_one_key`, `test_a_write_that_fails_leaves_no_entry` |
+| an identity that counts files under a hidden directory; the version of mlx-vlm or of torchvision left out of the request | `test_identity_reads_no_weights`, `test_a_changed_code_or_library_version_is_another_key` |
+| a picture, a reference or the target not oriented by its EXIF tag; the size reported as stored; the script opening pictures itself | `test_a_picture_is_encoded_the_way_it_is_looked_at`, `test_a_reference_is_oriented_like_the_picture`, `test_what_turns_a_request_into_an_entry_is_in_the_package` |
+| a run directory taken without its lock; temporary checkpoint directories cleared before the lock is held | `test_one_session_in_a_run_directory_at_a_time`, `test_a_second_process_is_refused_and_sigterm_stops_the_first_cleanly` |
+| a new run that looks for a record only | `test_a_new_run_overwrites_nothing` |
+| a resume that takes whatever checkpoint is on disk, refuses the record's own latest one, goes ahead past `--max-steps`, or is refused at it; the record rewritten before the resume is checked; a checkpoint's tensors loaded before its losses are counted; examples encoded before the run directory is checked | `test_a_resume_goes_on_from_the_records_latest_checkpoint_or_not_at_all`, `test_a_resume_past_its_max_steps_is_refused`, `test_max_steps_finishes_the_run_and_a_resume_can_extend_it`, `test_a_damaged_checkpoint_is_refused_not_skipped`, `test_a_refused_resume_encodes_nothing` |
+| SIGTERM never looked at, reported as the wall clock, or its handler not put back | `test_sigterm_stops_at_the_next_boundary_with_a_checkpoint` |
+| an unsigned 64-bit tensor without a size; an unknown dtype as a `KeyError` | `test_every_safetensors_dtype_has_a_size` |
 
 One change in this list is caught by a narrow margin. The block-by-block gradient's forward walk evaluates each block
 before the next; without that evaluation the gradients are the same and only the memory differs, on the default
@@ -4230,6 +4494,25 @@ must be cast to bf16 before the subtraction.
   on tiny models. A file trained by this script has not been loaded into diffusers on real weights.
 - **Housekeeping for long runs.** Every checkpoint is kept (the plan prints their total size); there is no pruning.
   The whole dataset's entries are held in memory. One process trains on one device.
+- **A smaller base in memory.** The gradients are tested over a quantized base (§7.4, §8.5), but the script has no
+  option to quantize the weights it loads. It also sets none of MLX's own bounds, the memory limit and the buffer
+  cache limit, which the sampling script does set. Its `--max-peak-memory-gb` reads a counter and stops the run; it
+  bounds nothing.
+- **Adapters anywhere but the block matrices.** `--targets` chooses among the six attention and feed-forward
+  matrices of a block. The package can put an adapter on any `Linear` (§1), and the gradient for the ones a
+  modulation table feeds is tested (§7.1), but the script does not offer them.
+- **Gradient accumulation.** One example, one optimizer step. Several examples' gradients are not summed before a
+  step, which is how a trainer with a batch of one usually gets the effect of a larger one.
+- **Prompts as the model will be given them.** The sampling script can expand a short request with the release's
+  prompt upsampler before encoding it; the training script encodes each prompt as written. Whether training prompts
+  should be expanded the same way is a choice a first run has to make, and there is no caption dropout.
+- **Long evaluations on the GPU.** The text encoder's loader already splits its pass into one evaluation a layer,
+  because a single long one at several thousand tokens was stopped by the system's GPU watchdog in a probe. Training
+  evaluates more per block than sampling does, and the checkpointed gradient evaluates the whole backward pass at
+  once. Whether either runs into that limit at real sequence lengths is not known and has to be measured; the
+  block-by-block gradient evaluates one block at a time, which is the smaller risk.
+- **Stopping from outside.** SIGTERM is handled (§11.7). Ctrl-C is not: it interrupts where it lands and leaves the
+  last periodic checkpoint. Neither lock here is to be relied on over a network filesystem (§10.2).
 
 Open, and not specific to a first run:
 
