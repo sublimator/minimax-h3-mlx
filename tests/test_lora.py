@@ -81,8 +81,8 @@ def random_adapter(cfg, ranks, alphas, seed=2, std=0.3, dtype=torch.float32):
     tensors = {}
     for m, r in ranks.items():
         out_f, in_f = shapes[m]
-        tensors[m + ".lora_A.weight"] = to_mx((torch.randn(r, in_f, generator=g) * std).to(dtype))
-        tensors[m + ".lora_B.weight"] = to_mx((torch.randn(out_f, r, generator=g) * std).to(dtype))
+        tensors[m + ".lora_A.weight"] = to_mx_half((torch.randn(r, in_f, generator=g) * std).to(dtype))
+        tensors[m + ".lora_B.weight"] = to_mx_half((torch.randn(out_f, r, generator=g) * std).to(dtype))
     return lora.Adapter(tensors, dict(alphas))
 
 
@@ -224,6 +224,28 @@ def test_round_trip_and_header(tmp_path):
     # the JSON is written as diffusers writes it (`json.dumps(..., indent=2, sort_keys=True)`), every key prefixed
     want = json.dumps({"transformer." + k: v for k, v in lora.config(adapter).items()}, indent=2, sort_keys=True)
     assert header[lora.METADATA_KEY] == want
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("prefix", ["transformer", None])
+def test_half_precision_adapter_keeps_its_dtype_in_the_file(tmp_path, dtype, prefix):
+    """`save` writes the tensors in the dtype they have: a bf16 or float16 adapter is that on disk (read back here with
+    safetensors and with diffusers, neither through our loader), and `load` returns the same dtype and bits. A writer
+    that upcast to float32 would pass every float32 test."""
+    adapter = random_adapter(dict(TINY), {m: 4 for m in MODULES}, {m: 10 for m in MODULES}, dtype=dtype)
+    path = tmp_path / FILE
+    lora.save(path, adapter, prefix=prefix)
+    lead = "" if prefix is None else prefix + "."
+    with safe_open(str(path), "pt") as f:
+        stored = {k: f.get_tensor(k) for k in f.keys()}
+    through_diffusers = MiniMaxH3LoraLoaderMixin.lora_state_dict(str(tmp_path), weight_name=FILE)
+    assert set(stored) == set(through_diffusers) == {lead + k for k in adapter.tensors}
+    back = lora.load(path)
+    for k, v in adapter.tensors.items():
+        assert stored[lead + k].dtype == through_diffusers[lead + k].dtype == dtype, k
+        assert np.array_equal(to_np(stored[lead + k]), to_np(v)), k
+        assert back.tensors[k].dtype == v.dtype and v.dtype != mx.float32, k
+        assert np.array_equal(to_np(back.tensors[k]), to_np(v)), k
 
 
 def test_config_is_a_subset_of_pefts():
