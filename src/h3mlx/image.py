@@ -179,12 +179,13 @@ def schedules(sigmas=None) -> Schedules:
     return Schedules(s, s.copy(), two_time=False)
 
 
-def encode_pictures(c: Components, reference_images, float16_round: bool = True) -> list:
+def encode_pictures(c: Components, reference_images, float16_round: bool = True, seed: int = ENCODE_SEED) -> list:
     """`PH3ImageEditVaeEncoderStep`: H3's conditioning recipe per picture, a fresh seed-42 generator each.
-    (`float16_round=False`: `vae.encode_condition`'s variant without the float16 round trip, for training.)"""
+    (`float16_round=False`: `vae.encode_condition`'s variant without the float16 round trip, for training. `seed`:
+    another seed for each picture's generator, for a training cache that names its own.)"""
     out = []
     for im in reference_images:
-        fresh = Noise(ENCODE_SEED)
+        fresh = Noise(seed)
 
         def noise_cl(shape_cl, fresh=fresh):  # torch draws (B, C, F, H, W); hand back channels-last
             b, f, h, w, ch = shape_cl
