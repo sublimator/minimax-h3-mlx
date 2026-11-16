@@ -336,6 +336,48 @@ def test_the_loop_overfits_one_example(release, tmp_path, capsys):
     assert record["final_adapter"]["sha256"] == files.sha256_file(tmp_path / "run" / "adapter.safetensors")
 
 
+def test_the_loop_is_the_pieces_in_order(release, data, tmp_path, capsys):
+    """Six steps of the script, with every hyper-parameter at a value of its own, against the same six steps written
+    out here from the pieces each tested elsewhere: the step's seeds, the level from the density and the grid, the
+    example builder, the plain gradient (`train.loss_and_gradients`, which is torch's), AdamW and the clip. The
+    trained matrices agree to 1e-7, and the recorded losses and norms are the hand loop's. A hyper-parameter that did
+    not reach the loop, or reached the wrong place, would show here."""
+    hyper = {"--learning-rate": ["3e-4"], "--betas": ["0.8", "0.95"], "--eps": ["1e-6"], "--weight-decay": ["0.1"],
+             "--max-grad-norm": ["0.07"], "--shift": ["5.0"], "--grid": ["500"], "--density": ["mode"], "--mode-scale": ["1.29"],
+             "--weighting": ["sigma_sqrt"], "--condition-t": ["0.9"], "--seed": ["9"], "--max-steps": ["6"], "--rank": ["3"], "--alpha": ["6"]}
+    argv = arguments(release, data, tmp_path / "cache", tmp_path / "run", **hyper)
+    asked = fill_cache(argv)
+    assert run(argv) == 0
+    record = record_of(tmp_path / "run")
+
+    base, cfg = load.load_transformer(release / "transformer")
+    entries = [cache.read(tmp_path / "cache", request) for request in asked]
+    modules = trainer.adapter_modules(cfg, ["attn.to_q", "attn.to_v", "ff.net.2"], True)
+    adapter = lora.init(cfg, 3, 6.0, modules, seed=trainer.step_seed(9, 0, "init"))
+    frozen, trainable = lora.split(lora.attach(base, cfg, adapter, keep_dtype=True, name="hand"), "hand")
+    optimizer = train.adamw(learning_rate=3e-4, betas=(0.8, 0.95), eps=1e-6, weight_decay=0.1)
+    grid = train.training_sigmas(500, 5.0)
+    for step in range(6):
+        entry = entries[trainer.example_at(9, step, 2)]
+        u = train.density_for_timestep_sampling("mode", 1, mode_scale=1.29, generator=torch.Generator().manual_seed(trainer.step_seed(9, step, "level")))
+        sigma = train.sample_sigmas(u, grid)[0][0]
+        weight = float(train.loss_weighting_for_sd3("sigma_sqrt", np.float32([sigma]))[0])
+        example = train.build_example(cfg, entry.text_token_tags, entry.latents, sigma, Noise(trainer.step_seed(9, step, "noise")),
+                                      condition_t=0.9, condition_latents=entry.condition_latents)
+        loss, grads = train.loss_and_gradients(trainable, frozen, cfg, example, entry.text, weight)
+        trainable, norm = train.optimizer_step(optimizer, trainable, grads, max_grad_norm=0.07)
+        logged = record["losses"][step]
+        assert logged["sigma"] == float(sigma) and abs(logged["weight"] - weight) < 1e-9
+        assert abs(logged["loss"] - float(loss)) <= 1e-6 * float(loss) and abs(logged["grad_norm"] - norm) <= 1e-6 * norm
+    assert any(x["grad_norm"] > 0.07 for x in record["losses"]) and any(x["grad_norm"] < 0.07 for x in record["losses"])
+    trained = lora.load(tmp_path / "run" / "adapter.safetensors")
+    by_hand = lora.file_tensors(trainable, "hand")
+    assert set(trained.tensors) == set(by_hand)
+    worst = max(float(mx.abs(trained.tensors[k] - by_hand[k]).max()) for k in by_hand)
+    moved = max(float(mx.abs(by_hand[k] - adapter.tensors[k]).max()) for k in by_hand)
+    assert worst < 1e-7 and moved > 1e-3, (worst, moved)
+
+
 def test_the_record_holds_the_run(work, capsys):
     """`run.json` after a finished run: every argument, the versions, the seed, the step reached and a loss per step
     with the example, the level, the gradient's norm, the seconds and MLX's peak memory. The examples come in a new
@@ -703,6 +745,21 @@ def test_checkpoints_are_whole_or_absent(work, capsys, monkeypatch):
     leftover.mkdir()
     (leftover / "adapter.safetensors").write_bytes(b"half")
     assert trainer.latest_checkpoint(run_dir).name == "step-00000005"
+
+    # a writer that dies between the checkpoint's two files, with no chance to clean up (a kill): what it leaves is
+    # under a temporary name, so the half-written step 10 is not there to be resumed from
+    def dies(*a, **kw):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(train, "optimizer_state", dies)
+        patch.setattr(trainer.shutil, "rmtree", lambda *a, **kw: None)
+        with pytest.raises(KeyboardInterrupt):
+            run(argv() + ["--resume"])
+    names = sorted(p.name for p in (run_dir / "checkpoints").iterdir())
+    assert [n for n in names if not n.startswith(files.TMP)] == ["step-00000005"] and len(names) == 3
+    assert any(n.endswith("step-00000010") and n.startswith(files.TMP) for n in names)
+    assert record_of(run_dir)["status"] == "interrupted"
     assert run(argv() + ["--resume"]) == 0
     assert sorted(p.name for p in (run_dir / "checkpoints").iterdir()) == ["step-00000005", "step-00000010", "step-00000012"]
     described = json.loads((run_dir / "checkpoints" / "step-00000010" / "checkpoint.json").read_text())
@@ -729,6 +786,17 @@ def test_every_draw_is_a_function_of_the_seed_and_the_step():
             assert sorted(trainer.example_at(5, epoch * count + i, count) for i in range(count)) == list(range(count))
     assert [trainer.example_at(5, i, 7) for i in range(7)] != [trainer.example_at(5, 7 + i, 7) for i in range(7)]
     assert [trainer.example_at(5, i, 7) for i in range(7)] != [trainer.example_at(6, i, 7) for i in range(7)]
+    # the adapter's start and each picture's posterior seed come from seeds too
+    spec = {"adapter": {"rank": 2, "alpha": 2.0, "targets": ["attn.to_q"], "refiner": False}, "hyper": {"seed": 5}}
+    first, again = trainer.start_adapter(TINY, spec), trainer.start_adapter(TINY, spec)
+    other = trainer.start_adapter(TINY, {**spec, "hyper": {"seed": 6}})
+    key = "transformer_blocks.0.attn.to_q.lora_A.weight"
+    assert np.array_equal(to_np(first.tensors[key]), to_np(again.tensors[key]))
+    assert not np.array_equal(to_np(first.tensors[key]), to_np(other.tensors[key]))
+    assert not to_np(first.tensors[key.replace("lora_A", "lora_B")]).any(), "PEFT's start: lora_B zero"
+    a, b = files.sha256_json("one picture"), files.sha256_json("another")
+    assert T.picture_seed(11, a) == T.picture_seed(11, a) != T.picture_seed(11, b)
+    assert T.picture_seed(12, a) != T.picture_seed(11, a) and 0 <= T.picture_seed(11, a) < 2**63
     hyper = {"seed": 5, "weighting": "sigma_sqrt", "density": {"scheme": "mode", "logit_mean": None, "logit_std": None, "mode_scale": 1.29}}
     grid = train.training_sigmas(1000, 3.0)
     levels = [trainer.noise_level(hyper, grid, step) for step in range(20)]
