@@ -78,6 +78,31 @@ def test_density_guards():
     assert np.array_equal(train.density_for_timestep_sampling("uniform", 1000), uniform)
 
 
+def test_density_parameters_are_required_and_finite():
+    """Leave out a scheme's parameter and theirs raises a TypeError (None times a tensor, or torch.normal's argument
+    check); ours raises one too, where it used to return NaN for `mode`. Give a NaN or an infinite parameter and
+    theirs returns values that are NaN, infinite, or pinned at 0 and 1, without a word; ours raises. A negative or NaN
+    std is torch.normal's own RuntimeError on both sides, and a zero std gives 0.5 on both."""
+    nan, inf = float("nan"), float("inf")
+    for scheme, kw in (("mode", {}), ("logit_normal", {}), ("logit_normal", dict(logit_mean=0.0)), ("logit_normal", dict(logit_std=1.0))):
+        with pytest.raises(TypeError):
+            compute_density_for_timestep_sampling(scheme, 4, **kw)
+        with pytest.raises(TypeError, match="is required"):
+            train.density_for_timestep_sampling(scheme, 4, **kw)
+    for scheme, kw in (("mode", dict(mode_scale=nan)), ("mode", dict(mode_scale=inf)),
+                       ("logit_normal", dict(logit_mean=nan, logit_std=1.0)), ("logit_normal", dict(logit_mean=inf, logit_std=1.0)),
+                       ("logit_normal", dict(logit_mean=0.0, logit_std=inf))):
+        theirs = compute_density_for_timestep_sampling(scheme, 8, generator=torch.Generator().manual_seed(0), **kw)
+        assert not ((theirs > 0) & (theirs < 1)).any(), "theirs: nothing usable, and no error"
+        with pytest.raises(ValueError, match="must be finite"):
+            train.density_for_timestep_sampling(scheme, 8, generator=torch.Generator().manual_seed(0), **kw)
+    for call in (compute_density_for_timestep_sampling, train.density_for_timestep_sampling):
+        for std in (-1.0, -inf, nan):
+            with pytest.raises(RuntimeError, match="std >= 0"):
+                call("logit_normal", 4, logit_mean=0.0, logit_std=std)
+        assert np.array_equal(np.asarray(call("logit_normal", 4, logit_mean=0.0, logit_std=0.0)), np.full(4, 0.5, np.float32))
+
+
 # --- the loss weighting ------------------------------------------------------------------------------------------------
 
 
@@ -96,6 +121,27 @@ def test_loss_weighting_values():
     assert np.array_equal(train.loss_weighting_for_sd3("sigma_sqrt", half), np.float32([4.0, 1.0, 16.0]))
     assert np.allclose(train.loss_weighting_for_sd3("cosmap", half), [4 / np.pi, 2 / np.pi, 2 / (np.pi * 0.625)], rtol=1e-6)
     assert np.array_equal(train.loss_weighting_for_sd3("none", half), np.ones(3, np.float32))
+
+
+def test_loss_weighting_takes_float32_or_float64_only():
+    """An `mx.array` of float32 levels is taken like numpy's, bit for bit theirs. Half precision is refused: theirs
+    computes a bf16 tensor's weighting in bf16 (shown: not the float32 values), which a numpy result can't hold, and an
+    upcast nobody asked for would be neither. Integers are refused too."""
+    import mlx.core as mx
+
+    levels = np.float32([0.5, 0.3, 0.9])
+    for scheme in ("sigma_sqrt", "cosmap", "none"):
+        want = compute_loss_weighting_for_sd3(scheme, torch.from_numpy(levels)).numpy()
+        got = train.loss_weighting_for_sd3(scheme, mx.array(levels))
+        assert got.dtype == np.float32 and np.array_equal(got, want)
+        in_bf16 = compute_loss_weighting_for_sd3(scheme, torch.from_numpy(levels).to(torch.bfloat16))
+        if scheme != "none":
+            assert not np.array_equal(in_bf16.float().numpy(), want), "theirs on bf16 is bf16 arithmetic"
+        for refused in (mx.array(levels).astype(mx.bfloat16), mx.array(levels).astype(mx.float16), levels.astype(np.float16),
+                        np.array([1, 2]), mx.array([1, 2])):
+            with pytest.raises(ValueError, match="float32 or float64"):
+                train.loss_weighting_for_sd3(scheme, refused)
+    assert train.loss_weighting_for_sd3("cosmap", [0.5, 0.25]).dtype == np.float64, "Python floats are float64, as numpy's"
 
 
 # --- the grid ----------------------------------------------------------------------------------------------------------
@@ -167,6 +213,22 @@ def test_same_seed_nearly_same_sigmas_otherwise(scheme, kw):
         moved, total = moved + int(diff.sum()), total + diff.size
     print(f"{scheme} {kw}: {moved} of {total} draws on a neighbouring level")
     assert moved <= total // 2000
+
+
+def test_sample_sigmas_refuses_nan_and_a_bad_grid():
+    """A NaN is neither below 0 nor above 1, so a range test written that way lets it through; cast to an index it is
+    0 on this hardware, sigma 1.0: pure noise for every such draw, and no error. The torch lookup does the same. Ours
+    raises. An empty grid was an IndexError and a 2-D one returned whole rows; both are refused."""
+    grid = train.training_sigmas(1000, 12.0)
+    nan = float("nan")
+    theirs, theirs_i = torch_lookup(torch.tensor([nan, 0.5]), torch.from_numpy(grid))
+    assert theirs_i.tolist() == [0, 500] and float(theirs[0]) == 1.0  # arm64's float-to-integer cast of a NaN
+    for u in (np.float32([nan, 0.5]), np.float32([0.5, nan]), [nan], np.float32(nan)):
+        with pytest.raises(ValueError, match="a NaN does not"):
+            train.sample_sigmas(u, grid)
+    for bad in ([], np.zeros((0,), np.float32), grid.reshape(10, 100), np.float32(0.5)):
+        with pytest.raises(ValueError, match="one non-empty row"):
+            train.sample_sigmas([0.5], bad)
 
 
 def test_sample_sigmas_lookup():

@@ -85,6 +85,19 @@ def flow_match_loss(pred: mx.array, target: mx.array, weight=None) -> mx.array:
 # --- sampling the noise level ------------------------------------------------------------------------------------------
 
 
+def _density_parameters(scheme: str, **parameters) -> None:
+    """A scheme's parameters must be given (a TypeError when one is not, as theirs raises) and finite (theirs returns
+    NaN, infinite or pinned values for a NaN or infinite parameter, without a word). A std that is negative or NaN is
+    left to `torch.normal`, which raises its own RuntimeError for it, in theirs too."""
+    for name, value in parameters.items():
+        if value is None:
+            raise TypeError(f"`{name}` is required for the {scheme!r} density")
+        if name == "logit_std" and not value >= 0:
+            continue
+        if not math.isfinite(value):
+            raise ValueError(f"`{name}` must be finite for the {scheme!r} density, got {value}")
+
+
 def density_for_timestep_sampling(weighting_scheme: str, batch_size: int, logit_mean: float | None = None,
                                   logit_std: float | None = None, mode_scale: float | None = None,
                                   generator=None) -> np.ndarray:
@@ -96,13 +109,18 @@ def density_for_timestep_sampling(weighting_scheme: str, batch_size: int, logit_
 
     The draw is torch's, from `generator` (a `torch.Generator`; None is torch's global one), so it is the same stream
     as theirs. The arithmetic after it is numpy float32 in their order: equal to theirs bit for bit except for the
-    sigmoid's `exp` and the `cos`, which numpy and torch round differently in the last place or two."""
+    sigmoid's `exp` and the `cos`, which numpy and torch round differently in the last place or two.
+
+    A scheme's own parameters are required, as in theirs (TypeError), and must be finite, which theirs does not check
+    (ValueError here). A negative or NaN `logit_std` is torch's own RuntimeError on both sides."""
     import torch
 
     if weighting_scheme == "logit_normal":
+        _density_parameters(weighting_scheme, logit_mean=logit_mean, logit_std=logit_std)
         u = torch.normal(mean=logit_mean, std=logit_std, size=(batch_size,), generator=generator).numpy()
         return (np.float32(1) / (np.float32(1) + np.exp(-u))).astype(np.float32)
     if weighting_scheme == "mode":
+        _density_parameters(weighting_scheme, mode_scale=mode_scale)
         u = torch.rand(size=(batch_size,), generator=generator).numpy()
         c = np.cos(np.float32(math.pi) * u / np.float32(2))
         return (np.float32(1) - u - np.float32(mode_scale) * (c * c - np.float32(1) + u)).astype(np.float32)
@@ -110,16 +128,23 @@ def density_for_timestep_sampling(weighting_scheme: str, batch_size: int, logit_
 
 
 def loss_weighting_for_sd3(weighting_scheme: str, sigmas) -> np.ndarray:
-    """diffusers' `compute_loss_weighting_for_sd3`, on float32 (or float64) noise levels.
+    """diffusers' `compute_loss_weighting_for_sd3`, on float32 or float64 noise levels (numpy, or an `mx.array`).
 
     * `"sigma_sqrt"`: `sigma ** -2`, which torch computes as `1 / (sigma * sigma)`; float32 (infinite at sigma 0).
     * `"cosmap"`: `2 / (pi * (1 - 2 * sigma + 2 * sigma ** 2))`, in the input's dtype.
     * anything else: ones.
 
-    `sigma` is the noise level in both conventions (1 is pure noise), so nothing changes for this model's `1 - t`."""
+    `sigma` is the noise level in both conventions (1 is pure noise), so nothing changes for this model's `1 - t`.
+
+    Half-precision and integer levels are refused. Theirs computes a bf16 tensor's weighting in bf16, three digits of
+    it; the numpy result here can't hold bf16, and upcasting without saying so would be neither theirs nor exact."""
+    if isinstance(sigmas, mx.array):
+        if sigmas.dtype not in (mx.float32, mx.float64):
+            raise ValueError(f"sigmas must be float32 or float64, got {sigmas.dtype}: cast them first")
+        sigmas = np.array(sigmas)
     s = np.asarray(sigmas)
     if s.dtype not in (np.float32, np.float64):
-        s = s.astype(np.float32)
+        raise ValueError(f"sigmas must be float32 or float64, got {s.dtype}: cast them first")
     one, two = s.dtype.type(1), s.dtype.type(2)
     if weighting_scheme == "sigma_sqrt":
         return (one / (s * s)).astype(np.float32)
@@ -145,10 +170,17 @@ def sample_sigmas(u, grid) -> tuple[np.ndarray, np.ndarray]:
     """One noise level per `u`: `grid[floor(u * len(grid))]`, the multiplication in float32 (an SD3-style trainer's
     `(u * num_train_timesteps).long()` lookup). Returns (sigmas, indices). `u = 1.0` would index one past the end,
     which torch refuses; it is given the last level here (the logit-normal sigmoid rounds to 1.0 for a large draw, and
-    `"mode"` maps a draw of 0 to 1.0). The model's timestep for a level is `1 - sigma` in float32."""
+    `"mode"` maps a draw of 0 to 1.0). The model's timestep for a level is `1 - sigma` in float32; `scale_noise` takes
+    those as `mx.array(1 - sigmas)`.
+
+    Every `u` must lie in [0, 1], which a NaN does not: cast to an index a NaN is 0 on this hardware, pure noise for
+    every such draw, here and in the torch lookup. The grid must be one non-empty row of levels."""
     grid = np.asarray(grid)
+    if grid.ndim != 1 or grid.size == 0:
+        raise ValueError(f"the grid must be one non-empty row of noise levels, got shape {grid.shape}")
     u = np.asarray(u, dtype=np.float32)
-    if u.size and (u.min() < 0 or u.max() > 1):
-        raise ValueError(f"u must lie in [0, 1], got [{u.min()}, {u.max()}]")
+    inside = (u >= 0) & (u <= 1)
+    if not inside.all():
+        raise ValueError(f"every u must lie in [0, 1] (a NaN does not): got {u[~inside][:4].tolist()}")
     indices = np.minimum((u * np.float32(len(grid))).astype(np.int64), len(grid) - 1)
     return grid[indices], indices
