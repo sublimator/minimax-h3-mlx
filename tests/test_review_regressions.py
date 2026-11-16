@@ -50,12 +50,12 @@ def test_setup_accepts_a_good_request():
     assert (h, w, n) == (480, 864, 124) and refs[0].image.size == (2720, 2048)
 
 
-def test_one_step_schedule_raises():  # review H3R1
+def test_one_step_schedule_raises():  # one grid point leaves no sigma to step to: fewer than 2 is refused
     with pytest.raises(ValueError):
         Schedules.make(1)
 
 
-def test_vit_decoder_accepts_bf16_weights():  # review item 5
+def test_vit_decoder_accepts_bf16_weights():  # the decoder runs with its weights in bf16, as the pipeline loads them
     from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoViTDecoder3d
 
     dec = MiniMaxH3VideoViTDecoder3d(in_channels=6, out_channels=3, patch_size=4, patch_size_t=2, num_layers=1,
@@ -81,7 +81,7 @@ def saved_qwen(tmp_path_factory):
     return d
 
 
-def test_text_encoder_has_no_head_and_only_kept_layers(saved_qwen):  # review H3R2
+def test_text_encoder_has_no_head_and_only_kept_layers(saved_qwen):  # lm_head and the layers past the kept ones are not loaded
     from mlx.utils import tree_flatten
 
     model, _ = load.load_text_encoder(saved_qwen, keep_layers=2)
