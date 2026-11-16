@@ -7,8 +7,9 @@ alpha patterns) and from diffusers main at `d3d8af89` (`loaders/peft.py`: `load_
 `loaders/lora_conversion_utils.py`: `_convert_non_diffusers_minimax_h3_lora_to_diffusers`).
 
 An adapter is two matrices per Linear, `lora_A` (rank, in) and `lora_B` (out, rank), and an alpha; the Linear then
-computes `W x + (alpha / rank) * B (A x)` (`ops.plinear`). HyperFlow's own loader stays in `hyperflow.py`: its file
-also carries a second time embedder and a sigma grid, and its scaling is 1.
+computes `W x + (alpha / rank) * B (A x)` (`ops.plinear`). Several adapters can sit on one Linear under names, as in
+PEFT: a frozen one beside a trainable one, each a separate group of weights. HyperFlow's own loader stays in
+`hyperflow.py`: its file also carries a second time embedder and a sigma grid, and its scaling is 1.
 """
 
 import json
@@ -28,6 +29,8 @@ PREFIXES = ("transformer", "transformer_ref")  # the component names a diffusers
 KEY_RE = re.compile(r"^(?P<module>.+)\.lora_(?P<matrix>[AB])\.weight$")
 BLOCK_TARGETS = hyperflow.BLOCK_TARGETS
 SCALING = ".lora_scaling"
+ADAPTERS = ".lora_adapters"  # per Linear: the names of the adapters active on it, in order (`ops.plinear`)
+RUNTIME_RE = re.compile(r"^(?P<module>.+)\.lora_(?P<matrix>[AB])\.(?P<name>[^.]+)\.weight$")  # PEFT's runtime names
 ORIGINAL_PREFIXES = ("diffusion_model.", "blocks.", "token_refiner.blocks.", "final_layer.", "lora_unet_")
 UNSUPPORTED = ("use_dora", "use_rslora", "lora_bias", "fan_in_fan_out")  # metadata flags the port does not implement
 
@@ -59,9 +62,19 @@ class Adapter:
 
 
 def wired_shapes(cfg: dict) -> dict:
-    """{module: (out, in)} for every Linear the forward runs through `ops.plinear`: the six matrices of each block and
-    refiner block, and the time embedder's two. (`hyperflow.wired_shapes` without HyperFlow's endpoint embedder.)"""
-    return {m: s for m, s in hyperflow.wired_shapes(cfg).items() if not m.startswith(hyperflow.ENDPOINT)}
+    """{module: (out, in)} for every Linear of the transformer, all of which the forward runs through `ops.plinear`:
+    the six matrices of each block and refiner block, the time embedder's two, each block's AdaLN projection and the
+    final one, and the input and output projections. These are the `nn.Linear`s of diffusers' model, the modules PEFT
+    can put a LoRA on."""
+    out = {m: s for m, s in hyperflow.wired_shapes(cfg).items() if not m.startswith(hyperflow.ENDPOINT)}
+    hidden, temb = cfg["hidden_size"], cfg["time_embed_dim"]
+    patch_dim = cfg["in_channels"] * math.prod(cfg["patch_size"])
+    out.update({f"transformer_blocks.{i}.adaln_proj.linear": (6 * hidden * ops.MODALITY_NUM, temb)
+                for i in range(cfg["num_layers"])})
+    out.update({"proj_in": (hidden, patch_dim), "audio_proj_in": (hidden, cfg["audio_in_channels"]),
+                "context_embedder": (hidden, cfg["text_dim"]), "norm_out.linear": (2 * hidden, temb),
+                "proj_out": (patch_dim, hidden), "audio_proj_out": (cfg["audio_in_channels"], hidden)})
+    return out
 
 
 def block_modules(cfg: dict, targets=BLOCK_TARGETS) -> list[str]:
@@ -94,14 +107,14 @@ def check_keys(adapter: Adapter) -> None:
 
 
 def check(adapter: Adapter, cfg: dict) -> None:
-    """Every module is a Linear the forward applies a LoRA to (PEFT would wrap any `nn.Linear` a file names; a LoRA on
-    `proj_in` or `adaln_proj` would be silently ignored here, so it is refused), the tensors are exactly those
-    modules' pairs, each pair fits its Linear, and each alpha is a positive, finite number."""
+    """Every module is a Linear of the transformer (the forward applies a LoRA on each of them, and on nothing else: a
+    target that is not one would be silently ignored, so it is refused), the tensors are exactly those modules' pairs,
+    each pair fits its Linear, and each alpha is a positive, finite number."""
     check_keys(adapter)
     wired = wired_shapes(cfg)
     unwired = sorted(m for m in adapter.alpha if m not in wired)
     if unwired:
-        raise ValueError(f"{len(unwired)} LoRA target(s) are not run through ops.plinear here (the port would ignore "
+        raise ValueError(f"{len(unwired)} LoRA target(s) are not Linears of this transformer (the forward would ignore "
                          f"them), e.g. {unwired[:5]}")
     for module in adapter.modules:
         a = tuple(adapter.tensors[module + ".lora_A.weight"].shape)
@@ -148,7 +161,7 @@ def init(cfg: dict, rank: int, alpha: float | None = None, modules=None, seed: i
     tensors = {}
     for module in modules:
         if module not in wired:
-            raise ValueError(f"{module} is not a Linear the forward runs through ops.plinear")
+            raise ValueError(f"{module} is not a Linear of this transformer")
         out_f, in_f = wired[module]
         tensors[module + ".lora_A.weight"] = mx.array(kaiming_uniform((rank, in_f), generator))
         tensors[module + ".lora_B.weight"] = mx.zeros((out_f, rank), dtype=mx.float32)
@@ -158,26 +171,99 @@ def init(cfg: dict, rank: int, alpha: float | None = None, modules=None, seed: i
 # --- attaching and merging -------------------------------------------------------------------------------------------
 
 
-def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False) -> dict:
+def runtime_key(module: str, matrix: str, name: str | None = None) -> str:
+    """A matrix's key in the weights dict: `<module>.lora_A.weight`, or for a named adapter PEFT's runtime name,
+    `<module>.lora_A.<name>.weight`. (In a file neither carries a name: `Adapter.tensors`.)"""
+    return f"{module}.lora_{matrix}.weight" if name is None else f"{module}.lora_{matrix}.{name}.weight"
+
+
+def _carries_lora(params: dict, module: str) -> bool:
+    return module + ".lora_A.weight" in params or module + ADAPTERS in params
+
+
+def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None) -> dict:
     """The transformer's weights with the adapter beside them, for `ops.plinear`; `params` is not modified.
 
     By default each matrix is cast to its base weight's dtype, as PEFT's injection does (`load_lora_adapter`, and
     `hyperflow.attach`). `keep_dtype=True` leaves the adapter as it is: float32 factors over a bf16 base, what
     `cast_training_params` gives a trainer (and what diffusers' `low_cpu_mem_usage=True` loading gives a float32 file).
-    A module whose scaling is not 1 also gets `<module>.lora_scaling`."""
+    A module whose scaling is not 1 also gets a `lora_scaling` entry.
+
+    Without a `name` the adapter is the only one its Linears can carry. With one it is stacked: its matrices go under
+    PEFT's runtime names, and the name is appended to each Linear's `lora_adapters`, so adapters apply in the order
+    they were attached (`set_active` changes that). A named and an unnamed adapter can't share a Linear."""
     check(adapter, cfg)
-    taken = [m for m in adapter.modules if m + ".lora_A.weight" in params]
-    if taken:
-        raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: one adapter per Linear")
+    if name is None:
+        taken = [m for m in adapter.modules if _carries_lora(params, m)]
+        if taken:
+            raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: one unnamed adapter per "
+                             "Linear; give each a name to stack them")
+    else:
+        if not name or "." in name:
+            raise ValueError(f"an adapter name is a non-empty word without dots, got {name!r}")
+        taken = [m for m in adapter.modules if m + ".lora_A.weight" in params or runtime_key(m, "A", name) in params]
+        if taken:
+            raise ValueError(f"{len(taken)} Linear(s) already carry an unnamed LoRA or one named {name!r}, e.g. {taken[:3]}")
     out = dict(params)
     for module in adapter.modules:
         dtype = params[module + ".weight"].dtype
         for matrix in ("A", "B"):
-            key = f"{module}.lora_{matrix}.weight"
-            out[key] = adapter.tensors[key] if keep_dtype else adapter.tensors[key].astype(dtype)
+            tensor = adapter.tensors[f"{module}.lora_{matrix}.weight"]
+            out[runtime_key(module, matrix, name)] = tensor if keep_dtype else tensor.astype(dtype)
         scaling = adapter.scaling(module)
         if scaling != 1.0:
-            out[module + SCALING] = mx.array(scaling, dtype=mx.float32)
+            out[module + SCALING + ("" if name is None else "." + name)] = mx.array(scaling, dtype=mx.float32)
+        if name is not None:
+            out[module + ADAPTERS] = params.get(module + ADAPTERS, ()) + (name,)
+    return out
+
+
+def adapter_names(params: dict) -> list[str]:
+    """The names of the adapters attached to these weights, active or not."""
+    return sorted({m["name"] for m in map(RUNTIME_RE.match, params) if m})
+
+
+def set_active(params: dict, names) -> dict:
+    """The weights with the adapters `names` active, in that order, and every other named adapter switched off: PEFT's
+    `set_adapters`. A Linear applies those of `names` it carries. The matrices of an adapter that is off stay in the
+    dict, unused, so it can be switched back on; `params` is not modified."""
+    names = tuple(names)
+    unknown = sorted(set(names) - set(adapter_names(params)))
+    if unknown or len(set(names)) != len(names):
+        raise ValueError(f"adapters {unknown or list(names)} are not attached, or are named twice; attached: {adapter_names(params)}")
+    out = dict(params)
+    for key in params:
+        if key.endswith(ADAPTERS):
+            module = key[: -len(ADAPTERS)]
+            out[key] = tuple(n for n in names if runtime_key(module, "A", n) in params)
+    return out
+
+
+def split(params: dict, name: str) -> tuple[dict, dict]:
+    """(frozen, trainable): the weights without the two matrices of the adapter `name`, and those matrices alone under
+    their runtime names. The two are separate groups: a trainer differentiates with respect to `trainable` only, and
+    merges them (`{**frozen, **trainable}`) inside the function it differentiates, so the base weights and every other
+    adapter are constants. The adapter's scalings and its place in each Linear's `lora_adapters` stay in `frozen`."""
+    trainable = {k: v for k, v in params.items() if (m := RUNTIME_RE.match(k)) and m["name"] == name}
+    if not trainable:
+        raise ValueError(f"no adapter named {name!r} in these weights; attached: {adapter_names(params)}")
+    return {k: v for k, v in params.items() if k not in trainable}, trainable
+
+
+def runtime_tensors(adapter: Adapter, name: str) -> dict:
+    """An adapter's tensors under their runtime names for `name` (what `split` returns as `trainable`)."""
+    return {runtime_key(m, x, name): adapter.tensors[f"{m}.lora_{x}.weight"] for m in adapter.modules for x in "AB"}
+
+
+def file_tensors(tensors: dict, name: str) -> dict:
+    """The reverse: a named adapter's matrices back under the names they have in a file and in `Adapter.tensors`,
+    `<module>.lora_A/B.weight`, as PEFT strips the adapter's name when it saves."""
+    out = {}
+    for key, value in tensors.items():
+        m = RUNTIME_RE.match(key)
+        if m is None or m["name"] != name:
+            raise ValueError(f"{key!r} is not a matrix of the adapter {name!r}")
+        out[f"{m['module']}.lora_{m['matrix']}.weight"] = value
     return out
 
 
@@ -197,12 +283,12 @@ def merge(params: dict, cfg: dict, adapter: Adapter) -> dict:
     delta_weight`, in the weight's dtype); `params` is not modified, and the result has its keys and nothing of the
     adapter left to apply.
 
-    Attaching and merging are alternatives here. Weights that already carry a LoRA on one of the adapter's Linears are
-    refused: the attached factors would stay in the result, and `plinear` would apply them on top of the merged ones.
-    (A PEFT layer holds both states itself, and its forward skips an adapter once it is merged.) Not for quantized
-    weights."""
+    Attaching and merging are alternatives here. Weights that already carry a LoRA, named or not, on one of the
+    adapter's Linears are refused: the attached factors would stay in the result, and `plinear` would apply them on top
+    of the merged ones. (A PEFT layer holds both states itself, and its forward skips an adapter once it is merged.)
+    Not for quantized weights."""
     check(adapter, cfg)
-    taken = [m for m in adapter.modules if m + ".lora_A.weight" in params]
+    taken = [m for m in adapter.modules if _carries_lora(params, m)]
     if taken:
         raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: merge into the plain "
                          "weights, not into attached ones (the adapter would be applied twice)")

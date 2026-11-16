@@ -108,8 +108,9 @@ BLOCK_TARGETS = ("attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0", "ff.net
 
 
 def wired_shapes(cfg: dict) -> dict:
-    """{module: (out, in)} for every Linear our forward runs through `ops.plinear`, so the only places a LoRA can act.
-    A LoRA anywhere else (proj_in, adaln_proj, norm_out, the heads...) would be ignored by the port, so it is refused."""
+    """{module: (out, in)} for the Linears a HyperFlow file may put a LoRA on: the six matrices of each block and
+    refiner block and the two time embedders' linears, which is exactly what the released file targets. A HyperFlow
+    file that names any other module (proj_in, adaln_proj, norm_out, the heads...) is refused."""
     h, inner, ffn = cfg["hidden_size"], cfg["num_attention_heads"] * cfg["attention_head_dim"], cfg["ffn_dim"]
     per_block = {"attn.to_q": (inner, h), "attn.to_k": (inner, h), "attn.to_v": (inner, h),
                  "attn.to_out.0": (h, inner), "ff.net.0.proj": (2 * ffn, h), "ff.net.2": (h, ffn)}
@@ -131,15 +132,15 @@ def _base_name(module: str) -> str:
 
 def check_plan(plan: dict, shapes: dict, base_shapes: dict, meta: HyperFlowMeta, wired=None) -> int:
     """Every LoRA lands on a Linear weight of the right shape, one rank throughout, scaling 1. `shapes` maps the file's
-    keys to their shapes, `base_shapes` our parameter names to theirs, `wired` the modules `ops.plinear` serves (any
-    other target is refused: the port would silently skip it). Returns the rank."""
+    keys to their shapes, `base_shapes` our parameter names to theirs, `wired` the modules a HyperFlow file may target
+    (any other is refused). Returns the rank."""
     if not plan:
         raise ValueError("no LoRA tensors in this file")
     if wired is not None:
         unwired = sorted(m for m in plan if m not in wired)
         if unwired:
-            raise ValueError(f"{len(unwired)} LoRA target(s) are not run through ops.plinear here (the port would ignore "
-                             f"them), e.g. {unwired[:5]}")
+            raise ValueError(f"{len(unwired)} LoRA target(s) are not run through ops.plinear for a HyperFlow file (its "
+                             f"adapter sits on the block, refiner and time-embedder linears only), e.g. {unwired[:5]}")
     no_base = [m for m in plan if _base_name(m) + ".weight" not in base_shapes]
     if no_base:
         raise KeyError(f"{len(no_base)} LoRA target(s) have no Linear weight in this transformer, e.g. {no_base[:5]}")

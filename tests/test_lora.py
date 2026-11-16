@@ -758,16 +758,16 @@ def test_refusals(tmp_path):
     hf_tensors, hf_md = make_file(model, TINY)
     hf_params, hf_cfg = hyperflow.attach(base, cfg, {k: to_mx(v) for k, v in hf_tensors.items()},
                                          hyperflow.HyperFlowMeta.from_header(hf_md))
-    with pytest.raises(ValueError, match="already carry a LoRA"):  # two adapters on one Linear: not yet
+    with pytest.raises(ValueError, match="already carry a LoRA"):  # an unnamed adapter shares its Linears with none
         lora.attach(hf_params, hf_cfg, adapter)
 
-    # a LoRA the forward would silently skip
-    for module, shape_a, shape_b in (("proj_in", (4, 16), (48, 4)), ("transformer_blocks.0.adaln_proj.linear", (4, 24), (864, 4)),
+    # a target that is not one of the transformer's Linears: the forward would silently skip a LoRA there
+    for module, shape_a, shape_b in (("transformer_blocks.0.norm1", (4, 48), (48, 4)), ("nowhere.linear", (4, 16), (48, 4)),
                                      ("endpoint_time_embedder.linear_1", (4, 32), (40, 4))):
         extra = lora.read({**t, module + ".lora_A.weight": mx.zeros(shape_a), module + ".lora_B.weight": mx.zeros(shape_b)})
-        with pytest.raises(ValueError, match="not run through ops.plinear"):
+        with pytest.raises(ValueError, match="not Linears of this transformer"):
             lora.attach(base, cfg, extra)
-        with pytest.raises(ValueError, match="not run through ops.plinear"):
+        with pytest.raises(ValueError, match="not Linears of this transformer"):
             lora.merge(base, cfg, extra)
     with pytest.raises(ValueError, match="do not fit"):
         lora.attach(base, cfg, lora.read({**t, "transformer_blocks.0.attn.to_q.lora_A.weight": mx.zeros((4, 7))}))
@@ -809,7 +809,7 @@ def test_refusals(tmp_path):
     with pytest.raises(ValueError, match="positive"):
         lora.init(cfg, rank=0)
     with pytest.raises(ValueError, match="not a Linear"):
-        lora.init(cfg, rank=4, modules=["proj_in"])
+        lora.init(cfg, rank=4, modules=["transformer_blocks.0.norm1"])
     quantized = load.quantize_transformer(state_mx(MiniMaxH3(dict(TINY, hidden_size=64, ffn_dim=128))), 8, 32)
     q_cfg = dict(TINY, hidden_size=64, ffn_dim=128)
     q_adapter = lora.init(q_cfg, rank=4)

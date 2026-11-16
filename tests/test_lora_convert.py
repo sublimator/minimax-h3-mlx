@@ -319,15 +319,29 @@ def test_bad_alpha_is_refused(alpha):
         assert all(not v.any() for v in theirs.values()), "diffusers: an adapter of zeros"
 
 
-def test_unwired_converted_modules_are_refused_at_attach():
-    """The converter maps the AdaLN, patch, condition and final projections, as diffusers' does, but our forward runs
-    no LoRA there: attaching refuses them rather than dropping them."""
+def test_every_converted_module_attaches_and_gives_the_same_forward():
+    """The converter also maps LoRAs on the AdaLN projections and on the patch, condition and final projections.
+    diffusers loads each onto its Linear, where it acts; so does the port, whose forward runs every Linear of the model
+    through `plinear`. The whole converted adapter gives diffusers' forward, and each group of those modules counts."""
     model = randomised(TINY, 2)
-    adapter = lora.read(as_mx(original_file(TINY, "ai-toolkit", wired_only=False)))
-    assert "transformer_blocks.0.adaln_proj.linear" in adapter.modules and "proj_in" in adapter.modules
-    with pytest.raises(ValueError, match="not run through ops.plinear"):
-        lora.attach(state_mx(model), dict(TINY), adapter)
-    wired = lora.wired_shapes(TINY)
-    kept = lora.Adapter({k: v for k, v in adapter.tensors.items() if k.rsplit(".lora_", 1)[0] in wired},
-                        {m: a for m, a in adapter.alpha.items() if m in wired})
-    assert "transformer_blocks.0.attn.to_q.lora_A.weight" in lora.attach(state_mx(model), dict(TINY), kept)
+    sd = original_file(TINY, "kohya", wired_only=False)
+    state_dict, metadata = MiniMaxH3LoraLoaderMixin.lora_state_dict(dict(sd), return_lora_metadata=True)
+    loaded = copy.deepcopy(model)
+    loaded.load_lora_adapter(state_dict, metadata=metadata)
+    adapter = lora.read(as_mx(sd))
+    assert adapter.modules == sorted(peft_layers(loaded)) == sorted(lora.wired_shapes(TINY))
+    assert len(adapter.modules) == 28, "every nn.Linear of the tiny model"
+    lay, args = inputs()
+    want = torch_forward(loaded, lay, args)
+    base = state_mx(model)
+    got = mlx_forward(lora.attach(base, dict(TINY), adapter), dict(TINY), lay, args)
+    assert_close(got[0], want[0], atol=2e-4, rtol=2e-4, what="video velocity")
+    assert_close(got[1], want[1], atol=2e-4, rtol=2e-4, what="audio velocity")
+    groups = {"the AdaLN projections": ("adaln_proj.linear", "norm_out.linear"), "the video projections": ("proj_in", "proj_out"),
+              "the audio projections": ("audio_proj_in", "audio_proj_out"), "the text projection": ("context_embedder",)}
+    for what, names in groups.items():  # guards: leave a group's LoRAs out and the output moves
+        keep = [m for m in adapter.modules if not m.endswith(names)]
+        fewer = lora.Adapter({k: v for k, v in adapter.tensors.items() if k.rsplit(".lora_", 1)[0] in keep},
+                             {m: adapter.alpha[m] for m in keep})
+        without = mlx_forward(lora.attach(base, dict(TINY), fewer), dict(TINY), lay, args)
+        assert max(rel_err(without[0], want[0]), rel_err(without[1], want[1])) > GUARD, what

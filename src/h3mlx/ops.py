@@ -111,8 +111,26 @@ def plinear(x: mx.array, p: dict, name: str, bias: bool = False) -> mx.array:
     PEFT's lora.Linear: the input is cast to the adapter's dtype, the two products round in that dtype, the delta is
     multiplied by the scaling (alpha / rank), and the sum is cast back to the base result's dtype. The scaling is the
     0-d float32 array `name.lora_scaling`, which `lora.attach` adds when it is not 1; without it the `* scaling` is
-    exact and left out (HyperFlow's path: `hyperflow.attach` refuses any other scaling)."""
+    exact and left out (HyperFlow's path: `hyperflow.attach` refuses any other scaling).
+
+    Named adapters: `name.lora_adapters`, when present, is the tuple of the adapters active on this Linear, in order,
+    and each one's matrices are under PEFT's runtime names, `name.lora_A.<adapter>.weight` and
+    `name.lora_B.<adapter>.weight`, with an optional `name.lora_scaling.<adapter>`. PEFT's loop is followed to the
+    letter: the input is cast to each adapter's dtype in turn and that cast carries over to the next adapter, each
+    scaled delta is added to the running result, and the result is cast back once at the end."""
     y = linear(x, p[name + ".weight"], p[name + ".bias"] if bias else None)
+    adapters = p.get(name + ".lora_adapters")
+    if adapters is not None:
+        out = y
+        for adapter in adapters:
+            a = p[f"{name}.lora_A.{adapter}.weight"]
+            x = x.astype(a.dtype)
+            delta = linear(linear(x, a), p[f"{name}.lora_B.{adapter}.weight"])
+            scaling = p.get(f"{name}.lora_scaling.{adapter}")
+            if scaling is not None:
+                delta = times_scalar(delta, scaling)
+            out = out + delta
+        return out.astype(y.dtype)
     a = p.get(name + ".lora_A.weight")
     if a is None:
         return y
@@ -129,7 +147,13 @@ def adaln_modulation(temb: mx.array, w: mx.array, b: mx.array, hidden_size: int)
     Order: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp. silu at temb's precision, then cast to
     the projection's dtype.
     """
-    out = linear(silu(temb).astype(w.dtype), w, b)
+    return adaln_tables(temb, {"linear.weight": w, "linear.bias": b}, hidden_size, "linear")
+
+
+def adaln_tables(temb: mx.array, p: dict, hidden_size: int, name: str = "adaln_proj.linear") -> list[mx.array]:
+    """`adaln_modulation` from the weights dict `p`: the projection `name` goes through `plinear`, so a LoRA on it
+    counts (diffusers loads one onto this Linear like any other)."""
+    out = plinear(silu(temb).astype(p[name + ".weight"].dtype), p, name, bias=True)
     out = out.reshape(-1, 6 * hidden_size)
     return mx.split(out, 6, axis=-1)
 
@@ -143,9 +167,15 @@ def norm_out(
     x: mx.array, temb: mx.array, norm_w: mx.array, w: mx.array, b: mx.array, timestep_indices: mx.array, eps: float
 ) -> mx.array:
     """MiniMaxH3AdaLayerNormOut: RMSNorm, then shift/scale (in that order) picked per row by timestep index."""
-    shift, scale = mx.split(linear(silu(temb).astype(w.dtype), w, b), 2, axis=-1)
+    shift, scale = norm_out_tables(temb, {"linear.weight": w, "linear.bias": b}, "linear")
     h = rms_norm(x, norm_w, eps)
     return h * (1.0 + mx.take(scale, timestep_indices, axis=0)) + mx.take(shift, timestep_indices, axis=0)
+
+
+def norm_out_tables(temb: mx.array, p: dict, name: str = "norm_out.linear") -> list[mx.array]:
+    """MiniMaxH3AdaLayerNormOut's [shift, scale] per distinct timestep, from the weights dict `p`: the projection
+    `name` goes through `plinear`, so a LoRA on it counts."""
+    return mx.split(plinear(silu(temb).astype(p[name + ".weight"].dtype), p, name, bias=True), 2, axis=-1)
 
 
 # --- attention ---------------------------------------------------------------------------------------------------
@@ -356,7 +386,7 @@ def dit_block(
     """Pre-norm attention and SwiGLU FF, each shift/scale-modulated and gated per row from the (t, modality) table.
     `modulation`: the six precomputed tables (from `ModulationCache`) instead of projecting `temb` here."""
     if modulation is None:
-        modulation = adaln_modulation(temb, p["adaln_proj.linear.weight"], p["adaln_proj.linear.bias"], hidden_size)
+        modulation = adaln_tables(temb, p, hidden_size)
     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation
     sub = lambda prefix: {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}  # noqa: E731
     h = modulate(rms_norm(x, p["norm1.weight"], norm_eps), shift_msa, scale_msa, adaln_indices)
@@ -408,9 +438,9 @@ def dit_forward(
     rotary = rope_cos_sin(position_ids, rope_inv_freq(cfg["rope_freq_dim"], cfg["rope_theta"]))
 
     #@@start project-and-scatter
-    v = linear(video.astype(p["proj_in.weight"].dtype), p["proj_in.weight"], p["proj_in.bias"])
-    a = linear(audio.astype(p["audio_proj_in.weight"].dtype), p["audio_proj_in.weight"], p["audio_proj_in.bias"])
-    t = linear(text.astype(p["context_embedder.weight"].dtype), p["context_embedder.weight"], p["context_embedder.bias"])
+    v = plinear(video.astype(p["proj_in.weight"].dtype), p, "proj_in", bias=True)
+    a = plinear(audio.astype(p["audio_proj_in.weight"].dtype), p, "audio_proj_in", bias=True)
+    t = plinear(text.astype(p["context_embedder.weight"].dtype), p, "context_embedder", bias=True)
     t = token_refiner(t, _sub(p, "token_refiner."), cfg["num_refiner_layers"], heads, eps, qk_eps, final_eps)
 
     x = mx.zeros((t.shape[0], seq, t.shape[-1]), dtype=t.dtype)
@@ -438,16 +468,12 @@ def dit_forward(
     #@@end adaln-rows-and-blocks
 
     #@@start norm-out-and-heads
-    if cache is None:
-        x = norm_out(x, temb, p["norm_out.norm.weight"], p["norm_out.linear.weight"], p["norm_out.linear.bias"],
-                     timestep_indices, final_eps)
-    else:
-        shift, scale = call_out
-        h = rms_norm(x, p["norm_out.norm.weight"], final_eps)
-        x = h * (1.0 + mx.take(scale, t_rows, axis=0)) + mx.take(shift, t_rows, axis=0)
+    shift, scale = norm_out_tables(temb, p) if cache is None else call_out
+    h = rms_norm(x, p["norm_out.norm.weight"], final_eps)
+    x = h * (1.0 + mx.take(scale, t_rows, axis=0)) + mx.take(shift, t_rows, axis=0)
     x = x.astype(p["proj_out.weight"].dtype)
-    vid = linear(x, p["proj_out.weight"], p["proj_out.bias"])[:, video_indices]
-    aud = linear(x, p["audio_proj_out.weight"], p["audio_proj_out.bias"])[:, audio_indices]
+    vid = plinear(x, p, "proj_out", bias=True)[:, video_indices]
+    aud = plinear(x, p, "audio_proj_out", bias=True)[:, audio_indices]
     #@@end norm-out-and-heads
     return vid, aud
 
@@ -485,18 +511,25 @@ class ModulationCache:
         hidden = cfg["hidden_size"]
         self.blocks = [[] for _ in arrays]  # [call][block] -> the six tables
         for i in range(cfg["num_layers"]):
-            b = f"transformer_blocks.{i}.adaln_proj.linear."
-            tables = [adaln_modulation(temb, p[b + "weight"], p[b + "bias"], hidden) for temb in tembs]
+            name = f"transformer_blocks.{i}.adaln_proj.linear"
+            tables = [adaln_tables(temb, p, hidden, name) for temb in tembs]
             mx.eval(tables)
             for c, tab in enumerate(tables):
                 self.blocks[c].append(tab)
             if drop:
-                del p[b + "weight"], p[b + "bias"]
-        w, bias = p["norm_out.linear.weight"], p["norm_out.linear.bias"]
-        self.out = [mx.split(linear(silu(temb).astype(w.dtype), w, bias), 2, axis=-1) for temb in tembs]
+                for k in self._projection_keys(p, name):
+                    del p[k]
+        self.out = [norm_out_tables(temb, p) for temb in tembs]
         mx.eval(self.out)
         if drop:
-            del p["norm_out.linear.weight"], p["norm_out.linear.bias"]
+            for k in self._projection_keys(p, "norm_out.linear"):
+                del p[k]
+
+    @staticmethod
+    def _projection_keys(p: dict, name: str) -> list[str]:
+        """The keys of one projection the cache replaces: its weight, its bias, and any LoRA on it (which the tables
+        already include)."""
+        return [k for k in p if k in (name + ".weight", name + ".bias") or k.startswith(name + ".lora_")]
 
     @staticmethod
     def row(timestep) -> np.ndarray:
@@ -521,6 +554,6 @@ class ModulationCache:
     def drop_weights(p: dict, cfg: dict) -> dict:
         """A new dict without the projections the cache replaces. The memory is freed only when nothing else (e.g. the
         caller's original dict) still references those arrays."""
-        gone = {f"transformer_blocks.{i}.adaln_proj.linear.{n}" for i in range(cfg["num_layers"]) for n in ("weight", "bias")}
-        gone |= {"norm_out.linear.weight", "norm_out.linear.bias"}
+        names = [f"transformer_blocks.{i}.adaln_proj.linear" for i in range(cfg["num_layers"])] + ["norm_out.linear"]
+        gone = {k for name in names for k in ModulationCache._projection_keys(p, name)}
         return {k: v for k, v in p.items() if k not in gone}
