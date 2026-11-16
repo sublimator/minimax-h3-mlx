@@ -254,7 +254,7 @@ musubi-tuner's flattened names against the same ten patterns.
 A kohya-style file stores an `.alpha` scalar beside each pair. The converter multiplies `alpha / rank` into the two
 matrices, balancing the factor between them, and drops the scalar. The result therefore has scaling 1.
 
-{{ code('src/h3mlx/lora.py', function='convert_original', marker='alpha-fold') }}
+{{ code('src/h3mlx/lora.py', marker='alpha-fold') }}
 
 - **The products round as torch's.** The fold multiplies each matrix by a Python float, so it uses `times_scalar`
   (§1.1). With bf16 or float16 matrices and a rank that is not a power of two, MLX's plain product gives other bits;
@@ -275,7 +275,7 @@ matrices, balancing the factor between them, and drops the scalar. The result th
 
 {{ code(CONV, lines=(3464, 3495), root=DM) }}
 
-{{ code('src/h3mlx/lora.py', function='convert_original', marker='qkv-split') }}
+{{ code('src/h3mlx/lora.py', marker='qkv-split') }}
 
 `lora_A` is shared by the three projections and `lora_B` is cut in thirds. A DiffSynth-Studio file keeps the raw
 checkpoint's row order, q, k and v interleaved per head, and is reordered first.
@@ -290,7 +290,7 @@ checkpoint's row order, q, k and v interleaved per head, and is reordered first.
 
 {{ code(CONV, lines=(3497, 3532), root=DM) }}
 
-{{ code('src/h3mlx/lora.py', function='convert_original', marker='fc1-swap') }}
+{{ code('src/h3mlx/lora.py', marker='fc1-swap') }}
 {{ code('src/h3mlx/lora.py', var='_STANDALONE') }}
 
 The original computes `fc2(silu(gate) * value)` from a fused `[gate; value]`, diffusers' SwiGLU `value * silu(gate)`
