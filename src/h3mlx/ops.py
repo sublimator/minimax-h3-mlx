@@ -97,17 +97,30 @@ def linear(x: mx.array, w, b: mx.array | None = None) -> mx.array:
     return y + b if b is not None else y
 
 
+def times_scalar(x: mx.array, s) -> mx.array:
+    """torch's `tensor * python_float`. A half-precision tensor is multiplied in float32 by the float32 scalar and
+    rounded once; MLX alone would first round the scalar to the tensor's dtype (0.7 becomes 0.69921875 in bf16)."""
+    if x.dtype in (mx.float16, mx.bfloat16):
+        return (x.astype(mx.float32) * s).astype(x.dtype)
+    return x * s
+
+
 def plinear(x: mx.array, p: dict, name: str, bias: bool = False) -> mx.array:
     """The Linear `name` of state dict `p`, plus its LoRA when `name.lora_A.weight` / `name.lora_B.weight` are present.
 
-    PEFT's lora.Linear as HyperFlow loads it: the adapter is in the base layer's dtype, the input is cast to it, the
-    two products round in that dtype, and the sum is cast back to the base result's dtype. Scaling (alpha / rank) must
-    be 1, so the `* scaling` is exact and left out (`hyperflow.attach` checks it)."""
+    PEFT's lora.Linear: the input is cast to the adapter's dtype, the two products round in that dtype, the delta is
+    multiplied by the scaling (alpha / rank), and the sum is cast back to the base result's dtype. The scaling is the
+    0-d float32 array `name.lora_scaling`, which `lora.attach` adds when it is not 1; without it the `* scaling` is
+    exact and left out (HyperFlow's path: `hyperflow.attach` refuses any other scaling)."""
     y = linear(x, p[name + ".weight"], p[name + ".bias"] if bias else None)
     a = p.get(name + ".lora_A.weight")
     if a is None:
         return y
-    return (y + linear(linear(x.astype(a.dtype), a), p[name + ".lora_B.weight"])).astype(y.dtype)
+    delta = linear(linear(x.astype(a.dtype), a), p[name + ".lora_B.weight"])
+    scaling = p.get(name + ".lora_scaling")
+    if scaling is not None:
+        delta = times_scalar(delta, scaling)
+    return (y + delta).astype(y.dtype)
 
 
 def adaln_modulation(temb: mx.array, w: mx.array, b: mx.array, hidden_size: int) -> list[mx.array]:
