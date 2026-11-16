@@ -283,8 +283,12 @@ def test_stacking_refusals():
     assistant, subject = two_adapters()
     named = lora.attach(base, cfg, assistant, name="assistant")
     assert "transformer_blocks.0.attn.to_q" + lora.ADAPTERS not in base, "attach does not modify its input"
-    with pytest.raises(ValueError, match="named 'assistant'"):  # the same name twice
+    with pytest.raises(ValueError, match="name 'assistant' is already in use"):  # the same name twice
         lora.attach(named, cfg, subject, name="assistant")
+    elsewhere = lora.Adapter({k: v for k, v in subject.tensors.items() if k.startswith("proj_in.")}, {"proj_in": 6})
+    assert "proj_in" not in assistant.modules  # diffusers refuses a name in use whichever modules the second one has
+    with pytest.raises(ValueError, match="name 'assistant' is already in use"):
+        lora.attach(named, cfg, elsewhere, name="assistant")
     with pytest.raises(ValueError, match="already carry a LoRA"):  # an unnamed adapter shares its Linears with none
         lora.attach(named, cfg, subject)
     with pytest.raises(ValueError, match="unnamed LoRA"):  # nor a named one with an unnamed one
@@ -312,6 +316,72 @@ def test_stacking_refusals():
     assert lora.adapter_names(off) == ["assistant", "subject"]
     assert lora.set_active(off, ("assistant", "subject"))["proj_in" + lora.ADAPTERS] == ("subject",)
     assert off["transformer_blocks.0.attn.to_k" + lora.ADAPTERS] == ()
+
+
+def test_the_frozen_half_of_a_split_is_not_a_model():
+    """`split` leaves the trainable adapter's scalings and its place in each Linear's list in the frozen half, so that
+    the two halves merge back into the model. On its own that half is refused: by the forward, and by `attach` under
+    the same name, which would otherwise list the adapter twice on each Linear and apply it twice. `join` is the way
+    back, and a changed adapter goes in as the trainable half."""
+    model = randomised(TINY, 0)
+    cfg = dict(model.config)
+    assistant, subject = two_adapters()
+    both = mlx_stack(model, assistant, subject, keep_subject_dtype=True)
+    frozen, trainable = lora.split(both, "subject")
+    lay, args = inputs()
+    with pytest.raises(ValueError, match="'subject' is listed as active but its matrices are not"):
+        mlx_forward(frozen, cfg, lay, args)
+    with pytest.raises(ValueError, match="name 'subject' is already in use"):
+        lora.attach(frozen, cfg, subject, keep_dtype=True, name="subject")
+    # each trace the name leaves is enough: a place in a list alone, and a scaling alone
+    listed = {k: v for k, v in frozen.items() if not k.endswith(lora.SCALING + ".subject")}
+    scaled = {k: (tuple(n for n in v if n != "subject") if k.endswith(lora.ADAPTERS) else v) for k, v in frozen.items()}
+    assert len(listed) < len(frozen) and scaled != frozen
+    for half in (listed, scaled):
+        with pytest.raises(ValueError, match="name 'subject' is already in use"):
+            lora.attach(half, cfg, subject, keep_dtype=True, name="subject")
+    lora.attach(frozen, cfg, subject, keep_dtype=True, name="another")  # a name that is free is still fine
+
+    joined = lora.join(frozen, trainable)
+    assert joined.keys() == both.keys() and all(joined[k] is both[k] for k in both)
+    want = mlx_forward(both, cfg, lay, args)
+    for got, ref in zip(mlx_forward(joined, cfg, lay, args), want):
+        assert np.array_equal(to_np(got), to_np(ref))
+    # an updated adapter: the same keys with new values, joined, is applied once
+    doubled = {k: v * 2 if ".lora_B." in k else v for k, v in trainable.items()}
+    twice_as_strong = lora.Adapter({k: v * 2 if ".lora_B." in k else v for k, v in subject.tensors.items()}, subject.alpha)
+    ref = mlx_forward(mlx_stack(model, assistant, twice_as_strong, keep_subject_dtype=True), cfg, lay, args)
+    for got, r, before in zip(mlx_forward(lora.join(frozen, doubled), cfg, lay, args), ref, want):
+        assert np.array_equal(to_np(got), to_np(r)) and rel_err(got, before) > GUARD
+
+
+def test_check_trainable():
+    """What a loss checks about its two groups (`lora.check_trainable`, and `join` through it). Each refused case is
+    one the forward would run without reading the matrices, so their gradients would be exactly zero."""
+    model = randomised(TINY, 0)
+    cfg, base = dict(model.config), state_mx(model)
+    assistant, subject = two_adapters()
+    with_assistant = lora.attach(base, cfg, assistant, name="assistant")
+    both = lora.attach(with_assistant, cfg, subject, keep_dtype=True, name="subject")
+    frozen, trainable = lora.split(both, "subject")
+    lora.check_trainable(trainable, frozen)
+    with pytest.raises(ValueError, match="`trainable` is empty"):
+        lora.check_trainable({}, frozen)
+    with pytest.raises(ValueError, match="a file's keys are not read by the forward"):  # an Adapter's own dict
+        lora.check_trainable(subject.tensors, with_assistant)
+    with pytest.raises(ValueError, match="'subject' is not active on"):  # runtime names, but never attached
+        lora.check_trainable(lora.runtime_tensors(subject, "subject"), with_assistant)
+    with pytest.raises(ValueError, match="'subject' is not active on"):  # attached, then switched off
+        lora.check_trainable(*reversed(lora.split(lora.set_active(both, ("assistant",)), "subject")))
+    with pytest.raises(ValueError, match="'subject' is not active on"):  # and with no adapter in the weights at all
+        lora.check_trainable(trainable, base)
+    one = next(k for k in trainable if ".lora_B." in k)
+    with pytest.raises(ValueError, match="one of lora_A / lora_B without the other"):
+        lora.check_trainable({k: v for k, v in trainable.items() if k != one}, frozen)
+    with pytest.raises(ValueError, match="is not an attached adapter's matrix"):
+        lora.check_trainable({**trainable, "proj_in.weight": base["proj_in.weight"]}, frozen)
+    with pytest.raises(ValueError, match="'subject' is not active on"):
+        lora.join(with_assistant, lora.runtime_tensors(subject, "subject"))
 
 
 # --- the public training adapter, by its header ----------------------------------------------------------------------------

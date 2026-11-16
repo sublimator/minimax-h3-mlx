@@ -117,15 +117,20 @@ def plinear(x: mx.array, p: dict, name: str, bias: bool = False) -> mx.array:
     and each one's matrices are under PEFT's runtime names, `name.lora_A.<adapter>.weight` and
     `name.lora_B.<adapter>.weight`, with an optional `name.lora_scaling.<adapter>`. PEFT's loop is followed to the
     letter: the input is cast to each adapter's dtype in turn and that cast carries over to the next adapter, each
-    scaled delta is added to the running result, and the result is cast back once at the end."""
+    scaled delta is added to the running result, and the result is cast back once at the end. An adapter that is
+    listed without its matrices (the frozen half of `lora.split` on its own) is refused."""
     y = linear(x, p[name + ".weight"], p[name + ".bias"] if bias else None)
     adapters = p.get(name + ".lora_adapters")
     if adapters is not None:
         out = y
         for adapter in adapters:
-            a = p[f"{name}.lora_A.{adapter}.weight"]
+            a, b = p.get(f"{name}.lora_A.{adapter}.weight"), p.get(f"{name}.lora_B.{adapter}.weight")
+            if a is None or b is None:
+                raise ValueError(f"{name}: the adapter {adapter!r} is listed as active but its matrices are not in "
+                                 "these weights. The frozen half of `lora.split` is not a model on its own: put the "
+                                 "halves back together with `lora.join`")
             x = x.astype(a.dtype)
-            delta = linear(linear(x, a), p[f"{name}.lora_B.{adapter}.weight"])
+            delta = linear(linear(x, a), b)
             scaling = p.get(f"{name}.lora_scaling.{adapter}")
             if scaling is not None:
                 delta = times_scalar(delta, scaling)

@@ -40,8 +40,13 @@ class Adapter:
     """LoRA factors for some of the transformer's Linears, in PEFT's parametrisation.
 
     `tensors` maps `<module>.lora_A.weight` to (rank, in) and `<module>.lora_B.weight` to (out, rank), with diffusers
-    module names and no component prefix, so the dict merges straight into the transformer's weights. `alpha` maps each
-    module to its lora_alpha. A module's rank is its `lora_A`'s first axis; ranks and alphas may differ per module."""
+    module names and no component prefix: a file's names. `alpha` maps each module to its lora_alpha. A module's rank
+    is its `lora_A`'s first axis; ranks and alphas may differ per module.
+
+    `attach` is how an adapter gets beside the transformer's weights: it adds the scalings and, for a named adapter,
+    PEFT's runtime names and each Linear's list of active adapters. `tensors` on its own is not something to merge
+    into the weights or to hand a loss: that would be right only for an unnamed adapter whose every scaling is 1, on
+    Linears that carry no named adapter; beside a named adapter the forward would not read these keys at all."""
 
     tensors: dict
     alpha: dict
@@ -181,6 +186,15 @@ def _carries_lora(params: dict, module: str) -> bool:
     return module + ".lora_A.weight" in params or module + ADAPTERS in params
 
 
+def _named_parts(params: dict, name: str) -> list[str]:
+    """The keys in `params` that belong to the adapter `name`: its matrices, its scalings, and the lists of active
+    adapters that name it. After `split`, the frozen half still has the last two."""
+    scaling = SCALING + "." + name
+    return [k for k, v in params.items()
+            if ((m := RUNTIME_RE.match(k)) and m["name"] == name) or k.endswith(scaling)
+            or (k.endswith(ADAPTERS) and name in v)]
+
+
 def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None) -> dict:
     """The transformer's weights with the adapter beside them, for `ops.plinear`; `params` is not modified.
 
@@ -191,7 +205,10 @@ def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, 
 
     Without a `name` the adapter is the only one its Linears can carry. With one it is stacked: its matrices go under
     PEFT's runtime names, and the name is appended to each Linear's `lora_adapters`, so adapters apply in the order
-    they were attached (`set_active` changes that). A named and an unnamed adapter can't share a Linear."""
+    they were attached (`set_active` changes that). A named and an unnamed adapter can't share a Linear, and a name is
+    used once: diffusers' `load_lora_adapter` refuses a name already in use too. That includes a name these weights
+    only list or carry a scaling for, which is what the frozen half of `split` looks like (`join` is the way back
+    from it); attaching onto that half would name the adapter twice on each Linear and apply it twice."""
     check(adapter, cfg)
     if name is None:
         taken = [m for m in adapter.modules if _carries_lora(params, m)]
@@ -201,9 +218,14 @@ def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, 
     else:
         if not name or "." in name:
             raise ValueError(f"an adapter name is a non-empty word without dots, got {name!r}")
-        taken = [m for m in adapter.modules if m + ".lora_A.weight" in params or runtime_key(m, "A", name) in params]
+        taken = [m for m in adapter.modules if m + ".lora_A.weight" in params]
         if taken:
-            raise ValueError(f"{len(taken)} Linear(s) already carry an unnamed LoRA or one named {name!r}, e.g. {taken[:3]}")
+            raise ValueError(f"{len(taken)} Linear(s) already carry an unnamed LoRA, e.g. {taken[:3]}")
+        used = _named_parts(params, name)
+        if used:
+            raise ValueError(f"the adapter name {name!r} is already in use in these weights ({len(used)} keys, e.g. "
+                             f"{used[:2]}). If they are the frozen half of `split`, `join` it with its trainable half; "
+                             "a changed adapter goes in as that trainable half, not through a second `attach`")
     out = dict(params)
     for module in adapter.modules:
         dtype = params[module + ".weight"].dtype
@@ -243,11 +265,47 @@ def split(params: dict, name: str) -> tuple[dict, dict]:
     """(frozen, trainable): the weights without the two matrices of the adapter `name`, and those matrices alone under
     their runtime names. The two are separate groups: a trainer differentiates with respect to `trainable` only, and
     merges them (`{**frozen, **trainable}`) inside the function it differentiates, so the base weights and every other
-    adapter are constants. The adapter's scalings and its place in each Linear's `lora_adapters` stay in `frozen`."""
+    adapter are constants. The adapter's scalings and its place in each Linear's `lora_adapters` stay in `frozen`,
+    which is therefore not a model on its own: the forward refuses it, and so does `attach` for the same name. `join`
+    puts the two back together."""
     trainable = {k: v for k, v in params.items() if (m := RUNTIME_RE.match(k)) and m["name"] == name}
     if not trainable:
         raise ValueError(f"no adapter named {name!r} in these weights; attached: {adapter_names(params)}")
     return {k: v for k, v in params.items() if k not in trainable}, trainable
+
+
+def check_trainable(trainable: dict, frozen: dict) -> None:
+    """Refuses a pair of groups in which `trainable` would not be what the forward trains.
+
+    `ops.plinear` reads a named adapter's matrices only where the Linear lists that name as active. Matrices under a
+    file's names, for a name that was never attached, or for an adapter that `set_active` switched off are merged
+    into the weights and then ignored: the loss comes out without them and their gradients are exactly zero, with no
+    error. (A file's names on a Linear with no named adapter are read, but as an unnamed adapter of scaling 1.) So: `trainable` is not empty; each of its keys is a runtime name, `<module>.lora_A/B.<name>.weight`; that
+    name is in `frozen`'s list of active adapters for that module; and each module's two matrices come together."""
+    if not trainable:
+        raise ValueError("no trainable matrices: `trainable` is empty")
+    seen: dict = {}
+    for key in trainable:
+        m = RUNTIME_RE.match(key)
+        if m is None:
+            raise ValueError(f"{key!r} is not an attached adapter's matrix (`<module>.lora_A/B.<name>.weight`): "
+                             "`attach` the adapter under a name and `split` it; a file's keys are not read by the forward")
+        active = frozen.get(m["module"] + ADAPTERS, ())
+        if m["name"] not in active:
+            raise ValueError(f"the adapter {m['name']!r} is not active on {m['module']!r} in the frozen weights (active "
+                             f"there: {list(active)}): its matrices would not be used and their gradients would be zero")
+        seen.setdefault((m["module"], m["name"]), set()).add(m["matrix"])
+    half = sorted(module for (module, _), matrices in seen.items() if matrices != {"A", "B"})
+    if half:
+        raise ValueError(f"{len(half)} module(s) have one of lora_A / lora_B without the other, e.g. {half[:3]}")
+
+
+def join(frozen: dict, trainable: dict) -> dict:
+    """The reverse of `split`: the two groups as one dict of weights again, for a forward outside the loss (a
+    validation sample), for `set_active`, or for `file_tensors` and `save` after training. `trainable` is checked as
+    a loss checks it (`check_trainable`)."""
+    check_trainable(trainable, frozen)
+    return {**frozen, **trainable}
 
 
 def runtime_tensors(adapter: Adapter, name: str) -> dict:
