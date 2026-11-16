@@ -31,7 +31,11 @@ def _stages(trainable: dict, cfg: dict) -> tuple[list, list, list]:
     blocks = [[k for k in trainable if k.startswith(f"{BLOCK}{i}.")] for i in range(cfg["num_layers"])]
     tail = [k for k in trainable if k.startswith(TAIL)]
     taken = set(tail).union(*blocks)
-    return [k for k in trainable if k not in taken], blocks, tail
+    head = [k for k in trainable if k not in taken]
+    stray = [k for k in head if k.startswith(BLOCK)]
+    if stray:  # `check_inputs` refuses these first; the stage before the blocks is not a place for what is left over
+        raise ValueError(f"{len(stray)} trainable key(s) are on blocks this config does not have, e.g. {stray[0]!r}")
+    return head, blocks, tail
 
 
 def checkpointed_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None) -> mx.array:

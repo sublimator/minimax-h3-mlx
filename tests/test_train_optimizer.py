@@ -256,6 +256,14 @@ def test_optimizer_step_refusals():
         train.optimizer_step(make(), w, {"a.lora_A.x.weight": g["a.lora_A.x.weight"]}, max_grad_norm=1.0)
     with pytest.raises(ValueError, match="keys must be the trainable matrices' keys"):
         train.optimizer_step(make(), {}, {}, max_grad_norm=1.0)
+    one = "a.lora_A.x.weight"
+    for bad, found in ((g[one].astype(mx.bfloat16), "bfloat16"), (g[one].astype(mx.float16), "float16"),
+                       (g[one][:1], r"float32 \(1, 3\) for a matrix of \(2, 3\)"), (g[one][:, :1], r"\(2, 1\)"),
+                       (g[one][0], r"\(3,\)"), (np.array(g[one]), "ndarray"), (0.1, "float")):
+        optimizer = make()
+        with pytest.raises(ValueError, match=f"each gradient must be a float32 array of its matrix's shape; 1 are not, e.g. {one}: .*{found}"):
+            train.optimizer_step(optimizer, w, {**g, one: bad}, max_grad_norm=1.0)
+        assert optimizer.state.get("step", 0) == 0 and one not in optimizer.state, "nothing applied, no moments made"
     for bad in (0.0, -1.0, math.nan, None, "1", True):
         with pytest.raises(ValueError, match="max_grad_norm must be a positive number"):
             train.optimizer_step(make(), w, g, max_grad_norm=bad)
@@ -347,3 +355,120 @@ def test_optimizer_state_refusals():
         with pytest.raises(ValueError, match=message):
             train.restore_optimizer(train.adamw(**hp), stepped, bad)
     train.restore_optimizer(train.adamw(**hp), stepped, saved)
+
+
+# --- what a gradient must be, and the optimizer's arguments -------------------------------------------------------------
+
+
+def test_why_a_gradient_must_be_float32():
+    """MLX's `clip_grad_norm` widens float16 gradients before squaring them and leaves bf16 ones as they are, so their
+    squared norm is summed in bf16, where a running sum stops growing: 624 matrices' norm comes out as 45.25 for an
+    exact 72.42, and the clip would be that much too weak. `optimizer_step` refuses such gradients. In float32, which
+    is all it takes, the library's running sum of the same 624 terms is within 2e-5 of the exact norm (7e-6 measured:
+    a float32 sum of many equal terms), which moves a clip by as little."""
+    values = {f"m{i}": mx.ones((16, 128)) * (1.0 if i == 0 else 0.05) for i in range(624)}
+    norm_of = lambda arrays: math.sqrt(sum(float(np.square(to_np(v.astype(mx.float32)).astype(np.float64)).sum()) for v in arrays.values()))  # noqa: E731
+    halves = {k: v.astype(mx.bfloat16) for k, v in values.items()}
+    exact, exact_bf16 = norm_of(values), norm_of(halves)
+    assert abs(exact - 72.37) < 0.01 and abs(exact_bf16 - 72.42) < 0.01
+    _, in_bf16 = optim.clip_grad_norm(halves, 10.0)
+    assert abs(float(in_bf16) - 45.25) < 0.01, "the library's sum, as it is"
+    weights = {k: mx.ones(v.shape) for k, v in values.items()}
+    optimizer = train.adamw(learning_rate=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+    with pytest.raises(ValueError, match="each gradient must be a float32 array of its matrix's shape; 624 are not"):
+        train.optimizer_step(optimizer, weights, {k: v.astype(mx.bfloat16) for k, v in values.items()}, max_grad_norm=10.0)
+    _, norm = train.optimizer_step(optimizer, weights, values, max_grad_norm=10.0)
+    assert abs(norm - exact) <= 2e-5 * exact
+    assert all(optimizer.state[k]["m"].dtype == mx.float32 and optimizer.state[k]["m"].shape == (16, 128) for k in values)
+
+
+@pytest.mark.parametrize("change,message,torch_refuses", [
+    (dict(learning_rate=-1e-3), "learning_rate must be a finite number of at least 0", True),
+    (dict(learning_rate=float("nan")), "learning_rate must be a finite number", True),
+    (dict(learning_rate=float("inf")), "learning_rate must be a finite number", False),
+    (dict(learning_rate=lambda step: 1e-3), "learning_rate must be a finite number", None),
+    (dict(learning_rate=True), "learning_rate must be a finite number", None),
+    (dict(weight_decay=-0.01), "weight_decay must be a finite number of at least 0", True),
+    (dict(weight_decay=float("nan")), "weight_decay must be a finite number", True),
+    (dict(betas=(1.0, 0.999)), "betas must be two numbers in", True),
+    (dict(betas=(0.9, -0.1)), "betas must be two numbers in", True),
+    (dict(betas=(0.9, float("nan"))), "betas must be two numbers in", True),
+    (dict(betas=(0.9,)), "betas must be two numbers in", None),
+    (dict(eps=-1e-8), "eps must be a finite number above 0", True),
+    (dict(eps=float("nan")), "eps must be a finite number above 0", True),
+    (dict(eps=0.0), "eps must be a finite number above 0", False),
+])
+def test_adamw_checks_its_arguments_as_torch_does_and_eps(change, message, torch_refuses):
+    """torch's constructor refuses a negative or NaN learning rate, weight decay or epsilon and betas outside [0, 1);
+    MLX's refuses none of them, and a NaN learning rate went into every weight. `train.adamw` refuses what torch
+    refuses, and three things torch takes: an infinite value, a learning rate that is not a number, and an epsilon of
+    zero (the next test)."""
+    good = dict(learning_rate=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+    arguments = {**good, **change}
+    with pytest.raises(ValueError, match=message):
+        train.adamw(**arguments)
+    if torch_refuses is not None:
+        parameter = torch.nn.Parameter(torch.ones(2, 2))
+        make = lambda: torch.optim.AdamW([parameter], lr=arguments["learning_rate"], betas=arguments["betas"],  # noqa: E731
+                                         eps=arguments["eps"], weight_decay=arguments["weight_decay"])
+        if torch_refuses:
+            with pytest.raises(ValueError):
+                make()
+        else:
+            make()
+    train.adamw(**good)
+    train.adamw(**{**good, "learning_rate": 0.0, "weight_decay": 0.0, "betas": (0.0, 0.0)})  # the edges torch takes too
+
+
+def test_an_epsilon_of_zero_divides_zero_by_zero():
+    """Why `eps` must be above zero here, where torch takes zero. A gradient element that is exactly zero has both
+    moments zero, and its update is 0 / (0 + eps): with an epsilon of zero that is NaN, in torch and in MLX alike.
+    Exact zeros are not rare: from PEFT's initialisation every element of `lora_A` has one on the first step."""
+    parameter = torch.nn.Parameter(torch.ones(2, 2))
+    optimizer = torch.optim.AdamW([parameter], lr=1e-3, betas=(0.9, 0.999), eps=0.0, weight_decay=0.01)
+    parameter.grad = torch.tensor([[0.0, 0.1], [0.0, -0.2]])
+    optimizer.step()
+    assert torch.isnan(parameter[:, 0]).all() and torch.isfinite(parameter[:, 1]).all()
+    ours = optim.AdamW(learning_rate=1e-3, betas=[0.9, 0.999], eps=0.0, weight_decay=0.01, bias_correction=True)
+    updated = ours.apply_gradients({"w": mx.array([[0.0, 0.1], [0.0, -0.2]])}, {"w": mx.ones((2, 2))})["w"]
+    assert np.isnan(to_np(updated)[:, 0]).all() and np.isfinite(to_np(updated)[:, 1]).all()
+    with pytest.raises(ValueError, match="eps must be a finite number above 0"):
+        train.adamw(learning_rate=1e-3, betas=(0.9, 0.999), eps=0.0, weight_decay=0.01)
+
+
+def test_two_gradients_the_library_would_apply():
+    """What MLX's optimizer does with two gradients that are not the matrix's kind, and that `optimizer_step` refuses
+    both before the optimizer's state is touched.
+
+    * A gradient of shape (4, 2, 3) for a matrix of shape (2, 3) broadcasts: the "updated" matrix comes back as
+      (4, 2, 3) and the step count has advanced. torch refuses to assign such a gradient at all.
+    * A float16 gradient of 0.001 on a float32 matrix of ones, with ordinary settings: the norm is finite, and the
+      update is minus infinity. The second moment, 0.001 * 0.001 ** 2, and an epsilon of 1e-8 are both zero in
+      float16, so the step divides by zero."""
+    hp = dict(learning_rate=1e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+    w = {"w": mx.ones((2, 3))}
+
+    oversized = {"w": mx.full((4, 2, 3), 0.1)}
+    raw = optim.AdamW(learning_rate=hp["learning_rate"], betas=list(hp["betas"]), eps=hp["eps"],
+                      weight_decay=hp["weight_decay"], bias_correction=True)
+    assert raw.apply_gradients(oversized, w)["w"].shape == (4, 2, 3) and int(raw.state["step"].item()) == 1
+    parameter = torch.nn.Parameter(torch.ones(2, 3))
+    with pytest.raises(RuntimeError):
+        parameter.grad = torch.full((4, 2, 3), 0.1)
+    optimizer = train.adamw(**hp)
+    with pytest.raises(ValueError, match=r"float32 \(4, 2, 3\) for a matrix of \(2, 3\)"):
+        train.optimizer_step(optimizer, w, oversized, max_grad_norm=1.0)
+    assert optimizer.state.get("step", 0) == 0 and "w" not in optimizer.state
+
+    half = {"w": mx.full((2, 3), 0.001).astype(mx.float16)}
+    raw = optim.AdamW(learning_rate=hp["learning_rate"], betas=list(hp["betas"]), eps=hp["eps"],
+                      weight_decay=hp["weight_decay"], bias_correction=True)
+    clipped, norm = optim.clip_grad_norm(half, 1.0)
+    assert math.isfinite(float(norm)) and abs(float(norm) - 0.001 * math.sqrt(6)) < 1e-5
+    assert np.isneginf(to_np(raw.apply_gradients(clipped, w)["w"])).all()
+    optimizer = train.adamw(**hp)
+    with pytest.raises(ValueError, match=r"float16 \(2, 3\) for a matrix of \(2, 3\)"):
+        train.optimizer_step(optimizer, w, half, max_grad_norm=1.0)
+    assert optimizer.state.get("step", 0) == 0 and "w" not in optimizer.state
+    good, norm = train.optimizer_step(optimizer, w, {"w": mx.full((2, 3), 0.001)}, max_grad_norm=1.0)
+    assert good["w"].shape == (2, 3) and np.isfinite(to_np(good["w"])).all() and abs(norm - 0.001 * math.sqrt(6)) < 1e-8

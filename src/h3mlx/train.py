@@ -216,11 +216,20 @@ def build_example(cfg: dict, text_token_tags, latents: mx.array, sigma, noise, *
 
 
 def check_inputs(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array) -> None:
-    """What every loss and gradient of an example checks first: `trainable` is what the forward will train
-    (`lora.check_trainable`: not empty, runtime names, active in `frozen`, both matrices), and `text` is exactly
-    (1, the layout's text rows, text dim). A text of one row would be broadcast over every text position by the
-    forward's scatter, and matrices the forward does not read get a gradient of exactly zero, both without an error."""
+    """What every loss and gradient of an example checks first.
+
+    * `trainable` is what the forward will train (`lora.check_trainable`: not empty, runtime names, active in
+      `frozen`, both matrices, nothing shared with `frozen`, the adapter whole).
+    * The weights and the matrices are this config's (`lora.check_config`): the weights have the config's blocks and
+      no more, and every trained matrix sits on a Linear the config has, in that Linear's shape. A config of fewer
+      blocks than the weights would run a shorter model, and the matrices of the blocks left out would get gradients
+      of exactly zero.
+    * `text` is exactly (1, the layout's text rows, text dim). A text of one row would be broadcast over every text
+      position by the forward's scatter.
+
+    Each of these would otherwise go wrong without an error."""
     lora.check_trainable(trainable, frozen)
+    lora.check_config(trainable, frozen, cfg)
     want = (1, len(example.layout.text_indices), cfg["text_dim"])
     if not isinstance(text, mx.array) or tuple(text.shape) != want:
         raise ValueError(f"text must be an array of shape {want} (1, the layout's text rows, text dim), got "
@@ -298,11 +307,30 @@ def loss_and_gradients(trainable: dict, frozen: dict, cfg: dict, example: Exampl
 # --- the optimizer step ------------------------------------------------------------------------------------------------
 
 
-def adamw(*, learning_rate, betas, eps: float, weight_decay: float) -> optim.AdamW:
+def _real(value) -> bool:
+    return isinstance(value, numbers.Real) and not isinstance(value, bool)
+
+
+def adamw(*, learning_rate: float, betas, eps: float, weight_decay: float) -> optim.AdamW:
     """MLX's AdamW set up to compute `torch.optim.AdamW`'s update: with `bias_correction=True`. MLX leaves the bias
     correction out by default, and its first step is then `(1 - beta1) / sqrt(1 - beta2)` times torch's, 3.2 times
-    for betas of (0.9, 0.999). No hyper-parameter has a default here: every one is the caller's to give."""
-    return optim.AdamW(learning_rate=learning_rate, betas=list(betas), eps=eps, weight_decay=weight_decay,
+    for betas of (0.9, 0.999). No hyper-parameter has a default here: every one is the caller's to give.
+
+    The arguments are checked as torch's constructor checks them, which MLX's does not: a learning rate and a weight
+    decay of at least 0, betas in [0, 1), none of them NaN. Three things are stricter than torch's: they must be
+    finite; the learning rate is a number (a schedule is not built); and `eps` must be above 0. torch takes an `eps`
+    of 0, and so does the arithmetic until a gradient element is exactly zero: the update is then 0 / 0. That is
+    every element of `lora_A` on the first step from PEFT's initialisation, where `lora_B` is zero."""
+    for what, value in (("learning_rate", learning_rate), ("weight_decay", weight_decay)):
+        if not _real(value) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"{what} must be a finite number of at least 0, got {value!r}")
+    betas = list(betas)
+    if len(betas) != 2 or not all(_real(b) and 0 <= b < 1 for b in betas):
+        raise ValueError(f"betas must be two numbers in [0, 1), got {betas!r}")
+    if not _real(eps) or not math.isfinite(eps) or eps <= 0:
+        raise ValueError(f"eps must be a finite number above 0, got {eps!r}: with 0, a gradient element that is "
+                         "exactly zero is updated by 0 / 0")
+    return optim.AdamW(learning_rate=learning_rate, betas=betas, eps=eps, weight_decay=weight_decay,
                        bias_correction=True)
 
 
@@ -317,7 +345,10 @@ def optimizer_step(optimizer, trainable: dict, grads: dict, *, max_grad_norm: fl
       move at all, because the update is under half its spacing, and a smaller one moves by whole steps of its
       spacing; in float16 the second moment of small gradients underflows and the update is NaN. So the trainable
       matrices are float32 over whatever base (`lora.attach(..., keep_dtype=True)`).
-    * gradients whose keys are not the matrices' keys;
+    * gradients whose keys are not the matrices' keys, or that are not float32 arrays of their matrix's shape. A
+      gradient of another shape that broadcasts would be applied, and would leave moments of its own shape in the
+      optimizer. A bf16 gradient would have its norm summed in bf16 by MLX's clip (which widens float16 and not
+      bf16), a sum that stalls, and would leave bf16 moments;
     * a `max_grad_norm` that is not a positive number;
     * a gradient norm that is not finite, which torch's clip refuses under `error_if_nonfinite` and otherwise lets
       through into the weights."""
@@ -327,6 +358,13 @@ def optimizer_step(optimizer, trainable: dict, grads: dict, *, max_grad_norm: fl
     if narrow:
         raise ValueError(f"the trainable matrices must be float32; {len(narrow)} are not, e.g. {narrow[0]} "
                          f"({trainable[narrow[0]].dtype}): half-precision matrices do not take updates of this size")
+    wrong = sorted(k for k, v in trainable.items()
+                   if not isinstance(grads[k], mx.array) or grads[k].dtype != mx.float32 or grads[k].shape != v.shape)
+    if wrong:
+        g = grads[wrong[0]]
+        found = f"{g.dtype} {tuple(g.shape)}" if isinstance(g, mx.array) else type(g).__name__
+        raise ValueError(f"each gradient must be a float32 array of its matrix's shape; {len(wrong)} are not, e.g. "
+                         f"{wrong[0]}: {found} for a matrix of {tuple(trainable[wrong[0]].shape)}")
     if not isinstance(max_grad_norm, numbers.Real) or isinstance(max_grad_norm, bool) or not max_grad_norm > 0:
         raise ValueError(f"max_grad_norm must be a positive number (math.inf to clip nothing), got {max_grad_norm!r}")
     clipped, norm = optim.clip_grad_norm(grads, float(max_grad_norm))

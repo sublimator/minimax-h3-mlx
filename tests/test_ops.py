@@ -83,6 +83,31 @@ def test_norm_out_matches():
     want = m(x, temb, tidx)
     p = state_mx(m)
     got = ops.norm_out(to_mx(x), to_mx(temb), p["norm.weight"], p["linear.weight"], p["linear.bias"], to_mx(tidx), 1e-5)
+    routed = ops.norm_out(to_mx(x), to_mx(temb), p["norm.weight"], p["linear.weight"], p["linear.bias"], to_mx(tidx), 1e-5,
+                          take=ops.take_rows_for_training)
+    assert np.array_equal(np.array(routed), np.array(got)), "the gather is an argument here as in the forward"
+
+    # the argument reaches both gathers: over a bf16 projection and many rows a table row, the gradient through the
+    # training gather is not the one through the plain gather (which sums in bf16), and it is the gradient of the
+    # same expression written out with the training gather
+    half = {k: v.astype(mx.bfloat16) for k, v in p.items()}
+    rows = mx.array(np.random.default_rng(0).integers(0, num_t, 900))
+    wide = mx.array(np.random.default_rng(1).standard_normal((1, 900, hidden)).astype(np.float32)).astype(mx.bfloat16)
+
+    def through(take):
+        return lambda t: ops.norm_out(wide, t, half["norm.weight"], half["linear.weight"], half["linear.bias"], rows, 1e-5,
+                                      take=take).astype(mx.float32).sum()
+
+    def written_out(t):
+        shift, scale = ops.norm_out_tables(t, {"linear.weight": half["linear.weight"], "linear.bias": half["linear.bias"]}, "linear")
+        h = ops.rms_norm(wide, half["norm.weight"], 1e-5)
+        return (h * (1.0 + ops.take_rows_for_training(scale, rows)) + ops.take_rows_for_training(shift, rows)).astype(mx.float32).sum()
+
+    with mx.stream(mx.cpu):
+        plain = np.array(mx.grad(through(ops.take_rows))(to_mx(temb)))
+        training = np.array(mx.grad(through(ops.take_rows_for_training))(to_mx(temb)))
+        want_grad = np.array(mx.grad(written_out)(to_mx(temb)))
+    assert np.array_equal(training, want_grad) and not np.array_equal(training, plain)
     assert_close(got, want, **F32, what="norm_out")
 
 

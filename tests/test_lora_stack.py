@@ -379,9 +379,67 @@ def test_check_trainable():
     with pytest.raises(ValueError, match="one of lora_A / lora_B without the other"):
         lora.check_trainable({k: v for k, v in trainable.items() if k != one}, frozen)
     with pytest.raises(ValueError, match="is not an attached adapter's matrix"):
-        lora.check_trainable({**trainable, "proj_in.weight": base["proj_in.weight"]}, frozen)
+        lora.check_trainable({**trainable, "proj_in.weight.copy": base["proj_in.weight"]}, frozen)
     with pytest.raises(ValueError, match="'subject' is not active on"):
         lora.join(with_assistant, lora.runtime_tensors(subject, "subject"))
+
+
+def test_the_two_groups_share_nothing_and_make_a_whole_model():
+    """Two more things `check_trainable` (and so `join` and every loss) refuses. A key in both groups: merged, the
+    trainable one wins, so the frozen assistant's matrices handed in beside the trained ones would be trained too.
+    And a trainable group that holds only some of the split adapter's modules: the rest are still listed in the
+    frozen half without their matrices, which the forward would only find out part of the way through."""
+    model = randomised(TINY, 0)
+    cfg = dict(model.config)
+    assistant, subject = two_adapters()
+    both = mlx_stack(model, assistant, subject, keep_subject_dtype=True)
+    frozen, trainable = lora.split(both, "subject")
+    assistants = {k: v for k, v in frozen.items() if ".assistant." in k and k.endswith(".weight")}
+    for function in (lora.check_trainable, lora.join):
+        with pytest.raises(ValueError, match=r"36 key\(s\) are in both groups"):
+            function(*((frozen, {**trainable, **assistants}) if function is lora.join else ({**trainable, **assistants}, frozen)))
+        with pytest.raises(ValueError, match="are in both groups"):  # the whole model as the frozen half
+            function(*((both, trainable) if function is lora.join else (trainable, both)))
+    one_module = "transformer_blocks.0.attn.to_q"
+    partial = {k: v for k, v in trainable.items() if not k.startswith(one_module + ".")}
+    assert len(partial) == len(trainable) - 2
+    with pytest.raises(ValueError, match=f"'subject' is listed on 1 Linear.s. whose matrices are in neither group, e.g. '{one_module}'"):
+        lora.check_trainable(partial, frozen)
+    with pytest.raises(ValueError, match="whose matrices are in neither group"):
+        lora.join(frozen, partial)
+    # the rest of the adapter moved to the frozen side is a whole model again: train some modules, freeze the others
+    moved = {k: v for k, v in trainable.items() if k.startswith(one_module + ".")}
+    lora.check_trainable(partial, {**frozen, **moved})
+    lay, args = inputs()
+    want = mlx_forward(both, cfg, lay, args)
+    for got, ref in zip(mlx_forward(lora.join({**frozen, **moved}, partial), cfg, lay, args), want):
+        assert np.array_equal(to_np(got), to_np(ref))
+
+
+def test_check_config():
+    """`lora.check_config`: the weights have the config's blocks, and each trainable matrix sits on one of the
+    config's Linears in that Linear's shape."""
+    model = randomised(TINY, 0)
+    cfg = dict(model.config)
+    assistant, subject = two_adapters()
+    frozen, trainable = lora.split(mlx_stack(model, assistant, subject, keep_subject_dtype=True), "subject")
+    lora.check_config(trainable, frozen, cfg)
+    for change, message in ((dict(num_layers=1), "the config has 1 transformer_blocks"), (dict(num_layers=3), "the config has 3 transformer_blocks"),
+                            (dict(num_refiner_layers=0), "the config has 0 token_refiner.refiner_blocks"),
+                            (dict(num_refiner_layers=2), "the config has 2 token_refiner.refiner_blocks")):
+        with pytest.raises(ValueError, match=message):
+            lora.check_config(trainable, frozen, dict(cfg, **change))
+    key_a, key_b = "transformer_blocks.0.attn.to_q.lora_A.subject.weight", "transformer_blocks.0.attn.to_q.lora_B.subject.weight"
+    elsewhere = {"transformer_blocks.0.attn.nowhere.lora_A.subject.weight": trainable[key_a]}
+    with pytest.raises(ValueError, match="is not on a Linear of the transformer this config describes"):
+        lora.check_config({**trainable, **elsewhere}, frozen, cfg)
+    for bad, message in (({key_a: trainable[key_a][:, :-1]}, "does not fit a Linear of"), ({key_b: trainable[key_b][:-1]}, "does not fit a Linear of"),
+                         ({key_a: trainable[key_a][:-1]}, "have different ranks"), ({key_a: trainable[key_a][0]}, "does not fit a Linear of")):
+        with pytest.raises(ValueError, match=message):
+            lora.check_config({**trainable, **bad}, frozen, cfg)
+    wider = dict(cfg, hidden_size=64)  # the right names, another model's widths
+    with pytest.raises(ValueError, match="does not fit a Linear of"):
+        lora.check_config(trainable, frozen, wider)
 
 
 # --- the public training adapter, by its header ----------------------------------------------------------------------------

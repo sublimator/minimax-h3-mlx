@@ -142,10 +142,38 @@ def test_bounded_gradients_refuse_what_the_loss_refuses(function):
     frozen, trainable, (cfg, example, text) = groups(modules=BLOCKS_ONLY)
     with pytest.raises(ValueError, match="`trainable` is empty"):
         function({}, frozen, cfg, example, text)
+    off, switched_off = lora.split(lora.set_active(lora.join(frozen, trainable), ("assistant",)), "subject")
     with pytest.raises(ValueError, match="is not active on"):
-        function(trainable, lora.set_active(lora.join(frozen, trainable), ("assistant",)), cfg, example, text)
+        function(switched_off, off, cfg, example, text)
     with pytest.raises(ValueError, match="text must be an array of shape"):
         function(trainable, frozen, cfg, example, text[:, :1])
+    with pytest.raises(ValueError, match="key.s. are in both groups"):
+        function(trainable, lora.join(frozen, trainable), cfg, example, text)
+    with pytest.raises(ValueError, match="the config has 1 transformer_blocks, and the weights do not"):
+        function(trainable, frozen, dict(cfg, num_layers=1), example, text)
+
+
+def test_a_config_of_fewer_blocks_than_the_weights_is_refused():
+    """Weights and trainable matrices for four blocks, a config that says two. Unchecked, each of the three gradients
+    ran a two-block model and returned gradients of exactly zero for blocks 2 and 3 (the block-by-block one after
+    filing their matrices under the stage before the blocks). All three refuse now, and `_stages` on its own refuses
+    a key on a block the config does not have."""
+    cfg4 = dict(TINY, num_layers=4)
+    s = setup(1, 0.5, cfg=cfg4, subject_modules=lora.block_modules(cfg4), std=0.1)
+    frozen, trainable = mlx_groups(s)
+    cfg2 = dict(cfg4, num_layers=2)
+    text = to_mx(s["text"])
+    for function in (train.loss_and_gradients, *WAYS.values(), train.example_loss, backward.checkpointed_loss):
+        with pytest.raises(ValueError, match="the config has 2 transformer_blocks, and the weights do not"):
+            function(trainable, frozen, cfg2, s["example"], text)
+        function(trainable, frozen, cfg4, s["example"], text)
+    with pytest.raises(ValueError, match="on blocks this config does not have, e.g. 'transformer_blocks.2"):
+        backward._stages(trainable, cfg2)
+    # what the unchecked forward gave: zeros for the blocks it never ran
+    unchecked = mx.grad(lambda t: sampling_forward_loss({**frozen, **t}, cfg2, s["example"], text))(trainable)
+    left_out = [k for k in unchecked if k.startswith(("transformer_blocks.2.", "transformer_blocks.3."))]
+    assert len(left_out) == 24 and all(not np.array(unchecked[k]).any() for k in left_out)
+    assert any(np.array(unchecked[k]).any() for k in unchecked if k.startswith("transformer_blocks.1."))
 
 
 def test_the_blockwise_gradient_reports_after_every_stage():

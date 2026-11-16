@@ -283,9 +283,18 @@ def check_trainable(trainable: dict, frozen: dict) -> None:
     error. (A file's names on a Linear with no named adapter are read, but as an unnamed adapter of scaling 1.)
 
     So: `trainable` is not empty; each of its keys is a runtime name, `<module>.lora_A/B.<name>.weight`; that name is
-    in `frozen`'s list of active adapters for that module; and each module's two matrices come together."""
+    in `frozen`'s list of active adapters for that module; and each module's two matrices come together.
+
+    Two more, about the pair as a whole. No key is in both groups: merged, the trainable one would win, and an
+    adapter thought frozen would be trained. And the two together are a model: every adapter a Linear lists has its
+    matrices in one group or the other, so a trainable group that holds only some of an adapter's modules is refused
+    here and not later, inside the forward."""
     if not trainable:
         raise ValueError("no trainable matrices: `trainable` is empty")
+    shared = sorted(set(trainable) & set(frozen))
+    if shared:
+        raise ValueError(f"{len(shared)} key(s) are in both groups, e.g. {shared[0]!r}: a matrix is trained or frozen, "
+                         "not both")
     seen: dict = {}
     for key in trainable:
         m = RUNTIME_RE.match(key)
@@ -300,6 +309,41 @@ def check_trainable(trainable: dict, frozen: dict) -> None:
     half = sorted(module for (module, _), matrices in seen.items() if matrices != {"A", "B"})
     if half:
         raise ValueError(f"{len(half)} module(s) have one of lora_A / lora_B without the other, e.g. {half[:3]}")
+    absent = sorted((name, key[: -len(ADAPTERS)]) for key, active in frozen.items() if key.endswith(ADAPTERS)
+                    for name in active
+                    if runtime_key(key[: -len(ADAPTERS)], "A", name) not in frozen and (key[: -len(ADAPTERS)], name) not in seen)
+    if absent:
+        raise ValueError(f"the adapter {absent[0][0]!r} is listed on {len(absent)} Linear(s) whose matrices are in "
+                         f"neither group, e.g. {absent[0][1]!r}: the trainable group must hold every module of the "
+                         "adapter that was split off")
+
+
+def check_config(trainable: dict, frozen: dict, cfg: dict) -> None:
+    """Refuses weights or trainable matrices that are not this config's transformer's.
+
+    The forward runs `cfg`'s blocks. Weights with more blocks than that would run as a shorter model, and trainable
+    matrices on the blocks left out would never be read: their gradients would be exactly zero, with no error. So the
+    weights have the config's transformer blocks and refiner blocks, the last of each and none beyond; every
+    trainable matrix sits on a Linear of this config (`wired_shapes`); and its shape is that Linear's, with one rank
+    for the pair."""
+    for prefix, count in (("transformer_blocks", cfg["num_layers"]), ("token_refiner.refiner_blocks", cfg["num_refiner_layers"])):
+        if f"{prefix}.{count}.attn.to_q.weight" in frozen or (count and f"{prefix}.{count - 1}.attn.to_q.weight" not in frozen):
+            raise ValueError(f"the config has {count} {prefix}, and the weights do not: they are another model's, or "
+                             "the config is")
+    wired = wired_shapes(cfg)
+    ranks: dict = {}
+    for key, value in trainable.items():
+        m = RUNTIME_RE.match(key)
+        if m is None or m["module"] not in wired:
+            raise ValueError(f"{key!r} is not on a Linear of the transformer this config describes: it would never be "
+                             "read, and its gradient would be zero")
+        out_features, in_features = wired[m["module"]]
+        shape = tuple(value.shape)
+        rank = shape[0 if m["matrix"] == "A" else -1] if len(shape) == 2 else 0
+        if rank < 1 or shape != ((rank, in_features) if m["matrix"] == "A" else (out_features, rank)):
+            raise ValueError(f"{key!r} has shape {shape}, which does not fit a Linear of {out_features} x {in_features}")
+        if ranks.setdefault((m["module"], m["name"]), rank) != rank:
+            raise ValueError(f"{m['module']}: lora_A and lora_B of {m['name']!r} have different ranks")
 
 
 def join(frozen: dict, trainable: dict) -> dict:

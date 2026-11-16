@@ -189,12 +189,15 @@ def modulate(x: mx.array, shift: mx.array, scale: mx.array, rows: mx.array, take
 
 
 def norm_out(
-    x: mx.array, temb: mx.array, norm_w: mx.array, w: mx.array, b: mx.array, timestep_indices: mx.array, eps: float
+    x: mx.array, temb: mx.array, norm_w: mx.array, w: mx.array, b: mx.array, timestep_indices: mx.array, eps: float,
+    take=take_rows,
 ) -> mx.array:
-    """MiniMaxH3AdaLayerNormOut: RMSNorm, then shift/scale (in that order) picked per row by timestep index."""
+    """MiniMaxH3AdaLayerNormOut: RMSNorm, then shift/scale (in that order) picked per row by timestep index. The
+    module on its own, for its test against the original; the forward does the same in `dit_outputs`, with the same
+    `take`."""
     shift, scale = norm_out_tables(temb, {"linear.weight": w, "linear.bias": b}, "linear")
     h = rms_norm(x, norm_w, eps)
-    return h * (1.0 + mx.take(scale, timestep_indices, axis=0)) + mx.take(shift, timestep_indices, axis=0)
+    return h * (1.0 + take(scale, timestep_indices)) + take(shift, timestep_indices)
 
 
 def norm_out_tables(temb: mx.array, p: dict, name: str = "norm_out.linear") -> list[mx.array]:
