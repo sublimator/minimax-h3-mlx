@@ -157,7 +157,9 @@ its pair with `timestep_index · 3 + modality_tag`.
 {{ code('src/h3mlx/ops.py', function='modulate') }}
 
 (`adaln_tables` is the projection read from the weight dict. It goes through `plinear`, which without a LoRA is exactly
-`linear`; a LoRA on the projection is covered in `docs/porting-lora-training.md`.)
+`linear`; a LoRA on the projection is covered in `docs/porting-lora-training.md`. `modulate`'s `take` is the gather of
+a table's rows: `take_rows`, which is `mx.take` along the first axis, unless a caller passes another. Only the
+training forward does, for the sake of the gather's gradient; that guide's §7.1 has the reason.)
 
 The `silu` here runs on the f32 timestep embedding, and only its result is cast to the bf16 projection, as the
 original's comment explains. The place where a bf16 `silu` could round differently is the feed-forward gate. There our
@@ -188,14 +190,17 @@ shows the two give the same rows in MLX, with a junk tail that does change the o
 {{ code(TR, function='MiniMaxH3TransformerBlock.forward', root=D) }}
 {{ code('src/h3mlx/ops.py', function='dit_block') }}
 
-`modulation=` lets a precomputed table replace the per-step projection (§2.6).
+`modulation=` lets a precomputed table replace the per-step projection (§2.6). `take=` is the gather of the tables'
+rows, as in `modulate`.
 
 ### 2.5 The whole forward
 
 {{ code(TR, function='MiniMaxH3Transformer3DModel.forward', root=D) }}
 
-The port, stage by stage. Each modality is projected at its own weights' dtype, the text goes through the 2-layer token
-refiner, and the rows are scattered into the packed buffer:
+The port, stage by stage. The first stage and the last are functions of their own, `dit_inputs` and `dit_outputs`,
+which `dit_forward` calls and the training forward shares (`docs/porting-lora-training.md`, §7.1). Each modality is
+projected at its own weights' dtype, the text goes through the 2-layer token refiner, and the rows are scattered into
+the packed buffer:
 
 {{ code('src/h3mlx/ops.py', marker='project-and-scatter') }}
 

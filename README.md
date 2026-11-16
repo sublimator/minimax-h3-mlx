@@ -26,8 +26,9 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
   (any rank and alpha, on any `Linear` of the transformer), converts ones saved under the original checkpoint's key
   names, attaches or merges them, and stacks named adapters, a frozen one beside a trainable one. `h3mlx.train` has
   the forward process, the training target, the loss, the noise-level sampling, a training example for one picture
-  with or without reference pictures, and its loss and gradient. There is no training loop yet, and nothing has been
-  trained with it.
+  with or without reference pictures, its loss and gradient, and the optimizer step; `h3mlx.backward` has two ways to
+  take that gradient without holding every block's graph at once. There is no training loop yet, and nothing has been
+  trained with it beyond twelve steps on a tiny random model in the tests.
 - **Porting guides:** [`docs/porting.md`](docs/porting.md) (diffusers -> h3mlx),
   [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md),
   [`docs/porting-p-h3-image.md`](docs/porting-p-h3-image.md) and
@@ -40,10 +41,10 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 485 tests and skips 71. Those 71 need the releases' tokenizers, processors,
+No weights are needed. A plain clone runs 562 tests and skips 71. Those 71 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header and a public training adapter's header. These
 files aren't shipped here because they belong to MiniMax, Video Rebirth, Pruna and the adapter's publisher. Fetch them
-from Hugging Face at pinned revisions (about 50 MB, no weights) and all 556 run:
+from Hugging Face at pinned revisions (about 50 MB, no weights) and all 633 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest

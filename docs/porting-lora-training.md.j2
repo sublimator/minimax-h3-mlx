@@ -7,7 +7,9 @@
    because both checkouts are pinned. Our src/h3mlx/lora.py carries three markers (`alpha-fold`, `qkv-split`,
    `fc1-swap`).
    The training example's recipe (section 6) is a third-party trainer, ostris/ai-toolkit at d6a18ad7 (MIT). It is cited
-   by file and line and not quoted: no checkout of it is read by this template. #}
+   by file and line and not quoted: no checkout of it is read by this template.
+   Sections 8 and 9 have no library original to quote: their oracles are the plain gradient of section 7 and torch's
+   optimizer, run in the tests. #}
 {% set PEFT = '../peft' %}
 {% set LAYER = 'src/peft/tuners/lora/layer.py' %}
 {% set DM = '../diffusers-main' %}
@@ -17,6 +19,7 @@
 {% set TU = 'src/diffusers/training_utils.py' %}
 {% set SCH = 'src/diffusers/schedulers/scheduling_minimax_h3.py' %}
 {% set BD = 'src/diffusers/modular_pipelines/p_h3_image/before_denoise.py' %}
+{% set TR = 'src/diffusers/models/transformers/transformer_minimax_h3.py' %}
 # Porting LoRA training to MLX, part 1: PEFT and diffusers → `h3mlx`
 
 This guide covers the first pieces a LoRA trainer for the MLX transformer needs, each ported op by op and tested
@@ -30,13 +33,16 @@ against the PyTorch original on small random tensors:
 5. **Two named adapters on one `Linear`,** a frozen one beside a trainable one (§5).
 6. **One training example:** a picture with or without reference pictures, as rows, audio rows and row timesteps (§6).
 7. **The example's loss and its gradient** on the transformer (§7).
+8. **A backward pass that does not hold every block at once,** two ways (§8).
+9. **The optimizer step** (§9).
 
 In each section the original comes first, then the port, then what changed and which test ties them together. It
 assumes the main guide (`docs/porting.md`) for the transformer and the scheduler, and the HyperFlow guide
 (`docs/porting-hyperflow.md`) for how a LoRA reaches the forward (`ops.plinear`).
 
-**Nothing here trains yet.** There is no training loop, no optimizer and no run on real weights; §9 lists what is
-missing. Everything below is weight-free.
+**Nothing here trains a real model yet.** There is no training loop, no script and no run on real weights; §11 lists
+what is missing. The pieces have been run together for twelve optimizer steps on a tiny random model (§9), and no
+further. Everything below is weight-free.
 
 **Sources, pinned.**
 
@@ -60,9 +66,11 @@ port takes an argument and has no default.
 | original-layout converter | `lora.convert_original` | diffusers `loaders/lora_conversion_utils.py` | `tests/test_lora_convert.py` (53) |
 | forward process, target, loss | `src/h3mlx/train.py` | diffusers `scheduling_minimax_h3.py`; torch `mse_loss` | `tests/test_train.py` (47) |
 | noise-level sampling, loss weighting | `src/h3mlx/train.py` | diffusers `training_utils.py`, its two schedulers | `tests/test_train_sampling.py` (37) |
-| named adapters on one `Linear` | `src/h3mlx/lora.py`, `ops.plinear` | PEFT `layer.py`; diffusers `load_lora_adapter`, `set_adapters` | `tests/test_lora_stack.py` (10, one of them on a release fixture) |
-| one training example | `train.build_example` | diffusers `p_h3_image/before_denoise.py`, `scheduling_minimax_h3.py`; the recipe | `tests/test_train_example.py` (24) |
-| the example's loss and gradient | `train.example_loss`, `train.loss_and_gradients` | torch autograd on diffusers' transformer with PEFT's layers | `tests/test_train_gradients.py` (15) |
+| named adapters on one `Linear` | `src/h3mlx/lora.py`, `ops.plinear` | PEFT `layer.py`; diffusers `load_lora_adapter`, `set_adapters` | `tests/test_lora_stack.py` (12, one of them on a release fixture) |
+| one training example | `train.build_example` | diffusers `p_h3_image/before_denoise.py`, `scheduling_minimax_h3.py`; the recipe | `tests/test_train_example.py` (33) |
+| the example's loss and gradient | `train.example_loss`, `train.loss_and_gradients` | torch autograd on diffusers' transformer with PEFT's layers | `tests/test_train_gradients.py` (31) |
+| a bounded backward pass | `src/h3mlx/backward.py` | the plain gradient of the row above | `tests/test_backward.py` (37) |
+| the optimizer step | `train.adamw`, `train.optimizer_step` | `torch.optim.AdamW`, `clip_grad_norm_` | `tests/test_train_optimizer.py` (13) |
 
 ## 1. LoRA adapters
 
@@ -590,6 +598,11 @@ places:
   `<module>.lora_adapters`, the tuple of the adapters active on that `Linear`, in order.
 - **In a file and in `Adapter.tensors`:** no name.
 
+One difference in which names are allowed: the port takes any non-empty name without a dot. PEFT keeps its adapters
+in a `ModuleDict`, which cannot hold a name that is an attribute of `nn.Module`, so `load_lora_adapter(adapter_name="train")`
+fails there with `KeyError: "attribute 'train' already exists"`. The port has no guard for those names: a name never
+leaves the process (a file carries none), and the list of reserved words belongs to torch.
+
 `test_runtime_keys_are_pefts` compares the weights' LoRA keys with PEFT's state dict for two loaded adapters, and
 `test_file_keys_carry_no_adapter_name` compares the file keys with `get_peft_model_state_dict` and with
 `save_lora_adapter(adapter_name=...)`. They are separate tests because they are separate claims.
@@ -610,6 +623,8 @@ get wrong:
 {{ code('src/h3mlx/lora.py', function='attach') }}
 {{ code('src/h3mlx/lora.py', function='set_active') }}
 
+- **A name is used once.** `attach` refuses a name already in use anywhere in the weights, as diffusers'
+  `load_lora_adapter` does ("already in use in the model").
 - **Order.** Adapters apply in the order they were attached. `set_active(params, names)` is PEFT's `set_adapters`: it
   returns weights with those adapters active in that order. The matrices of an adapter that is off stay in the dict,
   as PEFT keeps them.
@@ -646,6 +661,28 @@ downstream; the test checks that switching the assistant off changes it.
 Not from PEFT: PEFT's `set_adapters` turns `requires_grad` on for every adapter it activates, so a trainer has to
 freeze the assistant again after activating it. The torch side of these tests does.
 
+**The frozen half is not a model.** `split` leaves the trainable adapter's scalings and its place in each `Linear`'s
+list in the frozen half, so that the two halves merge back into the model. Two things follow, and both are refused
+rather than left to go wrong quietly (`test_the_frozen_half_of_a_split_is_not_a_model`):
+
+- The forward on the frozen half alone raises a `ValueError` that names the adapter and says what the dict is, where
+  a missing key alone would say neither. The check sits in `plinear`'s named-adapter branch only; a forward with no
+  adapter does not pass through it.
+- `attach` under the same name onto the frozen half is refused: the name is still in use there, by a list entry or a
+  scaling. Accepted, it would list the adapter twice on each `Linear` and apply it twice.
+
+{{ code('src/h3mlx/lora.py', function='join') }}
+{{ code('src/h3mlx/lora.py', function='check_trainable') }}
+
+`join` is the way back: the two halves as one dict again, for a forward outside the loss, for `set_active`, or for
+saving. An updated adapter goes in as the trainable half, not through a second `attach`.
+
+`check_trainable` is what `join` and every loss check first (§7). A named adapter's matrices are read only where the
+`Linear` lists the name as active, so a trainable group that is not that (a file's keys, a name never attached, an
+adapter switched off) is merged into the weights and then ignored: the forward runs, and the gradients come back
+exactly zero with no error. PEFT has no such state to get into, because there the trainable parameters are the
+module's own. `test_check_trainable` covers each case.
+
 ### 5.4 The public training adapter, by its header
 
 The recipe's assistant for P-H3-Image is a public file. Its safetensors header (keys, shapes and dtypes; no tensor
@@ -676,7 +713,9 @@ can only be found out on real weights.
 | `test_stacked_rounding_is_pefts` (×2) | PEFT's order of casts and sums, bit for bit, in both adapter orders |
 | `test_modulation_cache_carries_a_lora_on_the_adaln_projections` (×2) | a cached forward with AdaLN LoRAs, named and unnamed, bit for bit the uncached one; what the cache drops |
 | `test_gradients_reach_the_trainable_factors_only` | the trainable group's gradient against torch autograd; none elsewhere |
-| `test_stacking_refusals` | a name twice, a named adapter beside an unnamed one (HyperFlow's included), names with dots, merging onto named adapters, unknown names |
+| `test_stacking_refusals` | a name twice, on the same modules or on others; a named adapter beside an unnamed one (HyperFlow's included); names with dots; merging onto named adapters; unknown names |
+| `test_the_frozen_half_of_a_split_is_not_a_model` | the forward and `attach` refuse the frozen half; `join` gives back the same weights and the same forward, bit for bit; an updated adapter joined is applied once |
+| `test_check_trainable` | an empty group, a file's keys, a name never attached, an adapter switched off, half a pair, a key that is no adapter's |
 | `test_training_adapter_header_fits_p_h3_image` (release fixture) | the public adapter's header against the released config |
 
 ## 6. One training example
@@ -749,6 +788,19 @@ Step by step, and whose it is:
   6e-8.
 - **Row timesteps: diffusers'.** `denoise.row_timesteps`, with the references at `max(t, level)`.
 
+Three inputs are refused that would otherwise build a wrong example without an error:
+
+- **A sigma whose timestep is 1.** The rows are noised to the float32 timestep `1 − sigma`, and for a sigma of 2⁻²⁵
+  (about 3e-8) or less that rounds to exactly 1.0: the picture's rows would be the clean picture, and the audio rows
+  exactly zero. So sigma must be above 2⁻²⁵, for the picture and for the audio rows. The recipe clamps its sigma to
+  [1e-6, 1] before it takes `1 − sigma` (`minimax_h3.py:866`), so every level the recipe can produce is accepted
+  here. The port does not clamp: a level below the bound is an error, and a caller who wants the recipe's floor
+  clamps before calling.
+- **Latents with no height or no width,** which would put NaN in the position ids.
+- **Prompt tags that are not text or vision.** One integer tag per prompt row, 1 for text and 0 for a vision token,
+  the two the picture pipelines' encoders produce. An empty prompt, the audio tag and anything past the three
+  modalities are refused; MLX's `take` does not report an index that is out of range.
+
 ### 6.3 The loss mask
 
 {{ code('src/h3mlx/train.py', function='loss_mask') }}
@@ -798,10 +850,13 @@ one torch generator in the pipeline's order.
 | `test_loss_mask_is_the_generated_video_rows` (×3) | the mask against one built from diffusers' layout; `Example.generated` |
 | `test_loss_mask_does_not_depend_on_timesteps` | a generated row and a condition row with the same timestep value |
 | `test_reference_encode_float16_rounding_is_a_choice`, `test_encode_references_needs_the_choice` | both answers reach the encode; no default |
-| `test_example_refusals` | no conditioning level; a level outside (0, 1]; latents in the wrong layout |
+| `test_example_refusals` | no conditioning level; a level outside (0, 1]; latents in the wrong layout, or with no height or width |
+| `test_a_sigma_whose_timestep_rounds_to_one_is_refused` | sigma at and below 2⁻²⁵ refused for the picture and the audio rows; just above it, and at the recipe's 1e-6, a real example |
+| `test_text_token_tags_are_text_or_vision` (×8) | empty, out of range, the audio tag, floats, booleans, two axes |
 
 ## 7. The example's loss and its gradient
 
+{{ code('src/h3mlx/train.py', function='check_inputs') }}
 {{ code('src/h3mlx/train.py', function='example_loss') }}
 {{ code('src/h3mlx/train.py', function='loss_and_gradients') }}
 
@@ -813,7 +868,78 @@ The torch side is diffusers' transformer with PEFT's layers: a frozen assistant 
 names, the trainable parameters cast to float32 (`cast_training_params`, §1.3), the example assembled from diffusers'
 functions (§6.5), `mse_loss` on the generated video rows, `backward`.
 
-### 7.1 Float32
+**What a loss checks first.** `check_inputs` runs before anything is computed, in the loss, in its gradient and in
+both gradients of §8:
+
+- the trainable group is one the forward will read (`lora.check_trainable`, §5.3). Without the check, three easy
+  mistakes run to the end and return gradients of exactly zero: an `Adapter`'s own dict passed beside a named
+  adapter, runtime names for an adapter that was never attached, and an adapter that `set_active` has switched off
+  (`test_the_loss_refuses_matrices_the_forward_would_not_read`, which also shows the zeros through the unchecked
+  forward);
+- the text is exactly (1, the layout's text rows, text dim). The forward scatters the text rows into the packed
+  sequence with an assignment, and an assignment broadcasts: one row of text would fill every text position
+  (`test_the_loss_refuses_a_text_of_the_wrong_shape`).
+
+### 7.1 The forward that is differentiated
+
+{{ code('src/h3mlx/train.py', struct='ExampleForward') }}
+
+`example_loss` does not call `ops.dit_forward`. It runs that forward's operations in its order, from the functions
+`dit_forward` is itself made of (`ops.dit_inputs`, `ops.dit_block`, `ops.dit_outputs`), in three stages. Two things
+differ from the sampling forward, and neither changes a value: `test_the_training_forward_is_the_sampling_forward`
+compares the loss with one taken through `ops.dit_forward`, bit for bit, on three examples, each in float32 and over
+a bf16 base, with adapters on every `Linear`.
+
+**Nothing is evaluated inside it.** The sampling forward calls `mx.eval` after every block, which keeps its lazy
+graph one block long. Under autograd that is the wrong thing: an array evaluated while it is being traced keeps the
+graph that made it, so every block's intermediates stay alive until the backward pass has used them. §8 measures it.
+
+**The modulation tables' rows are gathered through float32.** Each block reads six tables of one row per
+(timestep, modality) pair, and every sequence row takes its row of each:
+
+{{ code(TR, lines=(362, 366), root=DM) }}
+{{ code('src/h3mlx/ops.py', function='take_rows') }}
+{{ code('src/h3mlx/ops.py', function='take_rows_for_training') }}
+
+In the forward the two gathers are the same bits. Their gradients are not. The backward of a gather adds every
+sequence row's cotangent into the table row it came from: thousands of rows into six. `mx.take` does that sum in the
+table's dtype, and a running bf16 sum, with eight bits, stops taking in what it is given once it is a few hundred
+times the size of the addends. torch's `index_select` returns the sum rounded to bf16 once. Gathered through float32,
+MLX sums in float32 and rounds once.
+
+Relative error of the table's gradient against the exact sum, bf16, on the CPU stream
+(`bench/train_gather_gradient.py`; the rows' factors are standard normal draws around the mean given):
+
+| sequence rows | per table row | mean | `take_rows` | `take_rows_for_training` | torch `index_select` |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 600 | 100 | 0 | 0.013 | 0.0018 | 0.0018 |
+| 6,000 | 1,000 | 0 | 0.036 | 0.0016 | 0.0016 |
+| 24,000 | 4,000 | 0 | 0.074 | 0.0017 | 0.0017 |
+| 24,000 | 4,000 | 0.5 | 0.49 | 0.0016 | 0.0016 |
+| 48,000 | 8,000 | 0 | 0.11 | 0.0016 | 0.0016 |
+| 48,000 | 8,000 | 0.5 | 0.74 | 0.0014 | 0.0014 |
+
+- **Which gradients this reaches.** The ones a table's gradient feeds: an adapter on a block's AdaLN projection, on
+  the final norm's projection, or on the time embedder. Adapters on the attention and feed-forward linears are not
+  downstream of it, and their gradients are identical either way.
+- **Against torch, at the op.** `test_the_training_gathers_gradient_is_torchs_index_select` gathers six table rows
+  into 6,000: over a bf16 and a float16 table the training gather's gradient is torch's `index_select`'s bit for bit
+  (on the CPU stream; on the default device in over 99% of the elements, see below), and the plain gather's is 3%
+  from the exact sum with 7% of its elements torch's.
+- **On the whole model.** `test_a_tables_gradient_over_a_bf16_base_is_the_rows_sum` needs a reference that does not
+  depend on either gather, and makes one: the same example with a timestep entry of its own for every row. Each table
+  then has a row per sequence row, used once, so nothing is summed in the gather; the rows' cotangents are summed
+  later, in float32, in the product with the float32 matrices. The forward's values and the loss are the same bits.
+  On 2,316 rows the gradients with shared tables are within 0.44% of that reference (one rounding of each sum
+  apart); taken through the sampling forward's gather they are 20% to 52% away.
+- **Why sampling keeps the plain gather.** The training gather makes a float32 copy of the gathered rows, twice their
+  size, and sampling has no backward. `dit_block` and `dit_outputs` take the gather as an argument, `take`, and
+  `ops.dit_forward` leaves it at `take_rows`: its operations are the ones it had.
+- **Order on the GPU.** On the default device MLX adds a gather's cotangents in no fixed order, so a float32 sum can
+  differ in its last bit from one run to the next, and a bf16 result that sits on a rounding boundary can then move
+  one step. The CPU stream is repeatable. Tests that need exact equality over a bf16 base run there.
+
+### 7.2 Float32
 
 `test_loss_and_gradients_are_torchs` runs eight cases: text-to-image and edits with one and two references, four
 noise levels, with the assistant beside the trainable adapter and without. The loss agrees to 1e-5 relative, and
@@ -823,7 +949,7 @@ At PEFT's initialisation `lora_B` is zero, which is where training starts. Then 
 adapter, `lora_A`'s gradient is exactly zero on both sides, and `lora_B`'s is torch's
 (`test_at_pefts_init_the_gradient_reaches_lora_b_alone`).
 
-### 7.2 A bf16 base with float32 factors
+### 7.3 A bf16 base with float32 factors
 
 This is the setting the trainer is meant to run in: the base in the release's mixed precision, the assistant in its
 base's dtype as loaded, the trainable matrices float32 and their products float32. There is no exact answer in bf16,
@@ -832,22 +958,49 @@ the attention and feed-forward linears (`test_gradients_over_a_bf16_base_track_t
 
 | seed | gradient error against float32, torch | MLX | loss error, torch | MLX |
 | --- | --- | --- | --- | --- |
-| 0 | 0.0118 | 0.0117 | 0.0039 | 0.0053 |
-| 1 | 0.0114 | 0.0116 | 0.0008 | 0.0005 |
-| 2 | 0.0155 | 0.0151 | 0.0009 | 0.0015 |
+| 0 | 0.0114 | 0.0117 | 0.0041 | 0.0053 |
+| 1 | 0.0118 | 0.0116 | 0.0005 | 0.0005 |
+| 2 | 0.0156 | 0.0151 | 0.0010 | 0.0015 |
 
 The test asks that MLX's gradient error be at most 1.5 times torch's own plus 1e-3, and that both losses be within 1%
 of the float32 loss.
 
-- **What this does not pin.** Its allowance is wide: an implementation that ran the trainable products in bf16 passes
-  it. That the products are float32 is pinned bit for bit at the level of one `Linear` (§5.2,
-  `test_stacked_rounding_is_pefts`), not here.
+One detail of the torch side matters here. Loading an adapter into a bf16 model rounds its matrices to bf16, and
+`cast_training_params` widens their dtype without bringing the values back. A trainer's matrices leave that grid at
+their first step, so the tests put the float32 values back into the PEFT model after the cast: both sides then hold
+the same matrices.
+
+**Float32 products, pinned.** The test above cannot tell float32 products from bf16 ones: with ordinary matrices
+either is within bf16's noise of the float32 run. An adapter whose rows cancel can:
+
+{{ code('tests/test_train_gradients.py', function='cancelling_adapter') }}
+
+Its update is the small difference of two large products, B₁(N x) computed as (B₁ A₁ x − B₁ A₁ x + δ B₁ N x) / δ
+with δ = 2⁻¹⁰. Float32 keeps about 14 bits of that difference; bf16, with 8, keeps none.
+`test_products_with_float32_matrices_are_float32_over_a_bf16_base` runs it over the bf16 base against torch and
+PEFT, and runs our side once more with the same matrices cast to bf16, which is what products in the base's dtype
+would compute:
+
+| seed | gradient error against float32, torch | MLX | MLX with the matrices in bf16 |
+| --- | --- | --- | --- |
+| 0 | 0.0098 | 0.0102 | 0.57 |
+| 1 | 0.0118 | 0.0118 | 0.87 |
+| 2 | 0.0109 | 0.0114 | 0.60 |
+
 - **Larger adapters are noisier.** In a two-layer variant with adapter matrices three times larger, the gradient
   errors ran from 1% to 10% on both sides over six seeds, with MLX between 0.5 and 1.5 times torch's (a probe, not a
   test). These are tiny random models. They say nothing about 50 real layers.
 - **No bf16 product path.** Running the trainable products in bf16 to save memory is a separate mode, not built.
 
-### 7.3 Who gets a gradient, and the sign
+### 7.4 A quantized base
+
+The base's `Linear` weights can be 8-bit quantized objects (`ops.QuantizedWeight`) inside the frozen group:
+`mx.value_and_grad` walks the argument and leaves them alone. `test_gradients_over_a_quantized_base` quantizes 21
+weights of a tiny model and compares with the same base holding the matrices those weights stand for: the loss to
+1e-5 and every gradient tensor to 1e-4 (8.9e-6 measured). The comparison is against the dequantized matrices, not the
+originals, from which the gradient is 1% away.
+
+### 7.5 Who gets a gradient, and the sign
 
 - `test_no_gradient_for_the_base_or_the_assistant`: in torch only the trainable adapter's parameters hold a gradient
   after `backward`. Ours returns the trainable group's keys and nothing else. The check is not empty: differentiated
@@ -861,7 +1014,7 @@ of the float32 loss.
 One thing about MLX learned here: `mx.value_and_grad` walks every argument it is handed, and it rebuilds the tuples
 of adapter names in the dict of constants. The arrays in it are left as the same objects.
 
-### 7.4 The tests
+### 7.6 The tests
 
 | test | pins |
 | --- | --- |
@@ -871,8 +1024,227 @@ of adapter names in the dict of constants. The arrays in it are left as the same
 | `test_no_gradient_for_the_base_or_the_assistant` | gradients for the trainable group only |
 | `test_the_targets_sign_reaches_the_loss_and_the_gradient` | the target's sign, against a target solved from the step equation |
 | `test_gradients_over_a_bf16_base_track_torchs` (×3) | bf16 base, float32 factors: MLX's error against torch's own |
+| `test_products_with_float32_matrices_are_float32_over_a_bf16_base` (×3) | the trainable products are float32: an adapter that bf16 products get 57% to 87% wrong |
+| `test_the_training_forward_is_the_sampling_forward` (×6) | the staged forward's loss is `ops.dit_forward`'s, bit for bit |
+| `test_the_training_gathers_gradient_is_torchs_index_select` (×3) | the gather's gradient against torch's, bit for bit in bf16 and float16; the two gathers' forward values the same bits |
+| `test_a_tables_gradient_over_a_bf16_base_is_the_rows_sum` | the whole gradient at 2,316 rows against a reference with nothing to sum |
+| `test_the_loss_refuses_matrices_the_forward_would_not_read`, `test_the_loss_refuses_a_text_of_the_wrong_shape` | what `check_inputs` refuses, and what each case did without it |
+| `test_gradients_over_a_quantized_base` | a quantized base as a constant of the differentiation |
 
-## 8. What each test would catch
+## 8. A backward pass that does not hold every block at once
+
+`loss_and_gradients` builds one graph for the whole forward and differentiates it. Every block's intermediates are
+alive until the backward pass reaches that block, so the peak grows with the number of blocks. `h3mlx.backward` has
+two other ways to get the same loss and the same gradients. There is no library original for either: the oracle is
+§7's gradient, which is itself tested against torch.
+
+### 8.1 Each block checkpointed
+
+{{ code('src/h3mlx/backward.py', function='checkpointed_loss') }}
+{{ code('src/h3mlx/backward.py', function='loss_and_gradients_checkpointed') }}
+
+`mx.checkpoint` wraps a function so that its intermediates are not kept for the backward pass; they are recomputed
+from the function's inputs when the backward pass gets there. Two facts about it decide how it is used here, and each
+has a minimal test:
+
+- **A checkpointed function gives no gradient to what it captures.** It differentiates with respect to its arguments.
+  An array it reads from the enclosing scope gets a gradient of exactly zero, with no error, even when the outer
+  function is differentiated with respect to that array
+  (`test_a_checkpointed_function_gives_no_gradient_to_what_it_captures`). So the block's input, the time embedding and
+  the block's trainable matrices are arguments. The block's frozen weights are captured on purpose: zero is the
+  gradient wanted for them, and they are constants either way.
+- **An `mx.eval` inside the loop defeats it.** `test_an_eval_in_the_loop_defeats_the_checkpoint` differentiates a
+  chain of sixteen blocks four ways on the CPU stream. Peak memory over the start: plain 86 MB, checkpointed 55 MB;
+  with an `mx.eval` after each block, as the sampling forward has, 185 MB plain and 185 MB checkpointed. Evaluated
+  mid-trace, each block's output keeps its graph, and the checkpoint has nothing left to drop. This is why §7.1's
+  forward evaluates nothing.
+
+### 8.2 Block by block, by hand
+
+{{ code('src/h3mlx/backward.py', function='loss_and_gradients_blockwise') }}
+
+The blocks are walked forward, each evaluated, keeping each block's input. Then the last stage's vector-Jacobian
+product gives the cotangent of the last block's output, and each block in turn, last to first, turns the cotangent of
+its output into the cotangent of its input, of the time embedding, and of its own trainable matrices, and is
+evaluated before the next. The stage before the blocks takes what is left: the cotangent of the first block's input
+and the time embedding's, summed over the blocks.
+
+- **What it keeps.** One block's graph at a time, and one saved input per block: rows × hidden values in the
+  base's dtype.
+- **What it costs.** Each block's forward runs twice, once on the way up and once inside its product.
+- **What it skips.** With no trainable matrix before the blocks, nothing needs the time embedding's cotangent, and it
+  is never evaluated.
+
+### 8.3 Both are the plain gradient
+
+`test_bounded_gradients_equal_the_plain_gradient` compares each way's loss and every gradient tensor with §7's, in
+float32 and over a bf16 base with float32 factors, with a trainable adapter alone and beside a frozen assistant, with
+an adapter on every `Linear` (so the stages before and after the blocks have trainable matrices too) and with one on
+the block linears only. The keys are the trainable group's: nothing for the assistant or the base.
+
+- **Tolerance:** 1e-5 per gradient tensor, relative. Measured: every tensor exactly equal, except those a modulation
+  table's gradient feeds (§7.1), which are within 3e-7.
+- **One case with more room.** Over a bf16 base on the default device those table-fed tensors are allowed 2e-3, for
+  the rounding step §7.1 describes. None moved in the runs measured, and the same cases hold at 1e-5 on the CPU
+  stream.
+
+### 8.4 Memory, measured on a synthetic model
+
+`bench/train_backward_memory.py` builds a synthetic transformer (hidden size 96, random weights in the release's
+mixed precision, a rank-4 float32 adapter on the block linears, one text-to-image example) and measures the peak of
+MLX's active memory during one gradient, over what was active before it, each cell in a process of its own. Four
+ways: through the sampling forward with its evals, plain, checkpointed, block by block. On an M2 Max, in MB:
+
+| 596 rows | 4 blocks | 8 blocks | 16 blocks | growth per block |
+| --- | ---: | ---: | ---: | ---: |
+| default device: through the sampling forward | 69 | 136 | 271 | 16.9 |
+| default device: plain | 68 | 106 | 153 | 7.1 |
+| default device: checkpointed | 76 | 78 | 100 | 2.0 |
+| default device: block by block | 30 | 31 | 30 | 0.0 |
+| CPU stream: through the sampling forward | 80 | 159 | 316 | 19.7 |
+| CPU stream: plain | 33 | 59 | 109 | 6.3 |
+| CPU stream: checkpointed | 20 | 21 | 43 | 1.9 |
+| CPU stream: block by block | 17 | 17 | 18 | 0.1 |
+
+| 2,324 rows | 4 blocks | 8 blocks | 16 blocks | growth per block |
+| --- | ---: | ---: | ---: | ---: |
+| default device: through the sampling forward | 468 | 784 | 1564 | 91.4 |
+| default device: plain | 509 | 672 | 1047 | 44.8 |
+| default device: checkpointed | 431 | 442 | 536 | 8.7 |
+| default device: block by block | 166 | 168 | 172 | 0.5 |
+| CPU stream: through the sampling forward | 437 | 871 | 1739 | 108.5 |
+| CPU stream: plain | 228 | 390 | 715 | 40.7 |
+| CPU stream: checkpointed | 119 | 119 | 208 | 7.4 |
+| CPU stream: block by block | 109 | 111 | 116 | 0.5 |
+
+What the numbers show, and what they do not:
+
+- **Differentiating the sampling forward as it is grows fastest,** on both devices, and at 16 blocks it is the
+  largest number in every table. Taking the evals out of the forward (plain) cuts the growth to between a third and
+  a half.
+- **Block by block is nearly flat.** Its growth per block is the saved input: 596 rows × 96 × 2 bytes is 0.11 MB, and
+  2,324 rows is 0.45 MB.
+- **Checkpointing saves less, and less predictably.** On this model it grows more slowly than plain on both devices.
+  On the sixteen-block chain of §8.1, which the script also prints, it saves a third on the CPU stream (86 MB plain,
+  55 MB checkpointed) and nothing on the default device (195 MB plain, 209 MB checkpointed), where one evaluation
+  holds its buffers until the device has run them. What it saves depends on the device and on the graph.
+- **Time.** At 16 blocks the two bounded ways took 1.3 to 2 times the plain gradient's time on the default device
+  and 1.5 to 1.6 times on the CPU stream (one run each; the script prints the seconds).
+- **The default device's numbers move between runs,** by tens of MB in some cells: the checkpointed gradient at 4
+  blocks and 596 rows measured 54 MB in one run and 76 MB in another. The CPU stream's repeat.
+- **The number is MLX's counter.** `mx.get_peak_memory()` counts active buffers; what MLX holds in its buffer cache
+  is not in it.
+- **Nothing here predicts 50 real blocks.** The real model has hidden size 5,376, tens of thousands of rows and an
+  attention width of its own. Which way fits in memory there, and how long it takes, has to be measured there.
+
+`test_peak_memory_grows_more_slowly_with_depth_the_less_is_kept` asserts directions only, from 4 blocks to 16, as
+ratios of growth:
+
+- on the default device, the block-by-block gradient's peak grows by less than a twentieth of the plain one's;
+- on the CPU stream, where the numbers repeat: that again; the checkpointed gradient's growth is below half the
+  plain one's; and the plain one's is below 0.6 of the growth through the sampling forward.
+
+The checkpointed path is not asserted on the default device.
+
+### 8.5 The tests
+
+| test | pins |
+| --- | --- |
+| `test_checkpointed_loss_is_the_loss` (×2) | checkpointing changes no value: the loss bit for bit |
+| `test_bounded_gradients_equal_the_plain_gradient` (×24) | both ways against the plain gradient: float32 and bf16 base, one and two adapters, adapters on every linear and on the block linears |
+| `test_bounded_gradients_at_other_levels_and_layouts` (×2) | text-to-image and two references, a shared timestep, a loss weight |
+| `test_bounded_gradients_over_a_quantized_base` (×2) | quantized weights captured by a checkpoint, and as constants of each product |
+| `test_bounded_gradients_refuse_what_the_loss_refuses` (×3) | `check_inputs` before anything is computed |
+| `test_stages_cover_every_trainable_key_once` | which stage of the forward each trainable matrix belongs to |
+| `test_a_checkpointed_function_gives_no_gradient_to_what_it_captures` | the first fact about `mx.checkpoint` |
+| `test_an_eval_in_the_loop_defeats_the_checkpoint` | the second |
+| `test_peak_memory_grows_more_slowly_with_depth_the_less_is_kept` | the directions of the memory measurement |
+
+## 9. The optimizer step
+
+{{ code('src/h3mlx/train.py', function='adamw') }}
+{{ code('src/h3mlx/train.py', function='optimizer_step') }}
+
+The original is torch's: `torch.optim.AdamW` after `torch.nn.utils.clip_grad_norm_`. The port uses MLX's own
+`AdamW` and `clip_grad_norm`, whose formulas are the same ones (decoupled weight decay, then the bias-corrected
+update; the gradients scaled by `min(1, max_norm / (norm + 1e-6))`), and checks the result against torch over a run
+of steps. **No hyper-parameter has a default.** The learning rate, the betas, epsilon, the weight decay and the bound
+on the gradient's norm are keyword arguments the caller must give; the recipe's values for them were not read.
+
+### 9.1 Twelve steps against torch
+
+`test_steps_are_torchs` runs twelve steps over three examples in turn (text-to-image, one reference and two, at
+three noise levels), with a frozen assistant beside the trained adapter, in float32. After every step it compares the
+loss (to 1e-5), the gradient's norm before clipping (to 1e-5) and how far the matrices have moved from their start
+(to 1e-4, relative, over all of them). Four runs: two settings in which every hyper-parameter differs, from PEFT's
+initialisation and from random matrices.
+
+| setting | start | movement from torch's, worst step | steps clipped |
+| --- | --- | ---: | ---: |
+| rate 1e-3, betas (0.9, 0.999), eps 1e-8, decay 0.01 | PEFT's initialisation | 2.1e-5 | 5 of 12 |
+| rate 3e-4, betas (0.8, 0.95), eps 1e-3, decay 0.1 | PEFT's initialisation | 7.8e-7 | 4 of 12 |
+| rate 1e-3, betas (0.9, 0.999), eps 1e-8, decay 0.01 | random matrices | 7.8e-6 | 8 of 12 |
+| rate 3e-4, betas (0.8, 0.95), eps 1e-3, decay 0.1 | random matrices | 3.6e-6 | 8 of 12 |
+
+- **The clipping is part of what is compared.** Adam's update barely depends on the gradient's scale, so a wrong
+  clip applied on every step would hardly show. The bound is therefore set between the norms the three examples
+  give, so that some steps are clipped and some are not, and the second setting has an epsilon of the gradients'
+  size. `test_clipping_is_torchs` also checks the clipped gradients themselves, through one step of plain gradient
+  descent, below the norm, above it and with no bound.
+- **It trains.** In all four runs the first example's loss is lower at its fourth visit than at its first, on both
+  sides.
+
+**Over a bf16 base** the two sides' gradients are 1% apart (§7.3), and Adam's first steps move every element by the
+learning rate in the direction of its gradient's sign, so an element whose gradient is near zero can go the other
+way. `test_steps_over_a_bf16_base_stay_near_torchs` asserts little, on purpose: the losses within 0.5% at every step
+(6.9e-4 measured) and the movement within 25% of torch's (2% to 12% measured). Step for step, a run over a bf16 base
+is not comparable with torch's.
+
+### 9.2 Bias correction
+
+MLX's `AdamW` leaves the bias correction out unless asked: `bias_correction=False` is its default. torch always
+applies it. On the first step torch moves every element by the learning rate, and MLX's default moves it by
+(1 − β₁) / √(1 − β₂) times that, 3.16 times for betas of (0.9, 0.999).
+`test_mlx_adamw_needs_bias_correction_to_be_torchs` measures that ratio and checks five steps of `train.adamw`
+against torch's on one matrix.
+
+### 9.3 Why the trained matrices are float32
+
+`optimizer_step` refuses matrices that are not float32. `test_half_precision_matrices_do_not_take_updates_of_1e_4`
+shows why, with ten AdamW steps at a learning rate of 1e-4 and a fixed gradient:
+
+| dtype, magnitude of the elements | what happens |
+| --- | --- |
+| float32 | every element moves by 1e-3, ten steps' worth |
+| bf16, 2⁻⁵ (0.031) and up | not one element changes: bf16's spacing there is 2.4e-4 or more, and an update of 1e-4 is under half of it |
+| bf16, 2⁻⁶ to 2⁻⁵ | every element moves by one whole spacing a step, 1.2e-4: 22% too far |
+| bf16, zero (`lora_B`'s start) | moves by the learning rate |
+| float16 | the second moment of a gradient of 1e-2 is 1e-7, below float16's smallest normal number: the update is NaN or infinite for most elements |
+
+So half-precision matrices are not uniformly stuck. Small elements move, coarsely, and stop moving as they grow; in
+float16 the optimizer's own state breaks first.
+
+### 9.4 What the step refuses
+
+- matrices that are not float32 (§9.3);
+- gradients whose keys are not the matrices' keys;
+- a bound on the norm that is not a positive number (`math.inf` clips nothing);
+- a gradient norm that is not finite. torch's clip raises for one only under `error_if_nonfinite`, and otherwise
+  the NaN goes into the weights. Here it is always an error, raised before the optimizer's state is touched.
+
+### 9.5 The tests
+
+| test | pins |
+| --- | --- |
+| `test_steps_are_torchs` (×4) | twelve steps against `torch.optim.AdamW` after `clip_grad_norm_`: losses, norms, and the matrices' movement |
+| `test_steps_over_a_bf16_base_stay_near_torchs` | the same loop over a bf16 base, loosely |
+| `test_clipping_is_torchs` (×4) | the clipped gradients and the returned norm against torch's |
+| `test_mlx_adamw_needs_bias_correction_to_be_torchs` | MLX's default against torch's first step; `train.adamw` against five |
+| `test_half_precision_matrices_do_not_take_updates_of_1e_4` | bf16 and float16 under AdamW at 1e-4 |
+| `test_optimizer_step_refusals` | what the step refuses, with the optimizer's state untouched |
+| `test_no_hyper_parameter_has_a_default` | every hyper-parameter keyword-only and required |
+
+## 10. What each test would catch
 
 Each wrong implementation below was made on a copy of the sources and run against the tests; the named test failed.
 
@@ -914,11 +1286,14 @@ Each wrong implementation below was made on a copy of the sources and run agains
 | lookup rounded instead of floored, in float64, or unclipped | `test_same_seed_same_sigmas_uniform`, `test_sample_sigmas_lookup` |
 | a NaN `u` let through the range test; the grid's shape or its levels unchecked | `test_sample_sigmas_refuses_nan_and_a_bad_grid` |
 | `flow_sigmas` or `shift_grid` testing `shift <= 0` only; the shift not checked as a float32 | `test_a_shift_that_is_not_a_positive_finite_float32_is_refused` |
-| a later adapter's input cast from the original input; the deltas summed before they meet the base result; adapters applied in sorted order; a named adapter's products in the base's dtype | `test_stacked_rounding_is_pefts` |
+| a later adapter's input cast from the original input; the deltas summed before they meet the base result; adapters applied in sorted order | `test_stacked_rounding_is_pefts` |
+| a named adapter's products in the base's dtype | `test_stacked_rounding_is_pefts`, `test_products_with_float32_matrices_are_float32_over_a_bf16_base` |
 | a named adapter's scaling ignored; `set_active` leaving every adapter on, or ignoring the order given | `test_stacked_forward_matches_peft_in_every_state` |
 | `attach` overwriting a `Linear`'s adapter list; `split` handing over every named adapter | `test_runtime_keys_are_pefts`, `test_file_keys_carry_no_adapter_name` |
 | the frozen adapter's delta cut from the gradient | `test_gradients_reach_the_trainable_factors_only`, `test_loss_and_gradients_are_torchs` |
-| an unnamed adapter attached beside a named one; `merge` onto weights with a named adapter | `test_stacking_refusals` |
+| an unnamed adapter attached beside a named one; `merge` onto weights with a named adapter; a name's use checked on the adapter's own modules only | `test_stacking_refusals` |
+| `attach` looking at the matrices only, or missing a scaling or a list entry left behind; the forward on a frozen half left as a `KeyError`; `join` not checking | `test_the_frozen_half_of_a_split_is_not_a_model`, `test_check_trainable` |
+| `check_trainable` accepting an inactive name, half a pair or an empty group | `test_check_trainable`, `test_the_loss_refuses_matrices_the_forward_would_not_read` |
 | a block's AdaLN projection, the final one, `proj_in`, `audio_proj_out` or `context_embedder` not through `plinear` | `test_stacked_forward_matches_peft_in_every_state`, `test_every_converted_module_attaches_and_gives_the_same_forward` |
 | the modulation cache building its tables without the LoRA, or leaving a dropped projection's LoRA behind | `test_modulation_cache_carries_a_lora_on_the_adaln_projections` |
 | the example's target `noise − x_0`; the picture's noise drawn before the references'; the references or the picture mixed with a Python float; references left clean; the picture's rows ahead of the references'; an edit packed as text-to-image | `test_example_is_diffusers_pieces` |
@@ -926,26 +1301,52 @@ Each wrong implementation below was made on a copy of the sources and run agains
 | the loss mask covering the condition rows; `generated` keeping them | `test_loss_mask_is_the_generated_video_rows` |
 | float16 rounding always on, or inverted; the choice dropped on the way to the encode | `test_reference_encode_float16_rounding_is_a_choice`, `test_encode_references_needs_the_choice` |
 | the example's sigma unchecked | `test_example_refusals` |
+| a sigma whose timestep is 1 accepted; the bound put at the recipe's 1e-6; the comparison strict the wrong way | `test_a_sigma_whose_timestep_rounds_to_one_is_refused` |
+| latents with no height or no width accepted, or only the height checked | `test_example_refusals` |
+| prompt tags: any integers, the audio tag, an empty array, floats or two axes accepted | `test_text_token_tags_are_text_or_vision` |
 | gradients taken for every weight; the loss over the condition rows too; every row at the first timestep; the audio rows left out of the forward | `test_loss_and_gradients_are_torchs` |
 | the weight dropped from the example's loss | `test_weight_scales_the_loss_and_the_gradient` |
+| the loss or its gradient not checking its inputs; a text accepted when it only broadcasts, or without its type checked | `test_the_loss_refuses_matrices_the_forward_would_not_read`, `test_the_loss_refuses_a_text_of_the_wrong_shape` |
+| the training gather summing in the table's dtype, widening bf16 only, or returning float32 | `test_the_training_gathers_gradient_is_torchs_index_select`, `test_the_training_forward_is_the_sampling_forward` |
+| the staged forward's blocks or its end using the sampling gather; `dit_block` or `dit_outputs` ignoring the gather for one of the tables | `test_a_tables_gradient_over_a_bf16_base_is_the_rows_sum` |
+| the training forward, or its block stage, evaluating after every block | `test_peak_memory_grows_more_slowly_with_depth_the_less_is_kept` |
+| a checkpointed block capturing its trainable matrices, or the time embedding | `test_bounded_gradients_equal_the_plain_gradient` |
+| no checkpoint at all | `test_peak_memory_grows_more_slowly_with_depth_the_less_is_kept` |
+| block by block: the blocks' time-embedding cotangent dropped, or not handed to the first stage; the last stage's cotangent not 1; the final norm's projection counted before the blocks | `test_bounded_gradients_equal_the_plain_gradient` |
+| block by block: nothing evaluated in the backward walk | `test_peak_memory_grows_more_slowly_with_depth_the_less_is_kept` |
+| either bounded gradient dropping the loss weight, or not checking its inputs | `test_bounded_gradients_at_other_levels_and_layouts`, `test_bounded_gradients_refuse_what_the_loss_refuses` |
+| AdamW without bias correction; the weight decay dropped; epsilon, a beta or the learning rate fixed | `test_steps_are_torchs` |
+| no clipping; clipping per tensor; clipping to twice the bound; the norm returned after clipping | `test_steps_are_torchs`, `test_clipping_is_torchs` |
+| half-precision matrices accepted; a non-finite norm applied, or checked after the optimizer's state changed; keys unchecked; a zero or boolean bound accepted | `test_optimizer_step_refusals` |
+
+One change in this list is caught by a narrow margin. The block-by-block gradient's forward walk evaluates each block
+before the next; without that evaluation the gradients are the same and only the memory differs, on the default
+device only. The memory test sees it as a growth of 6% to 17% of the plain gradient's against a bound of 5%, with
+numbers that vary from run to run: five runs of the wrong version failed five times, and under an earlier, looser
+bound of a quarter it had passed.
 
 Where a row names a dtype, the change is caught only there. A tensor timestep's `1 − t` taken in float64 from the
 value before its cast is one such: for a float32 sample it rounds to the same float32 number, because that
 subtraction is a single correctly rounded operation either way, and only the bf16 cases fail, where the timestep
 must be cast to bf16 before the subtraction.
 
-## 9. Not done, and open
+## 11. Not done, and open
 
-- **No training.** No memory-bounded backward pass, no optimizer step, no latent or text caches, no script, and no
-  run on real weights. The pieces here have been used together on a tiny random model for one loss and one gradient
-  (§7), and no further.
-- **Memory.** `example_loss` runs the whole forward under autograd. The forward evaluates block by block, which keeps
-  every block's graph alive for the backward pass. That is fine at tiny sizes and is what the memory-bounded backward
-  pass is for.
-- **A quantized base.** The weights are passed as arguments, and `mx.value_and_grad` walks them. A quantized weight
-  is an object, not an array; whether it can be passed this way is untested.
-- **The recipe's unread parts.** How the trainer mixes the picture with noise, how it samples timesteps, its density
-  and its loss weighting were not read (§6.1). No preset is defined.
+- **No training of a real model.** No loop, no latent or text caches, no script, and no run on real weights. On a
+  tiny random model the pieces have been used together for twelve optimizer steps (§9), and no further.
+- **Memory at real size.** §8's measurements are of a synthetic model with hidden size 96. Which of the three
+  gradients fits 50 real blocks, how long a step takes, and whether the float32 copy the training gather makes
+  (§7.1) matters there, are unmeasured.
+- **The optimizer's state.** `optimizer_step` keeps it in MLX's optimizer object. Saving it and resuming from it are
+  not built, and neither is a learning-rate schedule beyond what MLX's optimizer takes as its learning rate.
+- **Sums on the GPU have no fixed order.** A gradient over a bf16 base is repeatable on the CPU stream and can
+  differ by a bf16 rounding step from run to run on the default device (§7.1). Nothing here makes a training run
+  bit-reproducible.
+- **Other sums in half precision.** The modulation tables' gather was the one place found where MLX's backward adds
+  many rows in bf16 on the way to a trainable matrix. A trainable matrix placed somewhere else than a `Linear`, or a
+  frozen adapter turned trainable in bf16, would need the same look.
+- **The recipe's unread parts.** How the trainer mixes the picture with noise, how it samples timesteps, its density,
+  its loss weighting and its optimizer settings were not read (§6.1). No preset is defined.
 - **A step-distilled base.** P-H3-Image samples in 8 steps without guidance. Whether a plain flow-matching loss on it
   keeps that behaviour, with or without the assistant adapter, is untested here.
 - **The assistant adapter's values.** Only its header was read (§5.4).
@@ -953,8 +1354,8 @@ must be cast to bf16 before the subtraction.
   decided (§6.4).
 - **Density and weighting defaults.** None are chosen. The tests cover the functions, not which settings suit this
   model.
-- **bf16.** Gradients over a bf16 base are tested on four tiny layers, with a wide allowance (§7.2). A bf16 product
-  path for the trainable matrices is not built.
+- **bf16.** Gradients over a bf16 base are tested on four tiny layers against torch's own error (§7.3), and a run of
+  optimizer steps over one only loosely (§9.1). A bf16 product path for the trainable matrices is not built.
 - **Real files.** No published adapter's tensors were read by this code; the tests write their own. Layout details of
   real files that the converter's docstring does not mention would not be caught.
 - **Routing between partitions.** `h3mlx.lora` returns an adapter and the caller attaches it to the weights it means.
