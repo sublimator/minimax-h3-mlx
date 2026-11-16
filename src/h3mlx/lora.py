@@ -3,7 +3,8 @@
 Ported from PEFT 0.21.2 (`tuners/lora/layer.py`: the scaling in `update_layer`, `reset_lora_parameters`,
 `Linear.get_delta_weight`, `Linear.merge`, `Linear.forward`; `tuners/lora/model.py` and `utils/other.py`: the rank and
 alpha patterns) and from diffusers main at `d3d8af89` (`loaders/peft.py`: `load_lora_adapter`, `save_lora_adapter`;
-`utils/peft_utils.py`: `get_peft_kwargs`; `loaders/lora_pipeline.py`: `MiniMaxH3LoraLoaderMixin.lora_state_dict`).
+`utils/peft_utils.py`: `get_peft_kwargs`; `loaders/lora_pipeline.py`: `MiniMaxH3LoraLoaderMixin.lora_state_dict`;
+`loaders/lora_conversion_utils.py`: `_convert_non_diffusers_minimax_h3_lora_to_diffusers`).
 
 An adapter is two matrices per Linear, `lora_A` (rank, in) and `lora_B` (out, rank), and an alpha; the Linear then
 computes `W x + (alpha / rank) * B (A x)` (`ops.plinear`). HyperFlow's own loader stays in `hyperflow.py`: its file
@@ -27,6 +28,7 @@ PREFIXES = ("transformer", "transformer_ref")  # the component names a diffusers
 KEY_RE = re.compile(r"^(?P<module>.+)\.lora_(?P<matrix>[AB])\.weight$")
 BLOCK_TARGETS = hyperflow.BLOCK_TARGETS
 SCALING = ".lora_scaling"
+ORIGINAL_PREFIXES = ("diffusion_model.", "blocks.", "token_refiner.blocks.", "final_layer.", "lora_unet_")
 UNSUPPORTED = ("use_dora", "use_rslora", "lora_bias", "fan_in_fan_out")
 
 
@@ -178,6 +180,162 @@ def merge(params: dict, cfg: dict, adapter: Adapter) -> dict:
     return out
 
 
+# --- adapters in the original checkpoint's key names ---------------------------------------------------------------
+
+_FLATTENED = [  # musubi-tuner's `lora_unet_` names, every `.` collapsed to `_`
+    (r"blocks_(\d+)_attn_(qkv|out)_proj", r"blocks.\1.attn.\2_proj"),
+    (r"blocks_(\d+)_mlp_fc([12])", r"blocks.\1.mlp.fc\2"),
+    (r"blocks_(\d+)_adaln_proj_linear", r"blocks.\1.adaln_proj.linear"),
+    (r"token_refiner_blocks_(\d+)_attn_(qkv|out)_proj", r"token_refiner.blocks.\1.attn.\2_proj"),
+    (r"token_refiner_blocks_(\d+)_mlp_fc([12])", r"token_refiner.blocks.\1.mlp.fc\2"),
+    (r"(video|audio)_patch_proj", r"\1_patch_proj"),
+    (r"condition_proj", "condition_proj"),
+    (r"time_embedder_proj_(in|out)", r"time_embedder.proj_\1"),
+    (r"final_layer_adaln_proj_linear", "final_layer.adaln_proj.linear"),
+    (r"final_layer_(video|audio)_out", r"final_layer.\1_out"),
+]
+_STANDALONE = {  # the projections outside the block stack
+    "video_patch_proj": "proj_in",
+    "audio_patch_proj": "audio_proj_in",
+    "condition_proj": "context_embedder",
+    "time_embedder.proj_in": "time_embedder.linear_1",
+    "time_embedder.proj_out": "time_embedder.linear_2",
+    "final_layer.adaln_proj.linear": "norm_out.linear",
+    "final_layer.video_out": "proj_out",
+    "final_layer.audio_out": "audio_proj_out",
+}
+_BLOCKS = [  # (key pattern, original prefix, diffusers prefix)
+    (r"blocks\.(\d+)\.", "blocks", "transformer_blocks"),
+    (r"token_refiner\.blocks\.(\d+)\.", "token_refiner.blocks", "token_refiner.refiner_blocks"),
+]
+HEAD_DIM = 128  # every released partition's head width, which diffusers' converter assumes for a DiffSynth file
+
+
+def is_original_layout(keys) -> bool:
+    """Whether any key carries one of the original checkpoint's module names, none of which a diffusers name shares
+    (`MiniMaxH3LoraLoaderMixin.lora_state_dict`'s `is_non_diffusers_format`)."""
+    return any(k.startswith(ORIGINAL_PREFIXES) for k in keys)
+
+
+def convert_original(state_dict: dict, head_dim: int = HEAD_DIM) -> dict:
+    """diffusers' `_convert_non_diffusers_minimax_h3_lora_to_diffusers`: a LoRA trained against the original
+    checkpoint's module names, onto `transformer.<diffusers module>.lora_A/B.weight` keys.
+
+    * `diffusion_model.` prefix (ai-toolkit) or none; musubi-tuner's flattened `lora_unet_` names; DiffSynth-Studio's
+      `.default.` infix.
+    * kohya's `lora_down` / `lora_up`, with each module's `.alpha` folded into the two matrices (so the result has
+      scaling 1).
+    * the fused `attn.qkv_proj` split into `to_q` / `to_k` / `to_v`: `lora_A` shared, `lora_B` cut in thirds, after
+      de-interleaving a DiffSynth file's per-head rows. `attn.out_proj` becomes `to_out.0`.
+    * `mlp.fc1` becomes `ff.net.0.proj` with the two halves of its output rows swapped (the original fuses
+      [gate; value], diffusers' SwiGLU [value; gate]); `mlp.fc2` becomes `ff.net.2`.
+    * the patch, condition, timestep and final projections onto their diffusers names.
+
+    Anything left over is an error. The input dict is not modified. Two differences from diffusers, both on purpose:
+    an `.alpha` that is zero, negative or not finite is refused (their fold loops about a thousand times to all-zero
+    matrices on zero, never returns on a negative one, and writes NaNs on NaN), and `head_dim`, the attention head
+    width a DiffSynth file's rows are de-interleaved by, is an argument (theirs is fixed at 128, its default here)."""
+    sd = {k.removeprefix("diffusion_model."): v for k, v in state_dict.items()}
+
+    # DiffSynth-Studio keeps the raw checkpoint's per-head-interleaved fused QKV; its `.default.` infix is the tell
+    is_diffsynth = any(".lora_A.default.weight" in k or ".lora_B.default.weight" in k for k in sd)
+    if is_diffsynth:
+        sd = {k.replace(".lora_A.default.", ".lora_A.").replace(".lora_B.default.", ".lora_B."): v for k, v in sd.items()}
+
+    if any(k.startswith("lora_unet_") for k in sd):
+        unflattened = {}
+        for key, value in sd.items():
+            module, _, suffix = key.removeprefix("lora_unet_").partition(".")
+            dotted = None
+            for pattern, replacement in _FLATTENED:
+                if re.fullmatch(pattern, module):
+                    dotted = re.sub(pattern, replacement, module)
+                    break
+            if dotted is None:
+                raise ValueError(f"`{key}` does not name a MiniMax-H3 module in musubi-tuner's flattened `lora_unet_` layout.")
+            unflattened[f"{dotted}.{suffix}"] = value
+        sd = unflattened
+
+    is_kohya = any(".lora_down.weight" in k for k in sd)
+    down_suffix = ".lora_down.weight" if is_kohya else ".lora_A.weight"
+    up_suffix = ".lora_up.weight" if is_kohya else ".lora_B.weight"
+
+    def pull(base):
+        """Pop the (lora_A, lora_B) pair of a module with any `.alpha` folded in, or None if absent."""
+        if base + down_suffix not in sd:
+            return None
+        down = sd.pop(base + down_suffix)
+        up = sd.pop(base + up_suffix)
+        alpha = sd.pop(base + ".alpha", None)
+        if alpha is not None:
+            if not alpha.item() > 0 or math.isinf(alpha.item()):
+                raise ValueError(f"`{base}.alpha` is {alpha.item()}: a LoRA alpha must be positive and finite")
+            # the forward scales by alpha / rank; split that factor between down and up
+            scale_down, scale_up = alpha.item() / down.shape[0], 1.0
+            while scale_down * 2 < scale_up:
+                scale_down *= 2
+                scale_up /= 2
+            down, up = ops.times_scalar(down, scale_down), ops.times_scalar(up, scale_up)
+        return down, up
+
+    out = {}
+    for source, target in _STANDALONE.items():
+        pair = pull(source)
+        if pair is not None:
+            out[f"{target}.lora_A.weight"], out[f"{target}.lora_B.weight"] = pair
+
+    for pattern, source_prefix, target_prefix in _BLOCKS:
+        num_layers = 0
+        for key in sd:
+            match = re.match(pattern, key)
+            if match:
+                num_layers = max(num_layers, int(match.group(1)) + 1)
+
+        for i in range(num_layers):
+            source, target = f"{source_prefix}.{i}", f"{target_prefix}.{i}"
+
+            qkv = pull(f"{source}.attn.qkv_proj")
+            if qkv is not None:
+                down, up = qkv
+                if up.shape[0] % 3 != 0:
+                    raise ValueError(f"`{source}.attn.qkv_proj` has {up.shape[0]} output rows, which is not divisible "
+                                     "by 3. This is not a fused MiniMax-H3 QKV projection.")
+                if is_diffsynth:
+                    # [head0: q k v, head1: q k v, ...] -> [q_all; k_all; v_all]
+                    if up.shape[0] % (3 * head_dim) != 0:
+                        raise ValueError(f"`{source}.attn.qkv_proj` has {up.shape[0]} output rows, which is not a "
+                                         f"multiple of 3 * {head_dim}. This is not a per-head-interleaved MiniMax-H3 "
+                                         "QKV projection.")
+                    num_heads = up.shape[0] // (3 * head_dim)
+                    grouped = up.reshape(num_heads, 3 * head_dim, up.shape[1])
+                    up = mx.concatenate([s.reshape(num_heads * head_dim, up.shape[1])
+                                         for s in mx.split(grouped, 3, axis=1)], axis=0)
+                for proj, up_proj in zip(("to_q", "to_k", "to_v"), mx.split(up, 3, axis=0)):
+                    out[f"{target}.attn.{proj}.lora_A.weight"] = down
+                    out[f"{target}.attn.{proj}.lora_B.weight"] = up_proj
+
+            fc1 = pull(f"{source}.mlp.fc1")
+            if fc1 is not None:
+                down, up = fc1
+                if up.shape[0] % 2 != 0:
+                    raise ValueError(f"`{source}.mlp.fc1` has {up.shape[0]} output rows, which is not even. This is "
+                                     "not a fused MiniMax-H3 SwiGLU projection.")
+                up_gate, up_value = mx.split(up, 2, axis=0)
+                out[f"{target}.ff.net.0.proj.lora_A.weight"] = down
+                out[f"{target}.ff.net.0.proj.lora_B.weight"] = mx.concatenate([up_value, up_gate], axis=0)
+
+            for source_module, target_module in (("attn.out_proj", "attn.to_out.0"), ("mlp.fc2", "ff.net.2"),
+                                                 ("adaln_proj.linear", "adaln_proj.linear")):
+                pair = pull(f"{source}.{source_module}")
+                if pair is not None:
+                    out[f"{target}.{target_module}.lora_A.weight"], out[f"{target}.{target_module}.lora_B.weight"] = pair
+
+    if sd:
+        raise ValueError(f"`state_dict` should be empty at this point but has {sorted(sd)}. This may be an unsupported "
+                         "MiniMax-H3 LoRA layout.")
+    return {f"transformer.{k}": v for k, v in out.items()}
+
+
 # --- files -------------------------------------------------------------------------------------------------------------
 
 
@@ -206,12 +364,13 @@ def _component(tensors: dict, prefix: str | None) -> tuple[dict, str | None]:
     return {k.removeprefix(prefix + "."): v for k, v in tensors.items() if k.startswith(prefix + ".")}, prefix
 
 
-def read(tensors: dict, header: dict | None = None, prefix: str | None = None) -> Adapter:
+def read(tensors: dict, header: dict | None = None, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
     """An adapter from a LoRA file's tensors and its safetensors header (`__metadata__`), as diffusers would load it.
 
     Keys: `transformer.<module>.lora_A/B.weight` (what `save_lora_weights` writes and `load_lora_adapter` reads by
-    default), the same without the prefix (what `save_lora_adapter` writes), or PEFT's own state dict (a `.default.`
-    infix).
+    default), the same without the prefix (what `save_lora_adapter` writes), PEFT's own state dict (a `.default.`
+    infix), or the original checkpoint's names (`convert_original`, which folds any `.alpha` tensors into the matrices;
+    `head_dim` is passed to it).
 
     Alpha, per module: from the `lora_adapter_metadata` diffusers writes (`r`, `lora_alpha`, `rank_pattern`,
     `alpha_pattern`, resolved as PEFT resolves them); else from a plain `alpha` entry in the header, taken as one
@@ -222,7 +381,9 @@ def read(tensors: dict, header: dict | None = None, prefix: str | None = None) -
     if any("dora_scale" in k or "lora_magnitude_vector" in k for k in tensors):
         raise NotImplementedError("DoRA adapters are not supported")  # diffusers drops `dora_scale` with a warning
     has_alpha_tensors = any(k.endswith(".alpha") for k in tensors)
-    if any(".default.weight" in k for k in tensors) and not any(k.startswith(tuple(p + "." for p in PREFIXES)) for k in tensors):
+    if is_original_layout(tensors):
+        tensors = convert_original(tensors, head_dim)
+    elif any(".default.weight" in k for k in tensors) and not any(k.startswith(tuple(p + "." for p in PREFIXES)) for k in tensors):
         tensors = {k.replace(".default.", "."): v for k, v in tensors.items()}  # a PEFT state dict, adapter "default"
     tensors, prefix = _component(tensors, prefix)
 
@@ -266,10 +427,10 @@ def read(tensors: dict, header: dict | None = None, prefix: str | None = None) -
     return Adapter(tensors, {m: (rank if network_alpha is None else network_alpha) for m, rank in ranks.items()})
 
 
-def load(path, prefix: str | None = None) -> Adapter:
+def load(path, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
     """`read` on a .safetensors file (the tensors stay lazy until used)."""
     tensors, header = mx.load(str(path), return_metadata=True)
-    return read(tensors, header, prefix)
+    return read(tensors, header, prefix, head_dim)
 
 
 def _number(x):
