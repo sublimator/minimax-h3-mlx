@@ -398,6 +398,42 @@ def test_transformer_ref_prefix(tmp_path):
     assert np.array_equal(to_np(ref.tensors[k]), to_np(adapter.tensors[k] * 2))
 
 
+def test_prefix_reads_one_component_and_ignores_the_others():
+    """A file with a transformer adapter and a text encoder's DoRA keys. `load_lora_adapter(prefix="transformer")`
+    filters by the prefix and never sees the rest; ours the same, where it used to refuse the whole file for the other
+    component's DoRA. With no prefix a file of several components is refused. DoRA in the component that is read is
+    still refused (diffusers loads it as DoRA)."""
+    model = randomised(TINY, 2)
+    cfg = dict(model.config)
+    mine = MODULES[:6]
+    adapter = random_adapter(cfg, {m: 4 for m in mine}, {m: 4 for m in mine})
+    file = {"transformer." + k: torch.from_numpy(to_np(v)) for k, v in adapter.tensors.items()}
+    file.update({"text_encoder.layers.0.q_proj.lora_A.weight": torch.zeros(4, 32),
+                 "text_encoder.layers.0.q_proj.lora_B.weight": torch.zeros(32, 4),
+                 "text_encoder.layers.0.q_proj.lora_magnitude_vector": torch.ones(32)})
+    loaded = copy.deepcopy(model)
+    loaded.load_lora_adapter(dict(file), prefix="transformer")
+    as_mx = {k: to_mx(v) for k, v in file.items()}
+    got = lora.read(as_mx, prefix="transformer")
+    assert got.modules == sorted(peft_layers(loaded)) == sorted(mine)
+    lay, args = inputs()
+    out = mlx_forward(lora.attach(state_mx(model), cfg, got), cfg, lay, args)
+    assert_close(out[0], torch_forward(loaded, lay, args)[0], atol=2e-4, rtol=2e-4, what="video velocity")
+    with pytest.raises(ValueError, match="with and without"):
+        lora.read(as_mx)
+
+    module = mine[0]
+    dora = {k: v for k, v in file.items() if k.startswith("transformer.")}
+    dora[f"transformer.{module}.lora_magnitude_vector"] = torch.ones(lora.wired_shapes(cfg)[module][0])
+    as_dora = copy.deepcopy(model)
+    as_dora.load_lora_adapter(dict(dora), prefix="transformer")
+    (name,) = as_dora.peft_config
+    assert peft_layers(as_dora)[module].use_dora[name], "diffusers: a DoRA layer"
+    for prefix in ("transformer", None):
+        with pytest.raises(NotImplementedError, match="DoRA"):
+            lora.read({k: to_mx(v) for k, v in dora.items()}, prefix=prefix)
+
+
 # --- initialisation ----------------------------------------------------------------------------------------------------
 
 

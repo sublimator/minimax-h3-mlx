@@ -219,6 +219,31 @@ def test_header_alpha_with_a_converted_file(tmp_path, layout, entry, scaling):
     assert_close(got[0], torch_forward(loaded, lay, args)[0], atol=2e-4, rtol=2e-4, what="video velocity")
 
 
+@pytest.mark.parametrize("prefix", [None, "transformer", "transformer_ref"])
+def test_original_layout_file_is_read_whole_for_either_partition(prefix):
+    """An original-layout file names no component. diffusers' converter labels its keys `transformer.`, and the mixin
+    loads those layers into either partition (`load_lora_into_transformer_ref` reads them under the `transformer`
+    prefix). Ours reads the file whole whatever `prefix` says, and the caller attaches the adapter where it means. A
+    plain filter by `transformer_ref.` finds nothing, in diffusers too."""
+    model = randomised(TINY, 2)
+    sd = original_file(TINY, "kohya")
+    state_dict = MiniMaxH3LoraLoaderMixin.lora_state_dict(dict(sd))
+    loaded = copy.deepcopy(model)
+    if prefix == "transformer_ref":
+        MiniMaxH3LoraLoaderMixin.load_lora_into_transformer_ref(state_dict, transformer_ref=loaded, prefix="transformer")
+        filtered = copy.deepcopy(model)
+        filtered.load_lora_adapter(state_dict, prefix="transformer_ref")
+        assert not peft_layers(filtered), "diffusers' own filter by that prefix loads nothing"
+    else:
+        MiniMaxH3LoraLoaderMixin.load_lora_into_transformer(state_dict, transformer=loaded)
+    adapter = lora.read(as_mx(sd), prefix=prefix)
+    assert adapter.modules == sorted(peft_layers(loaded)) and len(adapter.modules) == 20
+    lay, args = inputs()
+    got = mlx_forward(lora.attach(state_mx(model), dict(TINY), adapter), dict(TINY), lay, args)
+    assert_close(got[0], torch_forward(loaded, lay, args)[0], atol=2e-4, rtol=2e-4, what="video velocity")
+    assert rel_err(got[0], torch_forward(model, lay, args)[0]) > GUARD
+
+
 # --- what is refused ---------------------------------------------------------------------------------------------------
 
 
@@ -237,6 +262,32 @@ def test_refusals_shared_with_diffusers():
             _convert_non_diffusers_minimax_h3_lora_to_diffusers(dict(sd))
         with pytest.raises(ValueError, match=message):
             lora.convert_original(as_mx(sd))
+
+
+@pytest.mark.parametrize("down,up", [("lora_down", "lora_up"), ("lora_A", "lora_B")])
+def test_half_a_pair_names_the_module(down, up):
+    """A module with its first matrix and no second. diffusers' converter pops the missing key: a bare KeyError.
+    Ours raises a ValueError that says which module and which matrix. (The second matrix alone is a leftover key on
+    both sides: `test_refusals_shared_with_diffusers`.)"""
+    sd = original_file(TINY, "bare" if down == "lora_A" else "kohya")
+    del sd[f"blocks.0.mlp.fc2.{up}.weight"]
+    with pytest.raises(KeyError):
+        _convert_non_diffusers_minimax_h3_lora_to_diffusers(dict(sd))
+    with pytest.raises(ValueError, match=f"`blocks.0.mlp.fc2` has `{down}.weight` but no `{up}.weight`"):
+        lora.convert_original(as_mx(sd))
+    with pytest.raises(ValueError, match="blocks.0.mlp.fc2"):
+        lora.read(as_mx(sd))
+
+
+def test_dora_scale_in_an_original_file_is_refused():
+    """A kohya DoRA file. diffusers drops the `dora_scale` keys with a warning and loads what is left as a plain LoRA,
+    which is not the adapter that was trained. Ours refuses the file."""
+    sd = original_file(TINY, "kohya")
+    sd["blocks.0.attn.out_proj.dora_scale"] = torch.ones(48)
+    theirs = MiniMaxH3LoraLoaderMixin.lora_state_dict(dict(sd))
+    assert not any("dora" in k for k in theirs) and "transformer.transformer_blocks.0.attn.to_out.0.lora_A.weight" in theirs
+    with pytest.raises(NotImplementedError, match="DoRA"):
+        lora.read(as_mx(sd))
 
 
 def fold_turns(alpha, rank, cap=5000):

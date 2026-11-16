@@ -257,10 +257,11 @@ def convert_original(state_dict: dict, head_dim: int = HEAD_DIM) -> dict:
       [gate; value], diffusers' SwiGLU [value; gate]); `mlp.fc2` becomes `ff.net.2`.
     * the patch, condition, timestep and final projections onto their diffusers names.
 
-    Anything left over is an error. The input dict is not modified. Two differences from diffusers, both on purpose:
+    Anything left over is an error. The input dict is not modified. Three differences from diffusers, all on purpose:
     an `.alpha` that is zero, negative or not finite is refused (their fold loops about a thousand times to all-zero
-    matrices on zero, never returns on a negative one, and writes NaNs on NaN), and `head_dim`, the attention head
-    width a DiffSynth file's rows are de-interleaved by, is an argument (theirs is fixed at 128, its default here)."""
+    matrices on zero, never returns on a negative one, and writes NaNs on NaN); `head_dim`, the attention head width a
+    DiffSynth file's rows are de-interleaved by, is an argument (theirs is fixed at 128, its default here); and a
+    module with its first matrix but not its second is a ValueError that names it (theirs is a bare KeyError)."""
     sd = {k.removeprefix("diffusion_model."): v for k, v in state_dict.items()}
 
     # DiffSynth-Studio keeps the raw checkpoint's per-head-interleaved fused QKV; its `.default.` infix is the tell
@@ -290,6 +291,8 @@ def convert_original(state_dict: dict, head_dim: int = HEAD_DIM) -> dict:
         """Pop the (lora_A, lora_B) pair of a module with any `.alpha` folded in, or None if absent."""
         if base + down_suffix not in sd:
             return None
+        if base + up_suffix not in sd:  # theirs pops the missing key: a bare KeyError
+            raise ValueError(f"`{base}` has `{down_suffix[1:]}` but no `{up_suffix[1:]}`")
         down = sd.pop(base + down_suffix)
         up = sd.pop(base + up_suffix)
         #@@start alpha-fold
@@ -396,6 +399,13 @@ def _component(tensors: dict, prefix: str | None) -> tuple[dict, str | None]:
     return {k.removeprefix(prefix + "."): v for k, v in tensors.items() if k.startswith(prefix + ".")}, prefix
 
 
+def _refuse_dora(keys) -> None:
+    """DoRA is not implemented: refuse its keys (diffusers drops a kohya `dora_scale` with a warning, and loads PEFT's
+    `lora_magnitude_vector` as DoRA)."""
+    if any("dora_scale" in k or "lora_magnitude_vector" in k for k in keys):
+        raise NotImplementedError("DoRA adapters are not supported")
+
+
 def read(tensors: dict, header: dict | None = None, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
     """An adapter from a LoRA file's tensors and its safetensors header (`__metadata__`), as diffusers would load it.
 
@@ -404,20 +414,27 @@ def read(tensors: dict, header: dict | None = None, prefix: str | None = None, h
     infix), or the original checkpoint's names (`convert_original`, which folds any `.alpha` tensors into the matrices;
     `head_dim` is passed to it).
 
+    `prefix` picks one component's keys from a file that holds several, as `load_lora_adapter(prefix=...)` does; other
+    components' keys are then not looked at. Without it the file must hold one component. An original-layout file
+    names no component and is read whole whatever `prefix` says: the converter labels it `transformer.`, and the
+    mixin loads those layers into either partition (`load_into_transformer_ref`). The adapter itself belongs to no
+    partition; the caller attaches it to the weights it means.
+
     Alpha, per module: from the `lora_adapter_metadata` diffusers writes (`r`, `lora_alpha`, `rank_pattern`,
     `alpha_pattern`, resolved as PEFT resolves them); else from a plain `alpha` entry in the header, taken as one
     network alpha for every module; else the module's own rank (scaling 1), which is `get_peft_kwargs`' rule. DoRA,
     rsLoRA, a LoRA bias, `fan_in_fan_out` and an alpha that is not positive and finite are refused, not ignored."""
     header = dict(header or {})
     tensors = dict(tensors)
-    if any("dora_scale" in k or "lora_magnitude_vector" in k for k in tensors):
-        raise NotImplementedError("DoRA adapters are not supported")  # diffusers drops `dora_scale` with a warning
     has_alpha_tensors = any(k.endswith(".alpha") for k in tensors)
     if is_original_layout(tensors):
+        _refuse_dora(tensors)  # before the converter, which would call a `dora_scale` key a leftover
         tensors = convert_original(tensors, head_dim)
+        prefix = "transformer"  # the converter's label, not a choice of partition
     elif any(".default.weight" in k for k in tensors) and not any(k.startswith(tuple(p + "." for p in PREFIXES)) for k in tensors):
         tensors = {k.replace(".default.", "."): v for k, v in tensors.items()}  # a PEFT state dict, adapter "default"
     tensors, prefix = _component(tensors, prefix)
+    _refuse_dora(tensors)  # of the component read, not of the others
 
     by_module = {}
     for key in tensors:
