@@ -25,13 +25,25 @@ from . import ops
 def scale_noise(sample: mx.array, timestep, noise: mx.array) -> mx.array:
     """`MiniMaxH3Scheduler.scale_noise`: `x_t = t * x_0 + (1 - t) * noise`, `t` in [0, 1] and 1 clean.
 
-    A Python float keeps `1 - t` at double precision until it meets the noise (in float32, `1 - 0.999` comes out
-    1.3e-5 relative too small). An array is cast to the sample's dtype and lined up with its leading axes (a 0-d `t`,
-    or one per example), and `1 - t` is then taken in that dtype, which is how the pipelines noise their conditioning
-    rows."""
+    The timestep's kind decides the arithmetic, as in the scheduler:
+
+    * A number (a Python float or int, or a numpy scalar) takes `1 - t` in its own precision before it meets the
+      noise: double for a Python float (in float32, `1 - 0.999` comes out 1.3e-5 relative too small), float32 for an
+      `np.float32`. Each product is then tensor-times-number.
+    * An `mx.array` is cast to the sample's dtype and lined up with its leading axes (a 0-d `t`, or one per example),
+      and `1 - t` is taken in that dtype, which is how the pipelines noise their conditioning rows.
+    * A numpy array is a TypeError, as it is for the scheduler: wrap it, `mx.array(timesteps)`, to have it treated as
+      a tensor (the timesteps `1 - sigma` from `sample_sigmas` are numpy).
+
+    One difference, on purpose: a timestep with more axes than the sample is refused. The scheduler broadcasts it into
+    a result larger than the sample."""
+    if isinstance(timestep, np.ndarray):
+        raise TypeError("a numpy array of timesteps is not accepted (nor by the scheduler): pass a number, or "
+                        "mx.array(timesteps) to have them treated as a tensor")
     if not isinstance(timestep, mx.array):
-        t = float(timestep)
-        return ops.times_scalar(sample, t) + ops.times_scalar(noise, 1.0 - t)
+        return ops.times_scalar(sample, float(timestep)) + ops.times_scalar(noise, float(1.0 - timestep))
+    if timestep.ndim > sample.ndim:
+        raise ValueError(f"a timestep of shape {timestep.shape} has more axes than the sample {sample.shape}")
     t = timestep.astype(sample.dtype)
     t = t.reshape(t.shape + (1,) * (sample.ndim - t.ndim))
     return t * sample + (1.0 - t) * noise
@@ -50,11 +62,22 @@ def flow_match_loss(pred: mx.array, target: mx.array, weight=None) -> mx.array:
 
     Pass the rows the model is trained on and nothing else: the generated video rows, picked by the layout as `denoise`
     picks them (`pred[:, layout.num_condition_video_rows:]`). Condition rows are inputs. Rows can't be told apart by
-    their timestep index: at `t >= 0.999` a generated row and a condition row share one."""
+    their timestep index: at `t >= 0.999` a generated row and a condition row share one.
+
+    `pred` and `target` must have the same shape, and each axis of `weight` must be 1 or the size of the leading axis
+    it lines up with. torch's `mse_loss` broadcasts a target of another shape with a warning; here it is an error,
+    because a prediction that still holds its condition rows would be averaged against a one-row target without a
+    word."""
+    if tuple(pred.shape) != tuple(target.shape):
+        raise ValueError(f"pred {tuple(pred.shape)} and target {tuple(target.shape)} differ in shape: pass the same "
+                         "rows of both")
     err = pred.astype(mx.float32) - target.astype(mx.float32)
     sq = err * err
     if weight is not None:
         w = weight.astype(mx.float32) if isinstance(weight, mx.array) else mx.array(weight, dtype=mx.float32)
+        if w.ndim > sq.ndim or any(a not in (1, b) for a, b in zip(w.shape, sq.shape)):
+            raise ValueError(f"a weight of shape {tuple(w.shape)} does not line up with the leading axes of "
+                             f"{tuple(sq.shape)}")
         sq = w.reshape(w.shape + (1,) * (sq.ndim - w.ndim)) * sq
     return mx.mean(sq)
 

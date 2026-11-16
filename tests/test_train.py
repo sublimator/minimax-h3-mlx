@@ -64,6 +64,66 @@ def test_float_and_array_timesteps_differ_as_in_the_scheduler():
     assert_close(as_float, as_array, atol=1e-6, what="the same up to the float32 rounding of 1 - t")
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("kind", [np.float32, np.float64, int])
+def test_scale_noise_with_a_numpy_scalar_is_the_schedulers(kind, dtype):
+    """A numpy scalar is a number to the scheduler, not a tensor: `1 - t` is taken in the scalar's own precision and
+    each product is tensor-times-number. Bit for bit here too."""
+    x0, noise = draws(9, dtype)
+    for value in ((0, 1) if kind is int else (0.0, 0.25, 0.3, 0.7, 0.999, 1.0)):
+        want = MiniMaxH3Scheduler().scale_noise(x0, kind(value), noise)
+        got = train.scale_noise(to_mx_half(x0), kind(value), to_mx_half(noise))
+        assert isinstance(want, torch.Tensor) and want.dtype == dtype
+        assert np.array_equal(to_np(got), to_np(want)), value
+
+
+def test_a_number_and_a_tensor_of_the_same_value_differ_in_half_precision():
+    """On a bf16 sample, `np.float32(0.999)` multiplies in float32 and rounds once, while a 0-d tensor of the same
+    value is first cast to bf16, where 0.999 is 1.0 and `1 - t` is 0. The scheduler does the same; both are kept."""
+    x0 = torch.zeros(1, 4, dtype=torch.bfloat16)
+    noise = torch.full((1, 4), 100.0, dtype=torch.bfloat16)
+    sch = MiniMaxH3Scheduler()
+    for timestep, m_timestep in ((np.float32(0.999), np.float32(0.999)), (torch.tensor(0.999), mx.array(np.float32(0.999)))):
+        want = sch.scale_noise(x0, timestep, noise)
+        got = train.scale_noise(to_mx(x0), m_timestep, to_mx(noise))
+        assert np.array_equal(to_np(got), to_np(want))
+    assert float(sch.scale_noise(x0, np.float32(0.999), noise)[0, 0]) > 0.09
+    assert float(sch.scale_noise(x0, torch.tensor(0.999), noise)[0, 0]) == 0.0
+
+
+def test_scale_noise_refuses_a_numpy_array_as_the_scheduler_does():
+    """The scheduler has no path for a numpy array: its `timestep * sample` is a TypeError, 0-d or not. Ours raises
+    one that says what to do. Wrapped in `mx.array`, the timesteps `sample_sigmas` leads to are a tensor's."""
+    x0, noise = draws(10)
+    sch = MiniMaxH3Scheduler()
+    for timestep in (np.float32([0.2, 0.7, 0.5]), np.float32([0.5]), np.array(0.999, dtype=np.float32)):
+        with pytest.raises(TypeError):
+            sch.scale_noise(x0, timestep, noise)
+        with pytest.raises(TypeError, match=r"mx\.array\(timesteps\)"):
+            train.scale_noise(to_mx(x0), timestep, to_mx(noise))
+    sigmas, _ = train.sample_sigmas(np.float32([0.2, 0.7, 0.01]), train.training_sigmas(1000, 12.0))
+    timesteps = np.float32(1) - sigmas
+    want = sch.scale_noise(x0, torch.from_numpy(timesteps), noise)
+    got = train.scale_noise(to_mx(x0), mx.array(timesteps), to_mx(noise))
+    assert np.array_equal(to_np(got), to_np(want)) and not np.array_equal(to_np(got), to_np(x0))
+
+
+def test_scale_noise_timestep_axes():
+    """More axes than the sample: the scheduler broadcasts into a result larger than the sample, which is never what
+    noising one sample means; ours refuses. Several timesteps against one example (a leading axis of 1) is ordinary
+    broadcasting on both sides and is kept."""
+    sch = MiniMaxH3Scheduler()
+    too_many = torch.tensor([[[0.5]], [[0.25]]])
+    assert sch.scale_noise(torch.ones(8, 16), too_many, torch.zeros(8, 16)).shape == (2, 8, 16)
+    with pytest.raises(ValueError, match="more axes than the sample"):
+        train.scale_noise(mx.ones((8, 16)), to_mx(too_many), mx.zeros((8, 16)))
+    x0, noise = draws(11)
+    three = torch.tensor([0.5, 0.2, 0.1])
+    want = sch.scale_noise(x0[:1], three, noise[:1])
+    got = train.scale_noise(to_mx(x0[:1]), to_mx(three), to_mx(noise[:1]))
+    assert got.shape == (3,) + SHAPE[1:] and np.array_equal(to_np(got), to_np(want))
+
+
 # --- the target --------------------------------------------------------------------------------------------------------
 
 
@@ -146,6 +206,34 @@ def test_weighted_loss(weight):
         reversed_w = train.flow_match_loss(to_mx(pred), to_mx(target), to_mx(w.flip(0)))
         assert abs(float(reversed_w) - float(want)) > 1e-3 * float(want), "the guard: weights on the wrong examples"
         assert abs(float(train.flow_match_loss(to_mx(pred), to_mx(target))) - float(want)) > 0.1 * float(want)
+
+
+def test_loss_refuses_shapes_that_do_not_line_up():
+    """A prediction that still holds nine condition rows against a one-row target: torch's `mse_loss` warns and
+    broadcasts the target over all ten rows. Ours raises. The weight is checked the same way: an axis of it must be 1
+    or the size of the leading axis it meets."""
+    pred, target = torch.ones(1, 10, 16), torch.zeros(1, 1, 16)
+    with pytest.warns(UserWarning, match="target size"):
+        assert float(torch.nn.functional.mse_loss(pred, target)) == 1.0
+    with pytest.raises(ValueError, match="differ in shape"):
+        train.flow_match_loss(to_mx(pred), to_mx(target))
+    with pytest.raises(ValueError, match="differ in shape"):
+        train.flow_match_loss(to_mx(target), to_mx(pred))
+
+    p, t = (to_mx(a) for a in draws(12))
+    wrong = [mx.ones(SHAPE + (2,)),  # more axes than the prediction
+             mx.array([1.0, 2.0]),  # two weights for three examples
+             mx.ones((SHAPE[1],)), mx.ones((SHAPE[2],))]  # one per row, one per channel: not the leading axis
+    for w in wrong:
+        with pytest.raises(ValueError, match="does not line up"):
+            train.flow_match_loss(p, t, w)
+    with pytest.raises(ValueError, match="does not line up"):  # (3,) against one example of three rows would broadcast
+        train.flow_match_loss(mx.ones((1, 3, 3)), mx.zeros((1, 3, 3)), mx.array([1.0, 2.0, 3.0]))
+    w = [0.5, 2.0, 7.0]
+    per_example = float(train.flow_match_loss(p, t, mx.array(w)))
+    for same in (mx.array(w).reshape(3, 1, 1), mx.array(w).reshape(3, 1), np.float32(w), w):
+        assert float(train.flow_match_loss(p, t, same)) == per_example
+    assert float(train.flow_match_loss(p, t, mx.array([2.0]))) == float(train.flow_match_loss(p, t, 2.0))
 
 
 def test_loss_gradient_is_torchs():
