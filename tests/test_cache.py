@@ -362,14 +362,22 @@ def test_no_pickle_in_the_module():
 # --- writing -----------------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("fails", ["saving the tensors", "renaming the tensors", "writing the record", "renaming the record"])
+@pytest.mark.parametrize("fails", ["saving the tensors", "renaming the tensors", "flushing the tensors' name",
+                                   "writing the record", "renaming the record"])
 def test_a_write_that_fails_leaves_no_entry(tmp_path, monkeypatch, fails):
-    """Each file is written under a temporary name and renamed, the record last. Whatever step fails, the directory
-    is left without an entry and without a temporary file, and a later write succeeds."""
+    """Each file is written under a temporary name and renamed, the record last. Whatever step fails before the
+    record's rename, the directory is left without an entry and without a temporary file, and a later write
+    succeeds. (The step after the tensors' rename is flushing the directory, so that their name is on disk before a
+    record can point at it.)"""
     request = ask()
     tensors = arrays_for(request)
-    real_save, real_replace, real_text = mx.save_safetensors, os.replace, Path.write_text
+    real_save, real_replace, real_text, real_sync = mx.save_safetensors, os.replace, Path.write_text, files.sync_directory
     renames = []
+
+    def sync(path):
+        if not (tmp_path / f"{cache.key(request)}.json").exists():  # the flush between the two renames
+            raise OSError("the directory would not flush")
+        return real_sync(path)
 
     def save(path, arrays, *a, **kw):
         real_save(path, arrays, *a, **kw)
@@ -388,6 +396,8 @@ def test_a_write_that_fails_leaves_no_entry(tmp_path, monkeypatch, fails):
     with monkeypatch.context() as patch:
         if fails == "saving the tensors":
             patch.setattr(mx, "save_safetensors", save)
+        elif fails == "flushing the tensors' name":
+            patch.setattr(files, "sync_directory", sync)
         elif fails == "writing the record":
             patch.setattr(Path, "write_text", write_text)
         else:
@@ -398,6 +408,38 @@ def test_a_write_that_fails_leaves_no_entry(tmp_path, monkeypatch, fails):
     assert cache.read(tmp_path, request) is None
     cache.write(tmp_path, request, tensors)
     assert same(cache.read(tmp_path, request).latents, tensors["latents"])
+
+
+def test_a_failure_after_the_records_rename_keeps_the_entry(tmp_path, monkeypatch):
+    """The one failure that comes after an entry is published: the record has been renamed into place, and flushing
+    the directory afterwards fails. Cleaning up as for an earlier failure would delete the tensors and leave a
+    published record pointing at nothing. Instead the entry stands: the error is `files.NotDurable`, both files are
+    there, the entry reads back whole, and a second write of the key finds it. What is in doubt is only whether the
+    entry would survive a power loss, and a cache that loses an entry encodes it again."""
+    request = ask()
+    tensors = arrays_for(request)
+    real = files.sync_directory
+    record_path = tmp_path / f"{cache.key(request)}.json"
+    failed = []
+
+    def fail_once_the_record_is_in_place(path):
+        if Path(path) == tmp_path and record_path.exists():
+            failed.append(True)
+            raise OSError("the directory would not flush")
+        return real(path)
+
+    monkeypatch.setattr(files, "sync_directory", fail_once_the_record_is_in_place)
+    with pytest.raises(files.NotDurable, match="is written and in place, but its directory could not be flushed"):
+        cache.write(tmp_path, request, tensors)
+    monkeypatch.undo()
+    assert failed == [True], "the failure was injected after the record's rename, and nowhere else"
+    assert listing(tmp_path) == [f"{cache.key(request)}.json", f"{cache.key(request)}.safetensors"]
+    entry = cache.read(tmp_path, request)
+    assert same(entry.latents, tensors["latents"]) and same(entry.text, tensors["text"])
+    assert files.lock_holder(tmp_path / cache.LOCK) is None
+    with pytest.raises(FileExistsError):
+        cache.write(tmp_path, request, tensors)
+    assert issubclass(files.NotDurable, OSError)
 
 
 def test_files_a_killed_writer_left_are_ignored(tmp_path):
@@ -595,6 +637,32 @@ def test_atomic_write_keeps_the_old_file_when_the_new_one_fails(tmp_path):
     assert json.loads(path.read_text()) == {"step": 1} and listing(tmp_path) == ["run.json"]
     files.atomic_json(path, {"step": 2})
     assert json.loads(path.read_text()) == {"step": 2}
+
+
+def test_atomic_write_says_when_the_failure_came_after_the_rename(tmp_path, monkeypatch):
+    """Before the rename a failure leaves the old file; after it, the new file is there, and the error is a
+    `NotDurable` and not a plain I/O error, so that a caller which removes its work on failure can tell the two
+    apart."""
+    path = tmp_path / "run.json"
+    files.atomic_json(path, {"step": 1})
+
+    def no_flush(directory):
+        raise OSError("the directory would not flush")
+
+    monkeypatch.setattr(files, "sync_directory", no_flush)
+    with pytest.raises(files.NotDurable, match="run.json is written and in place"):
+        files.atomic_json(path, {"step": 2})
+    assert json.loads(path.read_text()) == {"step": 2} and listing(tmp_path) == ["run.json"]
+    monkeypatch.undo()
+
+    def no_file_flush(file):
+        raise OSError("the file would not flush")
+
+    monkeypatch.setattr(files, "sync_file", no_file_flush)
+    with pytest.raises(OSError, match="the file would not flush") as before_the_rename:
+        files.atomic_json(path, {"step": 3})
+    assert not isinstance(before_the_rename.value, files.NotDurable)
+    assert json.loads(path.read_text()) == {"step": 2} and listing(tmp_path) == ["run.json"]
 
 
 @pytest.mark.parametrize("what,message", [

@@ -1079,6 +1079,49 @@ def test_checkpoints_are_whole_or_absent(work, capsys, monkeypatch):
     assert described["trajectory"] == files.sha256_json(record_of(run_dir)["trajectory"])
 
 
+@pytest.mark.parametrize("what", ["a checkpoint", "the record", "the final adapter"])
+def test_a_failure_after_a_rename_removes_nothing(work, capsys, monkeypatch, what):
+    """The same boundary as in the cache, at the run's three atomic writes: the rename has happened, and flushing the
+    directory afterwards fails. Nothing is cleaned up, because what was renamed is in place and whole: the session
+    ends with `files.NotDurable`, the checkpoint (or the record, or the adapter) is there, a checkpoint that is there
+    is in the record's list, and the run resumes to the uninterrupted run's weights."""
+    argv, run_dir, _ = work
+    assert run(argv(run="straight")) == 0
+    real = files.sync_directory
+    target = {"a checkpoint": run_dir / "checkpoints" / "step-00000010", "the record": run_dir / "run.json",
+              "the final adapter": run_dir / "adapter.safetensors"}[what]
+    failed = []
+
+    def fail_once_it_is_in_place(path):
+        ready = target.exists() and (what != "the record" or json.loads(target.read_text()).get("step") == 7)
+        if Path(path) == target.parent and ready and not failed:
+            failed.append(True)
+            raise OSError("the directory would not flush")
+        return real(path)
+
+    monkeypatch.setattr(files, "sync_directory", fail_once_it_is_in_place)
+    with pytest.raises(files.NotDurable, match=f"{target.name} is written and in place"):
+        run(argv())
+    monkeypatch.undo()
+    assert failed == [True]
+    record = record_of(run_dir)
+    assert record["status"] == "error" and "NotDurable" in record["stop_reason"]
+    if what == "a checkpoint":
+        assert record["step"] == 10 and record["checkpoints"] == [5, 10]
+        assert sorted(p.name for p in (run_dir / "checkpoints").iterdir()) == ["step-00000005", "step-00000010"]
+        step, matrices, _, losses = trainer.read_checkpoint(target, record["trajectory"], TINY)
+        assert step == 10 and len(losses) == 10 and len(matrices) == 18
+    elif what == "the record":
+        assert record["step"] == 7 and len(record["losses"]) == 7 and record["checkpoints"] == [5]
+    else:
+        assert record["step"] == 12 and record["checkpoints"] == [5, 10, 12]
+        assert adapter_bytes(run_dir) == adapter_bytes(run_dir.parent / "straight"), "the adapter is in place and whole"
+    assert run(argv() + ["--resume"]) == 0
+    assert record_of(run_dir)["status"] == "finished"
+    assert adapter_bytes(run_dir) == adapter_bytes(run_dir.parent / "straight")
+    assert drawn(record_of(run_dir)) == drawn(record_of(run_dir.parent / "straight"))
+
+
 # --- what a step draws -------------------------------------------------------------------------------------------------
 
 

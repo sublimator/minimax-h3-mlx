@@ -279,6 +279,12 @@ def write(directory, request: dict, tensors: dict, wait: float = 30.0) -> str:
     * A writer that fails removes what it alone put there, and nothing else: its temporary file, and the tensors it
       renamed into place under the lock, where no record existed and no other writer could be. An entry that has
       its record is never touched.
+    * Once the record's rename has happened the entry is published, and it stands. The one thing that can still
+      fail is flushing the directory afterwards (`files.NotDurable`): that error is raised as it is and nothing is
+      removed. Readers do not take the lock, so an entry that has been visible cannot be taken back without a
+      reader finding half of it; and what a cache loses when a write turns out not to have been durable is one
+      entry, which is encoded again. The tensors' own rename is flushed before the record is written, so a record
+      that is on disk has its tensors on disk.
     * When the lock stays held for `wait` seconds the write is refused with `files.Busy`, which says who holds it."""
     directory = Path(directory)
     arrays = check_tensors(request, tensors)
@@ -299,7 +305,10 @@ def write(directory, request: dict, tensors: dict, wait: float = 30.0) -> str:
                 raise FileExistsError(f"the cache already has an entry {name}")
             os.replace(staged, tensors_path)  # over nothing, or over tensors a dead writer left without a record
             try:
+                files.sync_directory(directory)  # the tensors' name on disk before a record can point at it
                 files.atomic_json(record_path, record)
+            except files.NotDurable:
+                raise  # the record is in place: the entry is published and stays whole
             except BaseException:
                 tensors_path.unlink(missing_ok=True)
                 raise

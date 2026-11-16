@@ -293,7 +293,9 @@ def checkpoint_path(run_dir, step: int) -> Path:
 def write_checkpoint(run_dir, step: int, traj: dict, trainable: dict, optimizer, losses: list) -> Path:
     """One checkpoint: the adapter as a diffusers LoRA file, the optimizer's state, and a record with the step, the
     losses so far and each file's digest. It is written as a directory under a temporary name and renamed into place,
-    so a checkpoint directory is there only when it is whole."""
+    so a checkpoint directory is there only when it is whole. A failure before the rename removes the temporary
+    directory. After the rename nothing is removed: if flushing the checkpoints directory then fails, the error is
+    `files.NotDurable` and the checkpoint stands."""
     final = checkpoint_path(run_dir, step)
     final.parent.mkdir(parents=True, exist_ok=True)
     tmp = files.temporary(final)
@@ -314,7 +316,7 @@ def write_checkpoint(run_dir, step: int, traj: dict, trainable: dict, optimizer,
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
-    files.sync_directory(final.parent)
+    files.flush_renamed(final)  # after the rename: a failure here is `files.NotDurable`, and the checkpoint stands
     return final
 
 
@@ -520,7 +522,12 @@ def train_session(session: Session, entries: list, load_weights, load_assistant=
         def checkpoint_now():
             nonlocal saved_at
             if step > saved_at:
-                write_checkpoint(run_dir, step, traj, trainable, optimizer, record["losses"])
+                try:
+                    write_checkpoint(run_dir, step, traj, trainable, optimizer, record["losses"])
+                except files.NotDurable:  # it is there and whole, and the record says so; the session still ends
+                    record["checkpoints"].append(step)
+                    saved_at = step
+                    raise
                 record["checkpoints"].append(step)
                 saved_at = step
 

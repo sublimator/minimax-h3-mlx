@@ -34,6 +34,12 @@ class Busy(RuntimeError):
         self.path, self.holder = path, holder
 
 
+class NotDurable(OSError):
+    """A file or directory was renamed into place and its directory could not then be flushed. What was written is
+    there and whole; whether it would survive a power loss is not known. This is raised after the fact: there is
+    nothing to clean up, and a caller that removes its own work on an error must not do so for this one."""
+
+
 def lock_holder(path) -> dict | None:
     """What the holder of the lock file at `path` wrote about itself: its process id, what it is doing and since
     when. None when the file is empty or unreadable, which it is when nobody holds it."""
@@ -118,9 +124,21 @@ def sync_file(path: Path) -> None:
         os.fsync(f.fileno())
 
 
+def flush_renamed(path: Path) -> None:
+    """Flush the directory a file or directory has just been renamed into. A failure here comes after the rename, so
+    it is `NotDurable`: the new name is in place, and only its durability is in doubt."""
+    try:
+        sync_directory(path.parent)
+    except OSError as error:
+        raise NotDurable(f"{path} is written and in place, but its directory could not be flushed ({error})") from error
+
+
 def atomic_write(path, write) -> None:
-    """`write(temporary_path)` makes the file; it is flushed and renamed onto `path`. If anything fails the
-    temporary file is removed and `path` is as it was."""
+    """`write(temporary_path)` makes the file; it is flushed and renamed onto `path`.
+
+    Two kinds of failure. Before the rename, anything that goes wrong removes the temporary file and leaves `path`
+    as it was. After the rename the new file is in place, and the one thing left is flushing the directory: if that
+    fails the error is `NotDurable`, and `path` is the new file."""
     path = Path(path)
     tmp = temporary(path)
     try:
@@ -130,7 +148,7 @@ def atomic_write(path, write) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-    sync_directory(path.parent)
+    flush_renamed(path)
 
 
 def atomic_json(path, value) -> None:
