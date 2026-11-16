@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import numpy as np
 
-from . import ops
+from . import lora, ops
 from .denoise import row_timesteps
 from .packing import Layout, Ref, build_packed_sequence, build_ref2va_packed_sequence
 
@@ -140,9 +140,12 @@ def build_example(cfg: dict, text_token_tags, latents: mx.array, sigma, noise, *
     """One training example for a single picture with zero or more reference pictures.
 
     `latents` is the picture, normalised, (1, 1, h, w, channels), and `condition_latents` the references in packed
-    order, each (1, 1, h_i, w_i, channels) at its own size, as the VAE encode returns them. `sigma` in (0, 1] is the
-    picture's noise level. `noise(shape)` returns float32 draws (`pipeline.Noise`). `condition_t` is the timestep the
-    references are noised to and held at; it has no default here (the pipeline and the recipe both use 0.999).
+    order, each (1, 1, h_i, w_i, channels) at its own size, as the VAE encode returns them. `text_token_tags` has one
+    tag per prompt row: 1 for text, 0 for a vision token (tagged as video), which are the two the picture pipelines'
+    encoders give. `sigma` in (0, 1] is the picture's noise level; it must also be large enough that the timestep
+    `1 - sigma` is below 1 in float32, which is any sigma above 2**-25 (about 3e-8). Nothing is clamped. `noise(shape)`
+    returns float32 draws (`pipeline.Noise`). `condition_t` is the timestep the references are noised to and held at;
+    it has no default here (the pipeline and the recipe both use 0.999).
 
     * Layout: text-to-image's without references, the edit's with them (`image.generate`'s two, diffusers').
     * Draws, in the pipeline's order: one per reference, the picture's, the audio rows'.
@@ -163,17 +166,24 @@ def build_example(cfg: dict, text_token_tags, latents: mx.array, sigma, noise, *
     for what, value in (("sigma", sigma32), ("audio_sigma", audio32)):
         if not (np.isfinite(value) and 0 < value <= 1):
             raise ValueError(f"{what} must lie in (0, 1], got {value}")
+        if np.float32(1) - value >= 1:
+            raise ValueError(f"{what} = {value} is too small: the timestep 1 - {what} rounds to 1.0 in float32, so the "
+                             "rows would not be noised at all. It must be above 2**-25, about 3e-8")
     if not (math.isfinite(condition_t) and 0 <= condition_t <= 1):
         raise ValueError(f"condition_t must lie in [0, 1], got {condition_t}")
     patch = tuple(cfg["patch_size"])
     channels = cfg["in_channels"]
     condition_latents = list(condition_latents)
     for what, x in [("latents", latents)] + [(f"condition_latents[{i}]", x) for i, x in enumerate(condition_latents)]:
-        if x.ndim != 5 or x.shape[0] != 1 or x.shape[1] != 1 or x.shape[4] != channels:
-            raise ValueError(f"{what} must be (1, 1, height, width, {channels}), got {tuple(x.shape)}")
+        if x.ndim != 5 or x.shape[0] != 1 or x.shape[1] != 1 or x.shape[4] != channels or 0 in x.shape[2:4]:
+            raise ValueError(f"{what} must be (1, 1, height, width, {channels}) with a height and a width, "
+                             f"got {tuple(x.shape)}")
     lh, lw = latents.shape[2], latents.shape[3]
 
     tags = np.asarray(text_token_tags)
+    if tags.ndim != 1 or tags.size == 0 or not np.issubdtype(tags.dtype, np.integer) or not np.isin(tags, (0, 1)).all():
+        raise ValueError("text_token_tags must be one integer tag per prompt row, each 1 (text) or 0 (a vision token), "
+                         f"and at least one row; got {tags.tolist() if tags.size <= 16 else tags.shape}")
     if condition_latents:
         layout = build_ref2va_packed_sequence(tags, [Ref("image")] * len(condition_latents),
                                               [tuple(x.shape[1:4]) for x in condition_latents], [], 1, lh, lw,
@@ -203,15 +213,28 @@ def build_example(cfg: dict, text_token_tags, latents: mx.array, sigma, noise, *
 # --- the loss of an example, and its gradient ----------------------------------------------------------------------
 
 
+def check_inputs(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array) -> None:
+    """What every loss and gradient of an example checks first: `trainable` is what the forward will train
+    (`lora.check_trainable`: not empty, runtime names, active in `frozen`, both matrices), and `text` is exactly
+    (1, the layout's text rows, text dim). A text of one row would be broadcast over every text position by the
+    forward's scatter, and matrices the forward does not read get a gradient of exactly zero, both without an error."""
+    lora.check_trainable(trainable, frozen)
+    want = (1, len(example.layout.text_indices), cfg["text_dim"])
+    if not isinstance(text, mx.array) or tuple(text.shape) != want:
+        raise ValueError(f"text must be an array of shape {want} (1, the layout's text rows, text dim), got "
+                         f"{tuple(text.shape) if hasattr(text, 'shape') else type(text).__name__}")
+
+
 def example_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None) -> mx.array:
     """One example's loss: the transformer's forward on the example's rows with the weights `{**frozen, **trainable}`,
     then `flow_match_loss` of the generated video rows against the example's target. Nothing is taken from the audio
     output or from the condition rows.
 
     The weights come in as two arguments, the trainable matrices first (`lora.split`), so the function can be
-    differentiated with respect to them and to nothing else. `text` is the prompt's embeddings, (1, text rows, text
-    dim). Products with float32 LoRA matrices are float32 whatever the base's dtype (`ops.plinear`), and the loss is
-    float32."""
+    differentiated with respect to them and to nothing else; `check_inputs` refuses a `trainable` the forward would
+    not use and a `text` that is not (1, text rows, text dim), the prompt's embeddings. Products with float32 LoRA
+    matrices are float32 whatever the base's dtype (`ops.plinear`), and the loss is float32."""
+    check_inputs(trainable, frozen, cfg, example, text)
     lay = example.layout
     video_pred, _ = ops.dit_forward(
         {**frozen, **trainable}, cfg, example.video_rows[None], example.audio_rows[None], text,
@@ -224,6 +247,7 @@ def example_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, tex
 def loss_and_gradients(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None):
     """(loss, gradients) of `example_loss`. The gradients are a dict with `trainable`'s keys and no others: the base
     weights and any other adapter in `frozen` are constants of the differentiation and get none."""
+    check_inputs(trainable, frozen, cfg, example, text)
     return mx.value_and_grad(example_loss)(trainable, frozen, cfg, example, text, weight)
 
 

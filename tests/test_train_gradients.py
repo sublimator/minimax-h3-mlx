@@ -22,7 +22,7 @@ from test_lora import GUARD, random_adapter
 from test_lora_stack import ASSISTANT_MODULES, SUBJECT_MODULES, activate, peft_stack
 from test_train_example import TAGS, latents_of, ours, theirs
 
-from h3mlx import lora, train
+from h3mlx import lora, ops, train
 
 
 def setup(n_refs=1, sigma=0.5, seed=2, cfg=TINY, std=0.3, subject_modules=SUBJECT_MODULES, subject=None):
@@ -70,6 +70,17 @@ def flat(grads, keys):
     return np.concatenate([to_np(grads[k]).ravel() for k in keys])
 
 
+def sampling_forward_loss(params, cfg, example, text, weight=None):
+    """The example's loss on one dict of weights through `ops.dit_forward`, the forward sampling runs."""
+    lay = example.layout
+    video_pred, _ = ops.dit_forward(
+        params, cfg, example.video_rows[None], example.audio_rows[None], text, mx.array(example.timestep),
+        mx.array(example.timestep_indices), token_tags=mx.array(lay.token_tags),
+        position_ids=mx.array(lay.position_ids.astype(np.float32)), video_indices=mx.array(lay.video_indices),
+        audio_indices=mx.array(lay.audio_indices), text_indices=mx.array(lay.text_indices))
+    return train.flow_match_loss(example.generated(video_pred), example.target[None], weight)
+
+
 # --- float32 -----------------------------------------------------------------------------------------------------------
 
 
@@ -106,8 +117,8 @@ def test_at_pefts_init_the_gradient_reaches_lora_b_alone(tmp_path):
             assert not bool(mx.any(g != 0)) and not want[k].any(), k
         else:
             assert rel_err(g, want[k]) < 1e-4 and float(mx.abs(g).max()) > 0, k
-    off = {k: v for k, v in frozen.items()}
-    without = train.example_loss({}, lora.set_active(off, ("assistant",)), s["cfg"], s["example"], to_mx(s["text"]))
+    without = sampling_forward_loss(lora.set_active(lora.join(frozen, trainable), ("assistant",)), s["cfg"],
+                                    s["example"], to_mx(s["text"]))
     assert abs(float(without) - float(loss)) <= 1e-6 * float(loss), "a zero lora_B changes nothing in the forward"
 
 
@@ -218,3 +229,77 @@ def test_gradients_over_a_bf16_base_track_torchs(tmp_path, seed):
     assert 1e-4 < e_torch < 0.1, "bf16 is visible in torch's own gradient, and small"
     assert e_mlx <= 1.5 * e_torch + 1e-3
     assert abs(torch_loss - truth_loss) < 0.01 * truth_loss and abs(float(loss) - truth_loss) < 0.01 * truth_loss
+
+
+# --- what a loss refuses, and a quantized base ----------------------------------------------------------------------------
+
+
+def test_the_loss_refuses_matrices_the_forward_would_not_read():
+    """Each of these ran before the check, with no error, and returned gradients of exactly zero for matrices the
+    forward did not read: it reads a named adapter's matrices only where the Linear lists the name as active. They
+    are refused now, by the loss and by its gradient."""
+    s = setup(1, 0.5)
+    cfg, example, text = s["cfg"], s["example"], to_mx(s["text"])
+    with_assistant = lora.attach(state_mx(s["model"]), cfg, s["assistant"], name="assistant")
+    both = lora.attach(with_assistant, cfg, s["subject"], keep_dtype=True, name="subject")
+    cases = {
+        "a file's keys beside a named adapter": (s["subject"].tensors, with_assistant, "a file's keys are not read"),
+        "runtime names never attached": (lora.runtime_tensors(s["subject"], "subject"), with_assistant, "is not active on"),
+        "an adapter switched off": (*reversed(lora.split(lora.set_active(both, ("assistant",)), "subject")), "is not active on"),
+        "nothing to train": ({}, lora.split(both, "subject")[0], "`trainable` is empty"),
+    }
+    for what, (trainable, frozen, message) in cases.items():
+        for function in (train.example_loss, train.loss_and_gradients):
+            with pytest.raises(ValueError, match=message):
+                function(trainable, frozen, cfg, example, text)
+    # what the first three would have returned: a loss that does not depend on the matrices. (A file's keys are the
+    # exception on a Linear with no named adapter: there they are read, as an unnamed adapter whose scaling is 1.)
+    shared = tuple(s["assistant"].modules)
+    for what in list(cases)[:3]:
+        trainable, frozen, _ = cases[what]
+        ignored = mx.grad(lambda t: sampling_forward_loss({**frozen, **t}, cfg, example, text))(dict(trainable))
+        unread = [k for k in ignored if what != "a file's keys beside a named adapter" or k.startswith(shared)]
+        assert len(unread) >= 24 and all(not to_np(ignored[k]).any() for k in unread), what
+        assert len(unread) == len(ignored) or any(to_np(ignored[k]).any() for k in set(ignored) - set(unread))
+
+
+def test_the_loss_refuses_a_text_of_the_wrong_shape():
+    """The forward scatters the text rows into the packed sequence, and that assignment broadcasts: one row of text
+    would fill every text position without an error. The loss takes exactly (1, the layout's text rows, text dim)."""
+    s = setup(1, 0.5)
+    frozen, trainable = mlx_groups(s)
+    cfg, example, text = s["cfg"], s["example"], to_mx(s["text"])
+    rows = len(example.layout.text_indices)
+    assert text.shape == (1, rows, cfg["text_dim"]) and rows > 1
+    for bad in (text[:, :1], text[:, :-1], text[0], mx.concatenate([text, text]), text[:, :, :-1], s["text"].numpy()):
+        for function in (train.example_loss, train.loss_and_gradients):
+            with pytest.raises(ValueError, match="text must be an array of shape"):
+                function(trainable, frozen, cfg, example, bad)
+    one_row = sampling_forward_loss({**frozen, **trainable}, cfg, example, text[:, :1])  # what the check is for
+    assert np.isfinite(float(one_row)) and float(one_row) != float(train.example_loss(trainable, frozen, cfg, example, text))
+
+
+def test_gradients_over_a_quantized_base():
+    """The base's Linear weights 8-bit quantized (`ops.QuantizedWeight`), inside the frozen group: the loss and the
+    trainable matrices' gradients are those over the same base with each quantized weight replaced by the matrix it
+    stands for. The quantized objects are constants of the differentiation like any other frozen entry."""
+    s = setup(1, 0.5, cfg=dict(TINY, hidden_size=64, ffn_dim=96))  # widths a group of 32 divides
+    frozen, trainable = mlx_groups(s)
+    cfg, example, text = s["cfg"], s["example"], to_mx(s["text"])
+    quantized, dense = dict(frozen), dict(frozen)
+    for k, v in frozen.items():
+        if k.endswith(".weight") and ".lora_" not in k and v.ndim == 2 and v.shape[1] % 32 == 0:
+            quantized[k] = ops.QuantizedWeight(v, 8, 32)
+            dense[k] = mx.dequantize(quantized[k].wq, quantized[k].scales, quantized[k].biases, group_size=32, bits=8)
+    count = sum(isinstance(v, ops.QuantizedWeight) for v in quantized.values())
+    assert count >= len(lora.block_modules(cfg)) and all(k in quantized and k in dense for k in frozen)
+    want_loss, want = train.loss_and_gradients(trainable, dense, cfg, example, text)
+    loss, grads = train.loss_and_gradients(trainable, quantized, cfg, example, text)
+    plain_loss, plain = train.loss_and_gradients(trainable, frozen, cfg, example, text)
+    assert abs(float(loss) - float(want_loss)) <= 1e-5 * float(want_loss)
+    worst = max(rel_err(grads[k], want[k]) for k in grads)
+    moved = rel_err(flat(grads, sorted(grads)), flat(plain, sorted(grads)))
+    print(f"{count} quantized weights: worst gradient tensor {worst:.1e} from the dequantized base's, {moved:.1e} from the unquantized")
+    assert set(grads) == set(trainable) and worst < 1e-4
+    assert all(float(mx.abs(g).max()) > 0 for g in grads.values())
+    assert moved > 1e-4, "8 bits is not the original weights: the comparison is against what the quantized weight holds"

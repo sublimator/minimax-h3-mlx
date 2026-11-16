@@ -297,3 +297,42 @@ def test_example_refusals():
     two_frames = mx.zeros((1, 2, 8, 6, CHANNELS))
     with pytest.raises(ValueError, match="latents must be"):
         train.build_example(TINY, TAGS, two_frames, 0.5, Noise(0), condition_t=LEVEL)
+    for empty in ((1, 1, 0, 6, CHANNELS), (1, 1, 8, 0, CHANNELS)):  # no height or no width: NaN position ids otherwise
+        with pytest.raises(ValueError, match="latents must be .* with a height and a width"):
+            train.build_example(TINY, TAGS, mx.zeros(empty), 0.5, Noise(0), condition_t=LEVEL)
+        with pytest.raises(ValueError, match=r"condition_latents\[0\] must be .* with a height and a width"):
+            train.build_example(TINY, TAGS, cl(picture), 0.5, Noise(0), condition_t=LEVEL, condition_latents=[mx.zeros(empty)])
+
+
+def test_a_sigma_whose_timestep_rounds_to_one_is_refused():
+    """The picture's rows are noised to the float32 timestep `1 - sigma`. For a sigma of 2**-25 or less that is 1.0:
+    the rows would be the clean picture with nothing to predict, and the audio rows exactly zero. Refused, not
+    clamped (the recipe clamps sigma to 1e-6 and up before it gets this far, which is well inside what is accepted).
+    Just above the bound the example is a real one, at the level 1 - t."""
+    picture, refs = latents_of(1)
+    for bad in (1e-8, 2.0 ** -25, np.float32(2.0 ** -25)):
+        with pytest.raises(ValueError, match="sigma = .* is too small: the timestep 1 - sigma rounds to 1.0"):
+            ours(picture, refs, bad)
+        with pytest.raises(ValueError, match="audio_sigma = .* is too small"):
+            ours(picture, refs, 0.5, audio_sigma=bad)
+    for good in (np.nextafter(np.float32(2.0 ** -25), np.float32(1)), 1e-6):
+        e = ours(picture, refs, good)
+        t = np.float32(1) - np.float32(good)
+        assert t < 1 and e.timestep.tolist() == [t], "every row at the picture's timestep, which is below 1"
+        assert float(mx.abs(e.video_rows[e.num_condition_rows:] - e.clean_rows).max()) > 0
+        assert float(mx.abs(e.audio_rows).max()) > 0
+        level = float(np.float32(1) - t)
+        assert abs(level - float(good)) <= 2.0 ** -25, "the level the rows are at is sigma to within half a float32 step below 1"
+
+
+@pytest.mark.parametrize("bad", [[], np.zeros(0, dtype=np.int64), [1, 99, 1], [1, 2, 1], [-1, 1], [1.0, 0.0], [[1, 0], [1, 1]],
+                                 [True, False]])
+def test_text_token_tags_are_text_or_vision(bad):
+    """One integer tag per prompt row, 1 for text and 0 for a vision token: the two values the picture pipelines'
+    encoders produce. An empty prompt, the audio tag, a value past the modalities (the AdaLN table would be indexed
+    out of range, which MLX does not report) and non-integers are refused."""
+    picture, _ = latents_of(0)
+    with pytest.raises(ValueError, match="text_token_tags must be one integer tag per prompt row"):
+        train.build_example(TINY, bad, cl(picture), 0.5, Noise(0), condition_t=LEVEL)
+    assert set(np.unique(TAGS)) == {0, 1}
+    train.build_example(TINY, [1, 0, 1], cl(picture), 0.5, Noise(0), condition_t=LEVEL)  # a list is fine
