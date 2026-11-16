@@ -30,7 +30,7 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
   take that gradient without holding every block's graph at once; `h3mlx.cache` keeps encoded examples on disk under
   keys that change with every input, encode choice and code version. `scripts/train_lora.py` puts them together:
   every training argument required, a `--plan-only` that opens no weights, limits that stop a run, a run record, and
-  checkpoints it resumes from. **It has run on a tiny random transformer in the tests and never on real weights;**
+  checkpoints it resumes from, one session to a run directory. **It has run on a tiny random transformer in the tests and never on real weights;**
   `docs/porting-lora-training.md` §13 lists what a first real run would still need.
 - **Porting guides:** [`docs/porting.md`](docs/porting.md) (diffusers -> h3mlx),
   [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md),
@@ -44,15 +44,15 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 761 tests and skips 74. Those 74 need the releases' tokenizers, processors,
+No weights are needed. A plain clone runs 777 tests and skips 75. Those 75 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header and a public training adapter's header. These
 files aren't shipped here because they belong to MiniMax, Video Rebirth, Pruna and the adapter's publisher. Fetch them
-from Hugging Face at pinned revisions (about 50 MB, no weights) and all 835 run:
+from Hugging Face at pinned revisions (about 50 MB, no weights) and all 852 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest
 
-Or point `H3MLX_FIXTURES` at a copy. Seven of the 74 also need `ffmpeg` and `ffprobe` on the `PATH`.
+Or point `H3MLX_FIXTURES` at a copy. Seven of the 75 also need `ffmpeg` and `ffprobe` on the `PATH`.
 
 The oracle is diffusers main at `d3d8af89` (P-H3-Image isn't in a diffusers release yet); its H3 code is 0.42.1's plus a
 tensor-parallel plan, and the H3 tests pass against both.

@@ -75,8 +75,8 @@ port takes an argument and has no default.
 | the example's loss and gradient | `train.example_loss`, `train.loss_and_gradients` | torch autograd on diffusers' transformer with PEFT's layers | `tests/test_train_gradients.py` (31) |
 | a bounded backward pass | `src/h3mlx/backward.py` | the plain gradient of the row above | `tests/test_backward.py` (39) |
 | the optimizer step | `train.adamw`, `train.optimizer_step` | `torch.optim.AdamW`, `clip_grad_norm_` | `tests/test_train_optimizer.py` (32) |
-| the cache of encoded examples | `src/h3mlx/cache.py`, `src/h3mlx/files.py` | diffusers `p_h3_image/before_encoder.py` for one sizing rule; the recipe for the other | `tests/test_cache.py` (89, two of them on release fixtures) |
-| the training script | `scripts/train_lora.py`, `src/h3mlx/trainer.py` | none: the pieces above, in order | `tests/test_train_lora.py` (90, one of them on release fixtures) |
+| the cache of encoded examples | `src/h3mlx/cache.py`, `src/h3mlx/files.py` | diffusers `p_h3_image/before_encoder.py` for one sizing rule; the recipe for the other | `tests/test_cache.py` (96, three of them on release fixtures) |
+| the training script | `scripts/train_lora.py`, `src/h3mlx/trainer.py` | none: the pieces above, in order | `tests/test_train_lora.py` (100, one of them on release fixtures) |
 
 ## 1. LoRA adapters
 
@@ -1100,7 +1100,7 @@ and the time embedding's, summed over the blocks.
 - **What it skips.** With no trainable matrix before the blocks, nothing needs the time embedding's cotangent, and it
   is never evaluated.
 - **A place to stop.** `after_stage`, when given, is called after every evaluation. The training loop looks at MLX's
-  memory counter there and stops by raising (§11.6).
+  memory counter there and stops by raising (§11.7).
 
 ### 8.3 Both are the plain gradient
 
@@ -1332,17 +1332,30 @@ entry's key, and the two files are named by it. So an entry made any other way i
 | text | the dtype the rows are kept in, and whether the prompt is presented as text-to-image or as an edit |
 | VAE | the dtype policy it was loaded with, and the canvas multiple |
 | encoders | an identity for each of the VAE, the text encoder, the connector, the tokenizer and the processor |
-| versions | a digest of this package's source, and the versions of MLX, numpy, torch, Pillow, transformers, tokenizers and safetensors |
+| versions | a digest of this package's source, and the versions of MLX, mlx-vlm, numpy, torch, torchvision, Pillow, transformers, tokenizers and safetensors |
 
 No argument of `request` has a default.
 
 - **The code version** is `code_digest`: the name and sha256 of every `.py` file of the package. It is deliberately
   wide. Any change to the package, a comment included, makes every entry a miss, and encoding again is cheap beside
-  training on entries made by other code. The libraries are there because the encode runs through them: torch draws
-  the posterior's noise, Pillow resizes, the tokenizer tokenizes.
+  training on entries made by other code.
+- **The digest covers the package and not the scripts,** and that is enough because a script cannot change what an
+  entry holds for a given request. How a picture file is opened and oriented (`load_picture`), how the encoders are
+  loaded (`load_encoders`) and how they are run (`encode`) are all in the package. What the training script does
+  decide, each picture's posterior seed, the sizes and the choices, goes into the request and so into the key
+  (`test_what_turns_a_request_into_an_entry_is_in_the_package`).
+- **The libraries** are the ones the encode path computes with: mlx-vlm runs the text encoder, torchvision is the
+  processor's image backend, torch draws the posterior's noise, Pillow opens and resizes the pictures, the tokenizer
+  tokenizes.
 - **An encoder's identity** is `identity`: each small file by its sha256, each `.safetensors` file by its name and
-  size. **It does not read the weights,** and so it does not see a weight file replaced by a different one of the same
-  name and size. Hashing the weights at every start would see it; that is not done.
+  size.
+  - It notices a different release, a changed config, tokenizer or processor file, a file added, removed or renamed,
+    and a weight file of another size.
+  - **It does not read the weights,** and so it does not notice a weight file replaced by a different one of the same
+    name and size. Hashing the weights at every start would; that is not done.
+  - It ignores hidden files and everything under a hidden directory. A download tool keeps bookkeeping of its own
+    there, inside the folders it fills, and that changes without the component changing: counted, it would make
+    every entry a miss and every resume a refusal for no reason.
 
 {{ code('src/h3mlx/cache.py', function='code_digest') }}
 {{ code('src/h3mlx/cache.py', function='identity') }}
@@ -1351,22 +1364,44 @@ No argument of `request` has a default.
 
 {{ code('src/h3mlx/cache.py', function='write') }}
 {{ code('src/h3mlx/files.py', function='atomic_write') }}
+{{ code('src/h3mlx/files.py', function='exclusive') }}
 {{ code('src/h3mlx/cache.py', function='load') }}
 {{ code('src/h3mlx/cache.py', function='read') }}
 
 - **Format.** `<key>.safetensors` holds the arrays, `<key>.json` the record: the request in full, the arrays' names,
   dtypes and shapes, and the tensors file's sha256. Nothing is pickled, and the reader loads the tensors as
   safetensors and as nothing else.
-- **Writing.** Each file is written under a temporary name and renamed, the tensors first and the record last, so an
-  entry exists only once it is whole. A write that fails at any of its four steps leaves nothing behind
-  (`test_a_write_that_fails_leaves_no_entry`); what a killed writer leaves is under a temporary name or without a
-  record, and is not an entry. An entry is written once: a key that already has a record is refused.
+- **Writing.** The tensors are written under a temporary name; then the entry is published, the tensors renamed into
+  place and the record written last, so an entry exists only once it is whole. A write that fails at any of its steps
+  leaves nothing behind (`test_a_write_that_fails_leaves_no_entry`); what a killed writer leaves is under a temporary
+  name or without a record, and is not an entry. An entry is written once: a key that already has a record is
+  refused.
+- **One writer publishes at a time.** Publication happens while holding the cache directory's lock, `cache.lock`.
+  Without it, two writers of one key could interleave: the second commits an entry between the first one's tensors
+  and its record, the first then fails, and its cleanup deletes the tensors under the second one's record. With it,
+  a writer that fails removes only what it alone put there, and an entry that has its record is never touched.
+  A writer waits up to thirty seconds for the lock and is then refused, told who holds it.
+- **The lock** is `files.exclusive`: the operating system's advisory lock on a file. It belongs to the process that
+  took it, so it ends when that process does, however it ends, and cannot be left stuck. The holder writes its
+  process id, what it is doing and since when into the lock file. It is advisory and local: it binds other users of
+  the same lock, and is not to be relied on over a network filesystem.
 - **What is refused before writing:** arrays that are not the request's (names, shapes, dtypes), a picture's latents
   that are not in the stated height-to-width ratio, tags that are not 0 or 1, and anything not finite.
 - **Reading.** No record under the key is a miss. A record that is there is checked: its request against the request
   asked, field by field; its key; the tensors file's digest; the arrays against the record's list. Anything that
   does not hold is a `CacheMismatch` that says what differs. It is never a miss, which would let a trainer encode
   over the evidence.
+
+Three tests of the lock around publication:
+
+- `test_a_writer_that_fails_cannot_break_another_writers_entry` starts a second writer of the same key from inside
+  the first one's publication, at the worst moment. The second is refused and leaves nothing; the first then fails
+  and removes its own files; the key can be written afterwards.
+- `test_an_entry_published_meanwhile_is_left_alone` is the other order: an entry is published between a writer's
+  staging and its turn at the lock. The writer finds the record, stops, and leaves the committed entry whole.
+- `test_two_processes_writing_one_key` does the first with two real processes. The other process is held in the
+  middle of its publication until this one says go, so the order does not depend on timing: this process's write is
+  refused, naming the other's process id; the other is released, fails and cleans up; this one then writes the key.
 
 `test_a_changed_input_or_choice_is_not_served_the_old_entry` writes one entry and asks for it with one thing changed,
 twenty-two times: the picture, a reference, their order, the prompt, the size, either seed, either rounding, the
@@ -1408,10 +1443,20 @@ recorded in the request, and it has one value.
 
 ### 10.4 The encode
 
+{{ code('src/h3mlx/cache.py', function='oriented') }}
+{{ code('src/h3mlx/cache.py', function='load_picture') }}
 {{ code('src/h3mlx/cache.py', function='target_picture') }}
+{{ code('src/h3mlx/cache.py', function='load_encoders') }}
 {{ code('src/h3mlx/cache.py', function='encode') }}
 
-`encode` is the only function here that needs weights.
+`load_encoders` and `encode` are the only functions here that need weights.
+
+- **Every picture is oriented first.** A photograph can carry an EXIF tag that says how to turn it. `encode` applies
+  it to the picture and to each reference itself, so the same file gives the same entry whether the caller opened it
+  raw or through `load_picture`. Without that, one key could hold a picture the right way up or upside down
+  depending on the caller. `test_a_picture_is_encoded_the_way_it_is_looked_at` and
+  `test_a_reference_is_oriented_like_the_picture` check both ways in, with a tag that turns the picture upside down
+  (the same size, so nothing else would notice) and one that swaps its sides.
 
 - **The picture** is resized to the stated size and encoded as the pipeline encodes a reference (`vae.encode_condition`):
   one posterior sample, from a generator seeded with the request's seed, rounded through float16 or not. The recipe
@@ -1450,6 +1495,9 @@ is the encoders' business, and they are tested where they live.
 | `test_an_entry_put_under_another_requests_name_is_refused`, `test_differences_names_what_differs` | a stale entry made by hand, and the comparison it trips |
 | `test_a_damaged_entry_is_an_error_not_a_miss` (×11) | other tensors, a truncated file, no tensors, a bad record, a pickle or an npz with the record's blessing |
 | `test_a_write_that_fails_leaves_no_entry` (×4), `test_files_a_killed_writer_left_are_ignored`, `test_an_entry_is_written_once`, `test_atomic_write_keeps_the_old_file_when_the_new_one_fails` | whole or absent |
+| `test_a_writer_that_fails_cannot_break_another_writers_entry`, `test_an_entry_published_meanwhile_is_left_alone`, `test_two_processes_writing_one_key` | one writer publishes at a time; a failed writer removes only its own; in one process and in two |
+| `test_exclusive_is_released_when_its_holder_ends` | the lock: one holder, who it is, waiting, and a killed holder does not leave it held |
+| `test_a_picture_is_encoded_the_way_it_is_looked_at`, `test_a_reference_is_oriented_like_the_picture` (release fixtures), `test_what_turns_a_request_into_an_entry_is_in_the_package` | EXIF orientation applied in the cache; nothing about the encode left to a script |
 | `test_tensors_that_are_not_an_entry_are_not_written` (×12), `test_request_refusals` (×20), `test_a_request_has_no_defaults` | what is refused going in |
 | `test_pipeline_sizing_is_diffusers`, `test_recipe_sizing_scales_down_to_the_target_and_never_up` | the two rules |
 | `test_a_text_to_image_entry_is_the_direct_encode`, `test_an_edit_entry_is_the_pipelines_conditioning` (×2, release fixtures) | the encode on tiny encoders |
@@ -1523,6 +1571,10 @@ against the example the builder makes.
 
 What the plan cannot say: peak memory and time. Those are measured, not computed.
 
+The base weights' bytes come from their safetensors headers, by dtype. Every dtype a header can name has a size
+there, and one that does not is reported as a bad argument is, with the tensor's name
+(`test_every_safetensors_dtype_has_a_size`).
+
 ### 11.3 What a step draws
 
 {{ code('src/h3mlx/trainer.py', function='step_seed') }}
@@ -1537,7 +1589,41 @@ an uninterrupted run draws there. Nothing has to be restored, and nothing can be
 
 The examples are taken in a new random order on every pass, each once a pass.
 
-### 11.4 The loop is the pieces
+### 11.4 One session in a run directory, and the checks that come first
+
+{{ code('src/h3mlx/trainer.py', function='open_run') }}
+
+Before anything heavy, the script takes the run directory for its process and checks that the run can start or go on
+there. `open_run` reads only the run directory. It loads no weights, encodes nothing, and changes nothing in the
+directory but its lock file, so **a run that is refused costs nothing and leaves the directory as it was**: the
+record of a finished run included.
+
+- **One session at a time.** The directory's lock file, `run.lock`, is held for the whole session (§10.2's
+  `files.exclusive`). A second session on the same directory, a resume started twice for instance, is refused and
+  told which process holds it. It does not get as far as clearing temporary checkpoint directories; without the lock
+  that clearing would delete the first session's checkpoint in the middle of being written. A session that is killed
+  does not leave the lock held.
+- **A new run overwrites nothing.** It needs a directory that holds none of a run's three outputs: `run.json`,
+  `adapter.safetensors`, `checkpoints`. A directory with someone's adapter in it and no record is refused like one
+  with a record. Other files are not the run's and do not matter.
+- **A resume** needs the record with this trajectory (§11.8), the checkpoint the record says is its latest, and room
+  to go on:
+  - It goes on from the latest checkpoint on disk, and that must not be older than the latest one the record lists.
+    With the newest checkpoint folder gone it does not roll back to an older one; with the whole folder gone it does
+    not start again from step 0. (A checkpoint newer than the record lists is the trace of a run stopped between the
+    two writes, and is resumed from.)
+  - A run already past the `--max-steps` given is refused, and nothing is written.
+- **The order.** The run directory first, then the examples the cache lacks, then the transformer. A `--resume` into
+  the wrong directory, or of another run, stops before an encoder is loaded.
+
+Tests: `test_one_session_in_a_run_directory_at_a_time` starts the second session from inside the first one's
+checkpoint rename; `test_a_second_process_is_refused_and_sigterm_stops_the_first_cleanly` does it with two real
+processes; `test_a_new_run_overwrites_nothing`; `test_a_resume_goes_on_from_the_records_latest_checkpoint_or_not_at_all`;
+`test_a_resume_past_its_max_steps_is_refused`; `test_a_refused_resume_encodes_nothing`. Where a run is refused
+(over existing outputs, with a checkpoint missing or damaged, past its limit, as another run), the tests compare
+every file of the run directory before and after, the lock file aside.
+
+### 11.5 The loop is the pieces
 
 `trainer.run` is, per step: `example_at`, `noise_level` (§4), `build_example` (§6), a bounded gradient (§8),
 `optimizer_step` (§9). `test_the_loop_is_the_pieces_in_order` runs six steps of the script with every hyper-parameter
@@ -1550,7 +1636,7 @@ levels with fixed noise falls from 2.74 to 1.94, and the record's own losses fro
 (the last 30). That is a tiny random model memorising noise. It shows the loop turns the loss down and nothing about
 what a real model learns.
 
-### 11.5 The record
+### 11.6 The record
 
 `run.json` in the run directory is written when the session starts and rewritten atomically (§10.2's
 `atomic_write`) after every step. It holds the trajectory (every argument that decides the weights), the limits,
@@ -1558,15 +1644,27 @@ the versions, the seed, the plan, the step reached, the status and why it stoppe
 span, and a line per step: the example, the noise level, the loss weight, the loss, the gradient's norm before
 clipping, the seconds and MLX's peak memory (`test_the_record_holds_the_run`).
 
-### 11.6 Limits stop the run
+### 11.7 Limits stop the run, and so does SIGTERM
 
 | limit | checked | what happens |
 | --- | --- | --- |
 | `--max-steps` | before each step | the run is finished: the final adapter is written, exit code 0 |
 | `--max-seconds` | before each step, against the session's wall clock | the session ends at the last completed step: a checkpoint, status `stopped`, exit code 3 |
 | `--max-peak-memory-gb` | against `mx.get_peak_memory()`, reset when the session starts: before the first step, after every step, and with the block-by-block gradient after every evaluated block | the step in progress is dropped; the session ends at the last completed step: a checkpoint, status `stopped`, exit code 3 |
+| SIGTERM | at the same places as the memory limit | the same: the step in progress is dropped, a checkpoint at the last completed step, status `stopped`, reason `terminated`, exit code 3 |
 
-None of them warns and goes on. `--max-steps` is a limit and not part of the trajectory: a finished run resumed with
+None of them warns and goes on. SIGTERM is what a supervisor, a job timeout or a closing terminal sends: the session
+takes it as a request to stop, and stops as it does at a limit, resumable. A signal that arrives in the middle of an
+optimizer update is acted on after it. The handler is the session's only; the one before it is put back when the
+session ends. Ctrl-C is not handled this way: it interrupts where it lands, and the run goes on from its last
+periodic checkpoint.
+
+- `test_sigterm_stops_at_the_next_boundary_with_a_checkpoint` sends the signal to the test's own process during the
+  fourth step's update (the session ends at step 4) and again in the middle of a backward pass (that step is
+  dropped), then resumes to the uninterrupted run's weights.
+- `test_a_second_process_is_refused_and_sigterm_stops_the_first_cleanly` sends it to the script running as a process
+  of its own: exit code 3, a checkpoint where it stopped, and a resume to the uninterrupted run's adapter, byte for
+  byte. `--max-steps` is a limit and not part of the trajectory: a finished run resumed with
 a higher one goes on, to the weights a run given the higher one from the start reaches.
 
 - `test_the_wall_clock_stops_the_session_and_the_run_resumes` uses a clock that advances a second a reading.
@@ -1576,7 +1674,7 @@ a higher one goes on, to the weights a run given the higher one from the start r
 - The memory limit is MLX's counter and nothing more. It does not see memory outside MLX, and it stops the run after
   the peak has happened, not before.
 
-### 11.7 Checkpoints, and resuming
+### 11.8 Checkpoints, and resuming
 
 {{ code('src/h3mlx/trainer.py', function='write_checkpoint') }}
 {{ code('src/h3mlx/trainer.py', function='read_checkpoint') }}
@@ -1595,10 +1693,11 @@ steps and when a session ends.
   (`test_a_resume_that_is_another_run_is_refused`, `test_a_resume_under_other_code_or_into_nothing_is_refused`).
 - **It refuses a damaged checkpoint.** A file that is not the one the checkpoint describes, a missing record, a
   checkpoint of another trajectory or under another step's name: the resume stops and says so. It does not fall back
-  to an older checkpoint (`test_a_damaged_checkpoint_is_refused_not_skipped`).
+  to an older checkpoint, and it has loaded no weights and changed no file when it stops
+  (`test_a_damaged_checkpoint_is_refused_not_skipped`). A checkpoint that is missing altogether is §11.4's case.
 - **Steps after the last checkpoint are done again.** The record may be ahead of the checkpoint; the resumed session
   says how many steps it discards, and the losses come from the checkpoint.
-- A new run refuses a directory that already holds a record.
+- A new run refuses a directory that already holds any of a run's outputs (§11.4).
 
 Two tests of the same claim, that a resumed run ends where an uninterrupted one does:
 
@@ -1617,9 +1716,9 @@ Byte-for-byte equality here is on one machine, with adapters on attention and fe
 device a gradient that passes through a bf16 modulation table can differ by a rounding step from run to run (§7.1),
 so an adapter on those modules would resume to weights that close, not to the same bytes.
 
-### 11.8 From pictures
+### 11.9 From pictures
 
-When the cache lacks an example, the script loads the VAE and the text encoder once, encodes what is missing, writes
+When the cache lacks an example, the script loads the VAE and the text encoder once (`cache.load_encoders`), encodes what is missing, writes
 the entries and frees both before the transformer is loaded. `test_a_run_from_pictures_encodes_what_the_cache_lacks`
 runs that on the tiny release (it needs the release's tokenizer and processor files): a text-to-image example and an
 edit example from an empty cache, two entries written, three steps trained; a second run finds both entries, loads no
@@ -1627,7 +1726,7 @@ encoder and trains the same weights.
 
 On real weights this path has never run.
 
-### 11.9 The tests
+### 11.10 The tests
 
 | test | pins |
 | --- | --- |
@@ -1640,6 +1739,10 @@ On real weights this path has never run.
 | `test_the_record_holds_the_run` | every argument, the versions, the seed, the step, a line per step; each example once a pass |
 | `test_weighting_and_density_reach_the_loop`, `test_the_two_bounded_gradients_train_the_same_weights`, `test_a_frozen_assistant_is_used_and_not_saved`, `test_a_bf16_base_trains` | the options |
 | `test_the_wall_clock_stops_the_session_and_the_run_resumes`, `test_the_memory_limit_stops_the_session`, `test_max_steps_finishes_the_run_and_a_resume_can_extend_it` | each limit stops the run |
+| `test_sigterm_stops_at_the_next_boundary_with_a_checkpoint`, `test_a_second_process_is_refused_and_sigterm_stops_the_first_cleanly` | SIGTERM: a clean stop with a checkpoint, in this process and in another; two processes on one run directory |
+| `test_one_session_in_a_run_directory_at_a_time`, `test_a_new_run_overwrites_nothing` (×3) | the run directory's lock; a new run and the three outputs |
+| `test_a_resume_goes_on_from_the_records_latest_checkpoint_or_not_at_all`, `test_a_resume_past_its_max_steps_is_refused`, `test_a_refused_resume_encodes_nothing` | no rollback, no restart from nothing, no resume past the limit, nothing heavy before a refusal |
+| `test_every_safetensors_dtype_has_a_size` | the plan's size table |
 | `test_a_run_that_dies_resumes_to_the_uninterrupted_runs_weights`, `test_a_killed_process_resumes_to_the_same_weights` | resume, after a failure and after a kill |
 | `test_a_resume_that_is_another_run_is_refused` (×9), `test_a_resume_under_other_code_or_into_nothing_is_refused`, `test_a_damaged_checkpoint_is_refused_not_skipped` (×6) | what a resume refuses |
 | `test_checkpoints_are_whole_or_absent` | atomic checkpoints |
@@ -1742,6 +1845,15 @@ Each wrong implementation below was made on a copy of the sources and run agains
 | the record written only at the end | `test_a_killed_process_resumes_to_the_same_weights` |
 | the plan's parameters counted on one side, its rows without the references, its saved inputs sized for float32 whatever the base; `--plan-only` reading the weights or making the run directory | `test_plan_only_opens_no_weights_and_writes_nothing`, `test_a_bf16_base_trains` |
 | the shift or the rank given a default; unknown dataset keys ignored; the reference choices not required | `test_a_missing_argument_is_an_error_that_names_it`, `test_a_dataset_that_is_not_one_is_refused`, `test_arguments_that_do_not_make_a_run_are_refused` |
+| a lock that takes nothing, never waits, says nothing about its holder, or leaves the holder's note after release | `test_exclusive_is_released_when_its_holder_ends`, `test_a_writer_that_fails_cannot_break_another_writers_entry` |
+| a cache entry published without the lock, or without a second look for a record under it; a failed writer removing the final tensors whatever it found; a staged file left behind | `test_a_writer_that_fails_cannot_break_another_writers_entry`, `test_an_entry_published_meanwhile_is_left_alone`, `test_two_processes_writing_one_key`, `test_a_write_that_fails_leaves_no_entry` |
+| an identity that counts files under a hidden directory; the version of mlx-vlm or of torchvision left out of the request | `test_identity_reads_no_weights`, `test_a_changed_code_or_library_version_is_another_key` |
+| a picture, a reference or the target not oriented by its EXIF tag; the size reported as stored; the script opening pictures itself | `test_a_picture_is_encoded_the_way_it_is_looked_at`, `test_a_reference_is_oriented_like_the_picture`, `test_what_turns_a_request_into_an_entry_is_in_the_package` |
+| a run directory taken without its lock; temporary checkpoint directories cleared before the lock is held | `test_one_session_in_a_run_directory_at_a_time`, `test_a_second_process_is_refused_and_sigterm_stops_the_first_cleanly` |
+| a new run that looks for a record only | `test_a_new_run_overwrites_nothing` |
+| a resume that takes whatever checkpoint is on disk, refuses the record's own latest one, goes ahead past `--max-steps`, or is refused at it; the record rewritten before the resume is checked; a checkpoint's tensors loaded before its losses are counted; examples encoded before the run directory is checked | `test_a_resume_goes_on_from_the_records_latest_checkpoint_or_not_at_all`, `test_a_resume_past_its_max_steps_is_refused`, `test_max_steps_finishes_the_run_and_a_resume_can_extend_it`, `test_a_damaged_checkpoint_is_refused_not_skipped`, `test_a_refused_resume_encodes_nothing` |
+| SIGTERM never looked at, reported as the wall clock, or its handler not put back | `test_sigterm_stops_at_the_next_boundary_with_a_checkpoint` |
+| an unsigned 64-bit tensor without a size; an unknown dtype as a `KeyError` | `test_every_safetensors_dtype_has_a_size` |
 
 One change in this list is caught by a narrow margin. The block-by-block gradient's forward walk evaluates each block
 before the next; without that evaluation the gradients are the same and only the memory differs, on the default
@@ -1781,6 +1893,25 @@ must be cast to bf16 before the subtraction.
   on tiny models. A file trained by this script has not been loaded into diffusers on real weights.
 - **Housekeeping for long runs.** Every checkpoint is kept (the plan prints their total size); there is no pruning.
   The whole dataset's entries are held in memory. One process trains on one device.
+- **A smaller base in memory.** The gradients are tested over a quantized base (§7.4, §8.5), but the script has no
+  option to quantize the weights it loads. It also sets none of MLX's own bounds, the memory limit and the buffer
+  cache limit, which the sampling script does set. Its `--max-peak-memory-gb` reads a counter and stops the run; it
+  bounds nothing.
+- **Adapters anywhere but the block matrices.** `--targets` chooses among the six attention and feed-forward
+  matrices of a block. The package can put an adapter on any `Linear` (§1), and the gradient for the ones a
+  modulation table feeds is tested (§7.1), but the script does not offer them.
+- **Gradient accumulation.** One example, one optimizer step. Several examples' gradients are not summed before a
+  step, which is how a trainer with a batch of one usually gets the effect of a larger one.
+- **Prompts as the model will be given them.** The sampling script can expand a short request with the release's
+  prompt upsampler before encoding it; the training script encodes each prompt as written. Whether training prompts
+  should be expanded the same way is a choice a first run has to make, and there is no caption dropout.
+- **Long evaluations on the GPU.** The text encoder's loader already splits its pass into one evaluation a layer,
+  because a single long one at several thousand tokens was stopped by the system's GPU watchdog in a probe. Training
+  evaluates more per block than sampling does, and the checkpointed gradient evaluates the whole backward pass at
+  once. Whether either runs into that limit at real sequence lengths is not known and has to be measured; the
+  block-by-block gradient evaluates one block at a time, which is the smaller risk.
+- **Stopping from outside.** SIGTERM is handled (§11.7). Ctrl-C is not: it interrupts where it lands and leaves the
+  last periodic checkpoint. Neither lock here is to be relied on over a network filesystem (§10.2).
 
 Open, and not specific to a first run:
 
