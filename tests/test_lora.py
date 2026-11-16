@@ -505,6 +505,39 @@ def test_merged_equals_unmerged(tmp_path):
     assert_close(got_merged[0], torch_forward(peft_model, lay, args)[0], atol=2e-4, rtol=2e-4, what="against PEFT merged")
 
 
+def test_merge_takes_plain_weights_only():
+    """Attaching and merging are alternatives. Weights that already carry the adapter are refused: merging into them
+    would leave its factors in place, and the forward would apply them on top of the merged weights. The order that
+    works is to merge into the plain weights and attach whatever else afterwards."""
+    model = randomised(TINY, 2)
+    cfg = dict(model.config)
+    base = state_mx(model)
+    adapter = random_adapter(cfg, {m: 4 for m in MODULES}, {m: 10 for m in MODULES})
+    other = random_adapter(cfg, {m: 3 for m in MODULES}, {m: 6 for m in MODULES}, seed=9)
+    attached = lora.attach(base, cfg, adapter)
+    with pytest.raises(ValueError, match="already carry a LoRA.*applied twice"):
+        lora.merge(attached, cfg, adapter)
+    with pytest.raises(ValueError, match="already carry a LoRA"):  # another adapter's factors on the same Linears
+        lora.merge(attached, cfg, other)
+    hf_tensors, hf_md = make_file(model, TINY)
+    hf_params, hf_cfg = hyperflow.attach(base, cfg, {k: to_mx(v) for k, v in hf_tensors.items()},
+                                         hyperflow.HyperFlowMeta.from_header(hf_md))
+    with pytest.raises(ValueError, match="already carry a LoRA"):
+        lora.merge(hf_params, hf_cfg, adapter)
+
+    lay, args = inputs()
+    once = mlx_forward(attached, cfg, lay, args)[0]
+    merged = lora.merge(base, cfg, adapter)
+    assert_close(mlx_forward(merged, cfg, lay, args)[0], once, atol=2e-4, rtol=2e-4, what="merged into plain weights")
+    # what the refusal prevents: the adapter on top of its own merge is the adapter applied twice, far from once
+    twice = mlx_forward(lora.attach(merged, cfg, adapter), cfg, lay, args)[0]
+    assert rel_err(twice, once) > GUARD
+    # merge, then attach another adapter: the same as merging both
+    both = mlx_forward(lora.attach(merged, cfg, other), cfg, lay, args)[0]
+    assert_close(both, mlx_forward(lora.merge(merged, cfg, other), cfg, lay, args)[0], atol=2e-4, rtol=2e-4, what="merged + attached")
+    assert rel_err(both, once) > GUARD
+
+
 @pytest.mark.parametrize("base_dtype,lora_dtype", [(torch.float32, torch.float32), (torch.bfloat16, torch.bfloat16),
                                                    (torch.bfloat16, torch.float32)])
 @pytest.mark.parametrize("r,alpha", [(4, 4), (4, 10), (3, 1)])

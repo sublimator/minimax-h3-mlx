@@ -167,9 +167,19 @@ def delta_weight(a: mx.array, b: mx.array, scaling: float) -> mx.array:
 
 
 def merge(params: dict, cfg: dict, adapter: Adapter) -> dict:
-    """The transformer's weights with the adapter added into them (PEFT's `Linear.merge`: `weight += delta_weight`, in
-    the weight's dtype); `params` is not modified and the result carries no LoRA keys. Not for quantized weights."""
+    """The transformer's plain weights with the adapter added into them (PEFT's `Linear.merge`: `weight +=
+    delta_weight`, in the weight's dtype); `params` is not modified, and the result has its keys and nothing of the
+    adapter left to apply.
+
+    Attaching and merging are alternatives here. Weights that already carry a LoRA on one of the adapter's Linears are
+    refused: the attached factors would stay in the result, and `plinear` would apply them on top of the merged ones.
+    (A PEFT layer holds both states itself, and its forward skips an adapter once it is merged.) Not for quantized
+    weights."""
     check(adapter, cfg)
+    taken = [m for m in adapter.modules if m + ".lora_A.weight" in params]
+    if taken:
+        raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: merge into the plain "
+                         "weights, not into attached ones (the adapter would be applied twice)")
     out = dict(params)
     for module in adapter.modules:
         w = params[module + ".weight"]
