@@ -131,7 +131,7 @@ Two header details:
 - **`compatible_subfolders`.** Stricter than theirs, on purpose: ours refuses a file that lists subfolders not
   including `transformer_ref`. Their loader parses the field but never reads it.
 
-📍 [`src/h3mlx/hyperflow.py:53-78`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/hyperflow.py#L53-L78)
+📍 [`src/h3mlx/hyperflow.py:53-78`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/hyperflow.py#L53-L78)
 ```python
   53     @classmethod
   54     def from_header(cls, md: dict | None) -> "HyperFlowMeta":
@@ -160,7 +160,7 @@ Two header details:
   77             compatible_subfolders=lst("compatible_subfolders", str) or (), raw=md,
   78         )
 ```
-📍 [`src/h3mlx/hyperflow.py:93-104`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/hyperflow.py#L93-L104)
+📍 [`src/h3mlx/hyperflow.py:93-104`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/hyperflow.py#L93-L104)
 ```python
   93 def plan_from_keys(keys) -> dict:
   94     """{module: {"A": key, "B": key}} in the file's own (public) module names; anything else is an error."""
@@ -175,13 +175,13 @@ Two header details:
  103         raise ValueError(f"modules with only one of lora_A / lora_B: {incomplete[:8]}")
  104     return plan
 ```
-📍 [`src/h3mlx/hyperflow.py:128-130`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/hyperflow.py#L128-L130)
+📍 [`src/h3mlx/hyperflow.py:128-130`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/hyperflow.py#L128-L130)
 ```python
  128 def _base_name(module: str) -> str:
  129     """The transformer Linear a module's LoRA sits on: the endpoint embedder is a copy of `time_embedder`."""
  130     return BASE_TIME + module[len(ENDPOINT):] if module.startswith(ENDPOINT) else module
 ```
-📍 [`src/h3mlx/hyperflow.py:110-125`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/hyperflow.py#L110-L125)
+📍 [`src/h3mlx/hyperflow.py:110-125`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/hyperflow.py#L110-L125)
 ```python
  110 def wired_shapes(cfg: dict) -> dict:
  111     """{module: (out, in)} for the Linears a HyperFlow file may put a LoRA on: the six matrices of each block and
@@ -200,7 +200,7 @@ Two header details:
  124         out.update({prefix + k: v for k, v in te.items()})
  125     return out
 ```
-📍 [`src/h3mlx/hyperflow.py:133-166`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/hyperflow.py#L133-L166)
+📍 [`src/h3mlx/hyperflow.py:133-166`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/hyperflow.py#L133-L166)
 ```python
  133 def check_plan(plan: dict, shapes: dict, base_shapes: dict, meta: HyperFlowMeta, wired=None) -> int:
  134     """Every LoRA lands on a Linear weight of the right shape, one rank throughout, scaling 1. `shapes` maps the file's
@@ -237,7 +237,7 @@ Two header details:
  165         raise NotImplementedError(f"LoRA scaling alpha/rank = {meta.lora_alpha}/{rank} != 1 (ops.plinear assumes 1)")
  166     return rank
 ```
-📍 [`src/h3mlx/hyperflow.py:194-201`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/hyperflow.py#L194-L201)
+📍 [`src/h3mlx/hyperflow.py:194-201`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/hyperflow.py#L194-L201)
 ```python
  194 def check_file(meta: HyperFlowMeta, shapes: dict, cfg: dict, subfolder: str = "transformer_ref") -> int:
  195     """Everything `attach` checks, from the header alone against the transformer's config (no tensor data, no base
@@ -413,7 +413,7 @@ alpha/rank isn't exactly 1, and multiplying by 1.0 is exact. (`plinear` multipli
 `lora_scaling` entry, which the general adapter loader adds for other scalings: `docs/porting-lora-training.md`, §1.1.
 `hyperflow.attach` never adds one.)
 
-📍 [`src/h3mlx/ops.py:108-146`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L108-L146)
+📍 [`src/h3mlx/ops.py:108-146`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/ops.py#L108-L146)
 ```python
  108 def plinear(x: mx.array, p: dict, name: str, bias: bool = False) -> mx.array:
  109     """The Linear `name` of state dict `p`, plus its LoRA when `name.lora_A.weight` / `name.lora_B.weight` are present.
@@ -465,7 +465,7 @@ alpha/rank isn't exactly 1, and multiplying by 1.0 is exact. (`plinear` multipli
 
 `load` reads the file lazily with `mx.load`, like the transformer.
 
-📍 [`src/h3mlx/hyperflow.py:169-185`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/hyperflow.py#L169-L185)
+📍 [`src/h3mlx/hyperflow.py:169-185`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/hyperflow.py#L169-L185)
 ```python
  169 def attach(params: dict, cfg: dict, tensors: dict, meta: HyperFlowMeta, subfolder: str = "transformer_ref"):
  170     """Return (params, cfg) with HyperFlow attached; the inputs are not modified. Adapter tensors are cast to their
@@ -485,7 +485,7 @@ alpha/rank isn't exactly 1, and multiplying by 1.0 is exact. (`plinear` multipli
  184         out[module + ".lora_B.weight"] = tensors[keys["B"]].astype(dtype)
  185     return out, {**cfg, "hyperflow_gate": float(meta.gate)}
 ```
-📍 [`src/h3mlx/hyperflow.py:204-210`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/hyperflow.py#L204-L210)
+📍 [`src/h3mlx/hyperflow.py:204-210`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/hyperflow.py#L204-L210)
 ```python
  204 def read_header(path) -> tuple[HyperFlowMeta, dict]:
  205     """(meta, {key: shape}) from the safetensors header alone, no tensor data."""
@@ -495,7 +495,7 @@ alpha/rank isn't exactly 1, and multiplying by 1.0 is exact. (`plinear` multipli
  209     md = header.pop("__metadata__", None)
  210     return HyperFlowMeta.from_header(md), {k: tuple(v["shape"]) for k, v in header.items()}
 ```
-📍 [`src/h3mlx/hyperflow.py:213-219`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/hyperflow.py#L213-L219)
+📍 [`src/h3mlx/hyperflow.py:213-219`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/hyperflow.py#L213-L219)
 ```python
  213 def load(path, params: dict, cfg: dict, subfolder: str = "transformer_ref"):
  214     """Load a HyperFlow .safetensors onto our transformer params: (params, cfg, meta)."""
@@ -574,45 +574,45 @@ Ours is one function. It refuses the mismatch in both directions: HyperFlow weig
 without HyperFlow weights. Like their wrapper, it also refuses an endpoint count that differs from the distinct
 timestep count (MLX would otherwise broadcast a length-1 array silently).
 
-📍 [`src/h3mlx/ops.py:277-291`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L277-L291)
+📍 [`src/h3mlx/ops.py:280-294`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/ops.py#L280-L294)
 ```python
- 277 def two_time_embedding(t: mx.array, r: mx.array | None, p: dict, cfg: dict) -> mx.array:
- 278     """The DiT's timestep embedding; with HyperFlow loaded, HyperFlow's TwoTimeEmbedder: the step's start t and its
- 279     endpoint r are embedded by `time_embedder` and `endpoint_time_embedder` (same base weights, separate LoRAs) and
- 280     blended, emb(t) + gate * (emb_r(r) - emb(t)). Refuses to run a two-time model without endpoints, and the reverse."""
- 281     two_time = "endpoint_time_embedder.linear_1.weight" in p
- 282     if two_time != (r is not None):
- 283         raise ValueError("HyperFlow weights need the step endpoints, and endpoints need HyperFlow weights"
- 284                          f" (endpoint embedder loaded: {two_time}, endpoints given: {r is not None})")
- 285     if r is not None and r.shape != t.shape:
- 286         raise ValueError(f"{t.shape[0]} distinct timesteps but {r.shape[0]} endpoints: one endpoint per timestep")
- 287     temb = timestep_embedding(t, _sub(p, "time_embedder."), cfg["freq_dim"])
- 288     if r is None:
- 289         return temb
- 290     r_emb = timestep_embedding(r, _sub(p, "endpoint_time_embedder."), cfg["freq_dim"])
- 291     return temb + cfg["hyperflow_gate"] * (r_emb - temb)
+ 280 def two_time_embedding(t: mx.array, r: mx.array | None, p: dict, cfg: dict) -> mx.array:
+ 281     """The DiT's timestep embedding; with HyperFlow loaded, HyperFlow's TwoTimeEmbedder: the step's start t and its
+ 282     endpoint r are embedded by `time_embedder` and `endpoint_time_embedder` (same base weights, separate LoRAs) and
+ 283     blended, emb(t) + gate * (emb_r(r) - emb(t)). Refuses to run a two-time model without endpoints, and the reverse."""
+ 284     two_time = "endpoint_time_embedder.linear_1.weight" in p
+ 285     if two_time != (r is not None):
+ 286         raise ValueError("HyperFlow weights need the step endpoints, and endpoints need HyperFlow weights"
+ 287                          f" (endpoint embedder loaded: {two_time}, endpoints given: {r is not None})")
+ 288     if r is not None and r.shape != t.shape:
+ 289         raise ValueError(f"{t.shape[0]} distinct timesteps but {r.shape[0]} endpoints: one endpoint per timestep")
+ 290     temb = timestep_embedding(t, _sub(p, "time_embedder."), cfg["freq_dim"])
+ 291     if r is None:
+ 292         return temb
+ 293     r_emb = timestep_embedding(r, _sub(p, "endpoint_time_embedder."), cfg["freq_dim"])
+ 294     return temb + cfg["hyperflow_gate"] * (r_emb - temb)
 ```
 
 `dit_forward` takes `endpoint` aligned with its distinct `timestep` values. The AdaLN rows are unchanged
 (`timestep_indices * 3 + modality_tag`); each distinct timestep is now a distinct `(t, r)` pair.
 
-📍 [`src/h3mlx/ops.py:502-516`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/ops.py#L502-L516)
+📍 [`src/h3mlx/ops.py:505-519`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/ops.py#L505-L519)
 ```python
- 502     mx.eval(x)  # projections + refiner + scatter as their own graph, before the first block
- 503     if cache is None:
- 504         temb = two_time_embedding(timestep, endpoint, p, cfg)
- 505         t_rows = timestep_indices
- 506     else:
- 507         if endpoint is not None or "endpoint_time_embedder.linear_1.weight" in p:
- 508             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
- 509         temb = None
- 510         call_blocks, call_out = cache.call(timestep)  # this call's own tables: the same rows as computing them here
- 511         t_rows = timestep_indices
- 512     adaln_indices = t_rows * MODALITY_NUM + token_tags
- 513     for i in range(cfg["num_layers"]):
- 514         x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps,
- 515                       modulation=None if cache is None else call_blocks[i])
- 516         mx.eval(x)  # one block's graph at a time: bounds activation memory at 20-50k rows
+ 505     mx.eval(x)  # projections + refiner + scatter as their own graph, before the first block
+ 506     if cache is None:
+ 507         temb = two_time_embedding(timestep, endpoint, p, cfg)
+ 508         t_rows = timestep_indices
+ 509     else:
+ 510         if endpoint is not None or "endpoint_time_embedder.linear_1.weight" in p:
+ 511             raise NotImplementedError("ModulationCache is keyed by t alone; HyperFlow's tables depend on (t, r)")
+ 512         temb = None
+ 513         call_blocks, call_out = cache.call(timestep)  # this call's own tables: the same rows as computing them here
+ 514         t_rows = timestep_indices
+ 515     adaln_indices = t_rows * MODALITY_NUM + token_tags
+ 516     for i in range(cfg["num_layers"]):
+ 517         x = dit_block(x, temb, adaln_indices, rotary, _sub(p, f"transformer_blocks.{i}."), heads, hidden, eps, qk_eps,
+ 518                       modulation=None if cache is None else call_blocks[i])
+ 519         mx.eval(x)  # one block's graph at a time: bounds activation memory at 20-50k rows
 ```
 
 The modulation cache (main guide, §2.6) is keyed by `t` alone. With HyperFlow the tables depend on `(t, r)`, so
@@ -726,7 +726,7 @@ Ours does the same arithmetic in numpy float32. The scalars 12, 11, 3, 2 and 1 a
 a single IEEE float32 operation on both sides, so the result is bit-identical. `test_grid_matches_diffusers_scheduler`
 checks it against torch's formula and against the scheduler's installed `sigmas` and `timesteps`, for both shifts.
 
-📍 [`src/h3mlx/denoise.py:20-28`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/denoise.py#L20-L28)
+📍 [`src/h3mlx/denoise.py:20-28`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/denoise.py#L20-L28)
 ```python
   20 def shift_grid(raw, shift: float) -> np.ndarray:
   21     """A raw sigma grid through the exponential shift, `s * sigma / (1 + (s - 1) * sigma)` in float32: HyperFlow's
@@ -738,7 +738,7 @@ checks it against torch's formula and against the scheduler's installed `sigmas`
   27         raise ValueError(f"a sigma grid must be strictly decreasing from at most 1.0 to exactly 0.0, got {base.tolist()}")
   28     return (np.float32(shift) * base / (np.float32(1.0) + np.float32(shift - 1.0) * base)).astype(np.float32)
 ```
-📍 [`src/h3mlx/denoise.py:31-60`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/denoise.py#L31-L60)
+📍 [`src/h3mlx/denoise.py:31-60`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/denoise.py#L31-L60)
 ```python
   31 @dataclass
   32 class Schedules:
@@ -775,7 +775,7 @@ checks it against torch's formula and against the scheduler's installed `sigmas`
 The shifts come from the pipeline (the release's schedulers: 12 and 3), not from the file. Theirs warns when the file
 was trained with different ones (`_check_shifts`), and `HyperFlowMeta.schedules` warns the same way.
 
-📍 [`src/h3mlx/hyperflow.py:84-90`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/hyperflow.py#L84-L90)
+📍 [`src/h3mlx/hyperflow.py:84-90`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/hyperflow.py#L84-L90)
 ```python
   84     def schedules(self, video_shift: float = 12.0, audio_shift: float = 3.0) -> Schedules:
   85         """The file's grid through the pipeline's shifts (the release's 12 / 3); warns if the file was trained with
@@ -857,7 +857,7 @@ The pairs are reduced with `torch.unique(dim=0, sorted=True)`, which sorts them 
 Ours writes the rows in the same order (later writes win, as theirs), and `np.unique(axis=0)` sorts the same
 lexicographic way.
 
-📍 [`src/h3mlx/denoise.py:80-94`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/denoise.py#L80-L94)
+📍 [`src/h3mlx/denoise.py:80-94`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/denoise.py#L80-L94)
 ```python
   80 def row_time_pairs(layout: Layout, video_t: float, video_r: float, audio_t: float, audio_r: float,
   81                    cond_video_t: float, cond_audio_t: float):
@@ -1010,7 +1010,7 @@ loop denoiser hands each step's endpoints to the wrapper for that one forward.
 Ours builds the pairs per step inside `denoise` when `schedules.two_time` is set, and passes `endpoint` to
 `dit_forward`. Everything else in the loop, the Euler update included, is the official one from the main guide.
 
-📍 [`src/h3mlx/denoise.py:97-146`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/src/h3mlx/denoise.py#L97-L146)
+📍 [`src/h3mlx/denoise.py:97-146`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/src/h3mlx/denoise.py#L97-L146)
 ```python
   97 def denoise(
   98     params: dict,
@@ -1087,7 +1087,7 @@ count. The file is checked three times:
 `plan` records the file's version, gate, rank, grid and base revision, and counts `grid_points` and `model_calls`
 from the schedule actually used. The TFLOP/s in each step event adds the LoRA's matmuls:
 
-📍 [`scripts/run_ref2va.py:73-77`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/scripts/run_ref2va.py#L73-L77)
+📍 [`scripts/run_ref2va.py:73-77`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/scripts/run_ref2va.py#L73-L77)
 ```python
   73 def lora_tflop_per_call(rows: int, cfg: dict, rank: int) -> float:
   74     """HyperFlow's unmerged LoRA on q, k, v, out, ff in, ff out: 2 * S * rank * (in + out) each, per block."""
@@ -1095,7 +1095,7 @@ from the schedule actually used. The TFLOP/s in each step event adds the LoRA's 
   76     per_block = 2 * rows * rank * (4 * (h + inner) + (h + 2 * ffn) + (ffn + h))
   77     return per_block * cfg["num_layers"] / 1e12
 ```
-📍 [`scripts/run_ref2va.py:183-190`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/scripts/run_ref2va.py#L183-L190)
+📍 [`scripts/run_ref2va.py:183-190`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/scripts/run_ref2va.py#L183-L190)
 ```python
  183 def load_weights(c: Components, weights: Path, hyperflow_path: Path | None = None):
  184     """Attach the weights lazily (mx.load reads data on first use). The audio VAE is small and loaded eagerly. With
@@ -1106,7 +1106,7 @@ from the schedule actually used. The TFLOP/s in each step event adds the LoRA's 
  189     if hyperflow_path is not None:
  190         c.dit_params, c.dit_cfg, _ = hyperflow.load(hyperflow_path, c.dit_params, c.dit_cfg, "transformer_ref")
 ```
-📍 [`scripts/run_ref2va.py:193-219`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/scripts/run_ref2va.py#L193-L219)
+📍 [`scripts/run_ref2va.py:193-219`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/scripts/run_ref2va.py#L193-L219)
 ```python
  193 def plan(c: Components, prompt: str, image: Image.Image, args) -> dict:
  194     """Everything up to the layout, without the models: sizes the run would use."""
@@ -1136,7 +1136,7 @@ from the schedule actually used. The TFLOP/s in each step event adds the LoRA's 
  218             "sequence_rows": int(layout.position_ids.shape[0]), "grid_points": int(len(sch.video_sigmas)),
  219             "model_calls": int(len(sch.video_timesteps))}
 ```
-📍 [`scripts/run_ref2va.py:312-318`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/scripts/run_ref2va.py#L312-L318)
+📍 [`scripts/run_ref2va.py:312-318`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/scripts/run_ref2va.py#L312-L318)
 ```python
  312         if args.hyperflow and not args.decode_from:  # a re-decode never reads the adapter
  313             hf = args.hyperflow
@@ -1190,7 +1190,7 @@ itself rather than by our loader. It loads each file both ways:
 
 The transcriptions to compare against §3 and §5:
 
-📍 [`tests/test_hyperflow.py:35-51`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/tests/test_hyperflow.py#L35-L51)
+📍 [`tests/test_hyperflow.py:35-51`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/tests/test_hyperflow.py#L35-L51)
 ```python
   35 class TwoTimeEmbedder(torch.nn.Module):
   36     """embedder.py `TwoTimeEmbedder.forward`, endpoint set per forward."""
@@ -1210,7 +1210,7 @@ The transcriptions to compare against §3 and §5:
   50         r_emb = self.endpoint(r_proj)
   51         return t_emb + self.gate * (r_emb - t_emb)
 ```
-📍 [`tests/test_hyperflow.py:54-66`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/tests/test_hyperflow.py#L54-L66)
+📍 [`tests/test_hyperflow.py:54-66`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/tests/test_hyperflow.py#L54-L66)
 ```python
   54 def torch_row_time_pairs(video_indices, audio_indices, ncv, nca, n_text, vt, vr, at, ar, cvt, cat=1.0):
   55     """schedule.py `build_row_time_pairs`."""
@@ -1226,7 +1226,7 @@ The transcriptions to compare against §3 and §5:
   65     pairs, inv = torch.unique(torch.stack((t, r), dim=-1), dim=0, sorted=True, return_inverse=True)
   66     return pairs[:, 0].contiguous(), pairs[:, 1].contiguous(), inv
 ```
-📍 [`tests/test_hyperflow.py:96-116`](https://github.com/sublimator/minimax-h3-mlx/blob/4d5a5efffa4b870b544079496a43848116ad8591/tests/test_hyperflow.py#L96-L116)
+📍 [`tests/test_hyperflow.py:96-116`](https://github.com/sublimator/minimax-h3-mlx/blob/7b160e828f9222d4c88ef486ba8a430c8fb445bd/tests/test_hyperflow.py#L96-L116)
 ```python
   96 def torch_hyperflow(model, tensors, meta):
   97     """PEFT injection as HyperFlow's `_load_into` does it, on a copy: endpoint embedder copied before any LoRA."""
