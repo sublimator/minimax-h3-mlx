@@ -250,12 +250,15 @@ def posterior_sample(moments: mx.array, noise: mx.array) -> mx.array:
     return mean + mx.exp(0.5 * mx.clip(logvar, -30.0, 20.0)) * noise
 
 
-def encode_condition(vae: VideoVAE, pixels_u8: mx.array, pixel_mean, pixel_std, latents_mean, latents_std, noise_fn):
+def encode_condition(vae: VideoVAE, pixels_u8: mx.array, pixel_mean, pixel_std, latents_mean, latents_std, noise_fn,
+                     float16_round: bool = True):
     """`encode_vae_condition`: uint8 pixels (1, F, H, W, 3) -> ImageNet-normalised -> moments -> posterior sample
     (noise from `noise_fn(shape)`, which must reproduce torch.Generator().manual_seed(42) to match the release) ->
-    float16 round trip -> (latent - mean) / std."""
+    float16 round trip -> (latent - mean) / std. `float16_round=False` leaves the round trip out: not what the
+    pipeline does, but what one training recipe does for its reference pictures (`train.encode_references`)."""
     x = (pixels_u8.astype(mx.float32) / 255.0 - mx.array(pixel_mean)) / mx.array(pixel_std)
     m = vae.encode_moments(x)
     lat = posterior_sample(m, noise_fn(m.shape[:-1] + (m.shape[-1] // 2,)))
-    lat = lat.astype(mx.float16).astype(mx.float32)
+    if float16_round:
+        lat = lat.astype(mx.float16).astype(mx.float32)
     return (lat - mx.array(latents_mean)) / mx.array(latents_std)

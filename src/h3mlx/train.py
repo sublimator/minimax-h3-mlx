@@ -1,5 +1,5 @@
-"""Pieces of a flow-matching trainer for the MLX transformer: the forward process, the target, the loss, and sampling
-the noise level. No training loop here.
+"""Pieces of a flow-matching trainer for the MLX transformer: the forward process, the target, the loss, one training
+example, and sampling the noise level. No training loop here.
 
 MiniMax H3's transformer predicts a data-ward velocity. Its scheduler (diffusers `scheduling_minimax_h3.py`) works in
 `t = 1 - sigma`, with `t = 1` clean: `scale_noise` mixes `x_t = t * x_0 + (1 - t) * noise`, and `step` recovers
@@ -13,11 +13,14 @@ own `ops.flow_sigmas`. Random draws come from a torch generator, as the sampling
 """
 
 import math
+from dataclasses import dataclass
 
 import mlx.core as mx
 import numpy as np
 
 from . import ops
+from .denoise import row_timesteps
+from .packing import Layout, Ref, build_packed_sequence, build_ref2va_packed_sequence
 
 # --- the forward process, the target and the loss --------------------------------------------------------------------
 
@@ -80,6 +83,121 @@ def flow_match_loss(pred: mx.array, target: mx.array, weight=None) -> mx.array:
                              f"{tuple(sq.shape)}")
         sq = w.reshape(w.shape + (1,) * (sq.ndim - w.ndim)) * sq
     return mx.mean(sq)
+
+
+# --- one training example: a picture, with or without reference pictures -------------------------------------------
+
+# The steps below follow a named recipe: the MiniMax H3 / P-H3-Image model files of ostris/ai-toolkit at commit
+# d6a18ad7 (MIT), a third-party trainer. It is not the model maker's recipe, which is not published. Where diffusers
+# has the same step for sampling (the layout, the rows, the row timesteps, the forward process) the port's own tested
+# function is used; what comes from the recipe alone is said so at each place.
+
+
+@dataclass
+class Example:
+    """One picture as the transformer sees it in training (`build_example`)."""
+
+    layout: Layout
+    video_rows: mx.array  # (condition rows + generated rows, patch dim): the references' rows, then the noised picture's
+    audio_rows: mx.array  # (audio rows, audio channels): silence noised at the audio level
+    target: mx.array  # (generated rows, patch dim): `velocity_target` of the picture's rows, x_0 - noise
+    clean_rows: mx.array  # (generated rows, patch dim): the picture's rows before noising
+    timestep: np.ndarray  # the distinct row timesteps, sorted, float32
+    timestep_indices: np.ndarray  # each row's index into them
+    sigma: np.float32  # the picture's noise level; its rows' timestep is 1 - sigma
+
+    @property
+    def num_condition_rows(self) -> int:
+        return self.layout.num_condition_video_rows
+
+    def generated(self, video_pred: mx.array) -> mx.array:
+        """The transformer's video output (batch, video rows, patch dim) without the condition rows: what the loss is
+        taken over, against `target`. The rows are told apart by their place in the layout, as `denoise` does it."""
+        return video_pred[:, self.num_condition_rows:]
+
+
+def loss_mask(layout: Layout) -> np.ndarray:
+    """True at the packed-sequence rows a picture's loss covers: the generated video rows. Text rows, audio rows and
+    condition rows are False. Read off the layout's indices, never off timesteps: at a timestep of the condition level
+    or above, a generated row and a condition row carry the same value."""
+    mask = np.zeros(len(layout.token_tags), dtype=bool)
+    mask[layout.video_indices[layout.num_condition_video_rows:]] = True
+    return mask
+
+
+def encode_references(components, pictures, *, float16_round: bool) -> list:
+    """The latents of an edit example's reference pictures: `image.encode_pictures` (a seed-42 posterior sample each),
+    with or without its float16 round trip, which the caller must choose. The pipeline rounds, so `True` is what the
+    model is given at sampling by diffusers and by this port. The recipe turns the rounding off for P-H3-Image, so
+    `False` is what that trainer shows the model."""
+    from .image import encode_pictures
+
+    return encode_pictures(components, pictures, float16_round=float16_round)
+
+
+def build_example(cfg: dict, text_token_tags, latents: mx.array, sigma, noise, *, condition_t: float,
+                  condition_latents=(), audio_sigma=None) -> Example:
+    """One training example for a single picture with zero or more reference pictures.
+
+    `latents` is the picture, normalised, (1, 1, h, w, channels), and `condition_latents` the references in packed
+    order, each (1, 1, h_i, w_i, channels) at its own size, as the VAE encode returns them. `sigma` in (0, 1] is the
+    picture's noise level. `noise(shape)` returns float32 draws (`pipeline.Noise`). `condition_t` is the timestep the
+    references are noised to and held at; it has no default here (the pipeline and the recipe both use 0.999).
+
+    * Layout: text-to-image's without references, the edit's with them (`image.generate`'s two, diffusers').
+    * Draws, in the pipeline's order: one per reference, the picture's, the audio rows'.
+    * References: `scale_noise` to `condition_t` given as an array, so `1 - t` is taken in float32 as the pipeline
+      takes it. (The recipe writes the same mix with a Python float, whose `1 - t` is double: 1.3e-5 relative apart.)
+    * The picture: `scale_noise` to `t = 1 - sigma` in float32, also as an array, so the factor on the noise is the
+      `1 - t` that the sampler's step multiplies the velocity by. Its target is `velocity_target`.
+    * Audio rows (recipe): a picture has no soundtrack, so they are silence noised at the audio level, and no loss is
+      taken on them. `audio_sigma=None` means the picture's own level, which is the recipe's rule for P-H3-Image. The
+      recipe multiplies the noise by sigma itself, this by `1 - t`: sigma exactly down to 0.5, and below that sigma
+      after the float32 rounding of `t = 1 - sigma`, within 6e-8 of it.
+    * Row timesteps: `denoise.row_timesteps`; the references sit at `max(t, condition_t)`, as in the pipeline and the
+      recipe."""
+    from .image import AUDIO_CHANNELS, NUM_AUDIO_LATENTS
+
+    sigma32 = np.float32(sigma)
+    audio32 = sigma32 if audio_sigma is None else np.float32(audio_sigma)
+    for what, value in (("sigma", sigma32), ("audio_sigma", audio32)):
+        if not (np.isfinite(value) and 0 < value <= 1):
+            raise ValueError(f"{what} must lie in (0, 1], got {value}")
+    if not (math.isfinite(condition_t) and 0 <= condition_t <= 1):
+        raise ValueError(f"condition_t must lie in [0, 1], got {condition_t}")
+    patch = tuple(cfg["patch_size"])
+    channels = cfg["in_channels"]
+    condition_latents = list(condition_latents)
+    for what, x in [("latents", latents)] + [(f"condition_latents[{i}]", x) for i, x in enumerate(condition_latents)]:
+        if x.ndim != 5 or x.shape[0] != 1 or x.shape[1] != 1 or x.shape[4] != channels:
+            raise ValueError(f"{what} must be (1, 1, height, width, {channels}), got {tuple(x.shape)}")
+    lh, lw = latents.shape[2], latents.shape[3]
+
+    tags = np.asarray(text_token_tags)
+    if condition_latents:
+        layout = build_ref2va_packed_sequence(tags, [Ref("image")] * len(condition_latents),
+                                              [tuple(x.shape[1:4]) for x in condition_latents], [], 1, lh, lw,
+                                              NUM_AUDIO_LATENTS, patch, AUDIO_CHANNELS)
+    else:
+        layout = build_packed_sequence(tags, 1, lh, lw, NUM_AUDIO_LATENTS, patch, AUDIO_CHANNELS)
+
+    t, t_audio = np.float32(1) - sigma32, np.float32(1) - audio32
+    rows = []
+    for x in condition_latents:
+        b, f, h, w, ch = x.shape
+        drawn = mx.array(noise((b, ch, f, h, w)).transpose(0, 2, 3, 4, 1))
+        noised = scale_noise(x.astype(mx.float32), mx.array(np.float32(condition_t)), drawn)
+        rows.append(ops.patchify(noised.transpose(0, 4, 1, 2, 3), patch))
+    clean = latents.astype(mx.float32).transpose(0, 4, 1, 2, 3)
+    drawn = mx.array(noise((1, channels, 1, lh, lw)))
+    rows.append(ops.patchify(scale_noise(clean, mx.array(t), drawn), patch))
+    audio_noise = mx.array(noise((NUM_AUDIO_LATENTS * AUDIO_CHANNELS, cfg["audio_in_channels"])))
+    audio_rows = scale_noise(mx.zeros(audio_noise.shape, dtype=mx.float32), mx.array(t_audio), audio_noise)
+
+    timestep, timestep_indices = row_timesteps(layout, float(t), float(t_audio), max(float(t), float(condition_t)), 1.0)
+    return Example(layout=layout, video_rows=mx.concatenate(rows), audio_rows=audio_rows,
+                   target=ops.patchify(velocity_target(clean, drawn), patch), clean_rows=ops.patchify(clean, patch),
+                   timestep=timestep, timestep_indices=timestep_indices, sigma=sigma32)
 
 
 # --- sampling the noise level ------------------------------------------------------------------------------------------

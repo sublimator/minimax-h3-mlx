@@ -179,8 +179,9 @@ def schedules(sigmas=None) -> Schedules:
     return Schedules(s, s.copy(), two_time=False)
 
 
-def encode_pictures(c: Components, reference_images) -> list:
-    """`PH3ImageEditVaeEncoderStep`: H3's conditioning recipe per picture, a fresh seed-42 generator each."""
+def encode_pictures(c: Components, reference_images, float16_round: bool = True) -> list:
+    """`PH3ImageEditVaeEncoderStep`: H3's conditioning recipe per picture, a fresh seed-42 generator each.
+    (`float16_round=False`: `vae.encode_condition`'s variant without the float16 round trip, for training.)"""
     out = []
     for im in reference_images:
         fresh = Noise(ENCODE_SEED)
@@ -190,7 +191,8 @@ def encode_pictures(c: Components, reference_images) -> list:
             return mx.array(fresh((b, ch, f, h, w)).transpose(0, 2, 3, 4, 1))
 
         px = mx.array(np.asarray(im)[None, None])  # (1, 1, H, W, 3) uint8
-        out.append(encode_condition(c.vae, px, PIXEL_MEAN, PIXEL_STD, c.vae_latents_mean, c.vae_latents_std, noise_cl))
+        out.append(encode_condition(c.vae, px, PIXEL_MEAN, PIXEL_STD, c.vae_latents_mean, c.vae_latents_std, noise_cl,
+                                    float16_round=float16_round))
     return out
 
 
