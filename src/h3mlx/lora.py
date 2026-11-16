@@ -195,13 +195,26 @@ def _named_parts(params: dict, name: str) -> list[str]:
             or (k.endswith(ADAPTERS) and name in v)]
 
 
-def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None) -> dict:
+def check_scale(scale) -> None:
+    """A scale is a finite number. PEFT's `set_scale` takes anything; NaN or infinity would poison every Linear the
+    adapter is on."""
+    if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(scale):
+        raise ValueError(f"an adapter's scale must be a finite number, got {scale!r}")
+
+
+def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None,
+           scale: float = 1.0) -> dict:
     """The transformer's weights with the adapter beside them, for `ops.plinear`; `params` is not modified.
 
     By default each matrix is cast to its base weight's dtype, as PEFT's injection does (`load_lora_adapter`, and
     `hyperflow.attach`). `keep_dtype=True` leaves the adapter as it is: float32 factors over a bf16 base, what
     `cast_training_params` gives a trainer (and what diffusers' `low_cpu_mem_usage=True` loading gives a float32 file).
     A module whose scaling is not 1 also gets a `lora_scaling` entry.
+
+    `scale` is the adapter's strength, 1.0 being as trained: each module's scaling becomes `scale * alpha / rank`,
+    computed in that order, which is PEFT's `set_scale` and so what diffusers' `set_adapters(name, weights=scale)`
+    leaves on every layer. Any finite number: a negative one subtracts the adapter's delta, and zero keeps the adapter
+    attached with a delta of zero (`for_sampling` leaves it off instead).
 
     Without a `name` the adapter is the only one its Linears can carry. With one it is stacked: its matrices go under
     PEFT's runtime names, and the name is appended to each Linear's `lora_adapters`, so adapters apply in the order
@@ -210,6 +223,7 @@ def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, 
     only list or carry a scaling for, which is what the frozen half of `split` looks like (`join` is the way back
     from it); attaching onto that half would name the adapter twice on each Linear and apply it twice."""
     check(adapter, cfg)
+    check_scale(scale)
     if name is None:
         taken = [m for m in adapter.modules if _carries_lora(params, m)]
         if taken:
@@ -232,7 +246,7 @@ def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, 
         for matrix in ("A", "B"):
             tensor = adapter.tensors[f"{module}.lora_{matrix}.weight"]
             out[runtime_key(module, matrix, name)] = tensor if keep_dtype else tensor.astype(dtype)
-        scaling = adapter.scaling(module)
+        scaling = adapter.scaling(module) if scale == 1.0 else scale * adapter.alpha[module] / adapter.rank(module)
         if scaling != 1.0:
             out[module + SCALING + ("" if name is None else "." + name)] = mx.array(scaling, dtype=mx.float32)
         if name is not None:
@@ -688,6 +702,96 @@ def load(path, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
     """`read` on a .safetensors file (the tensors stay lazy until used)."""
     tensors, header = mx.load(str(path), return_metadata=True)
     return read(tensors, header, prefix, head_dim)
+
+
+# --- an adapter at sampling ------------------------------------------------------------------------------------------
+
+
+def for_sampling(params: dict, cfg: dict, adapter: Adapter, scale) -> dict:
+    """The weights a sampler runs with `adapter` at `scale` times its trained strength; `params` is not modified.
+
+    The adapter is attached, not merged. It stays beside the base weights and `ops.plinear` adds its delta on every
+    call: the computation diffusers runs after `load_lora_adapter`, and the one the port tests against PEFT. Its
+    matrices are cast to their base weight's dtype, as that loader casts them. Merging is not the same picture on a
+    bf16 base: the sum is rounded once into each weight, which has eight significant bits, so whatever part of the
+    delta is under half a step of its weight is rounded away, and a small adapter can vanish whole. Attached, the
+    adapter also keeps its precision when the base is quantized afterwards: `load.quantize_transformer` touches the
+    base matrices only, so the result is the quantized base plus the dense delta, which is what PEFT computes over a
+    quantized Linear.
+
+    A scale of exactly 0 returns `params` itself. The picture is then the one without the adapter bit for bit. An
+    attached adapter scaled by zero (diffusers at weight 0) adds a zero delta instead: the same numbers, but a
+    negative zero in a Linear's output becomes a positive one.
+
+    Whatever the scale, the adapter is checked against the transformer and its matrices are read and must be finite:
+    one NaN in an adapter is a NaN in every picture, and here it is refused before anything else runs."""
+    check_scale(scale)
+    check(adapter, cfg)
+    finite = {key: mx.isfinite(tensor).all() for key, tensor in adapter.tensors.items()}
+    mx.eval(finite)
+    bad = sorted(key for key, ok in finite.items() if not ok.item())
+    if bad:
+        raise ValueError(f"{len(bad)} of the adapter's {len(finite)} matrices hold a NaN or an infinity, e.g. {bad[:3]}")
+    if scale == 0:
+        return params
+    return attach(params, cfg, adapter, scale=scale)
+
+
+def from_header(path, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
+    """The adapter `load` would give, from the file's safetensors header alone: the same modules, shapes and alphas,
+    with every tensor a zero stand-in that is never evaluated. Nothing but the header is read from the file, so a
+    plan can name an adapter (`summary`) and `check` can refuse one that does not fit before any tensor is opened.
+
+    The stand-ins go through `read`, the path a loaded file takes, so every layout it reads is covered and every
+    refusal that needs no tensor value is raised here too. One thing only a load can see: a file in the original
+    layout that carries `.alpha` tensors has them folded into its matrices when it is loaded, and a zero, negative
+    or non-finite one is refused then."""
+    from . import files
+
+    header = files.safetensors_header(path)
+    if not isinstance(header, dict):
+        raise ValueError(f"{path}: not a safetensors header")
+    metadata = header.pop("__metadata__", None) or {}
+    if not all(isinstance(entry, dict) and isinstance(entry.get("shape"), list) for entry in header.values()):
+        raise ValueError(f"{path}: not a safetensors header")
+    stand_ins = {key: mx.ones(()) if key.endswith(".alpha") else mx.zeros(tuple(entry["shape"]))
+                 for key, entry in header.items()}
+    return read(stand_ins, metadata, prefix, head_dim)
+
+
+def _ranges(indices) -> str:
+    """Sorted block indices as ranges: [0, 1, 2, 5] -> "0-2,5"."""
+    runs = []
+    for i in sorted(indices):
+        if runs and i == runs[-1][1] + 1:
+            runs[-1][1] = i
+        else:
+            runs.append([i, i])
+    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
+
+
+def summary(adapter: Adapter, scale=1.0) -> dict:
+    """What an adapter is, for a plan or a record: how many Linears it is on and which (each kind of Linear with the
+    blocks it covers, `*` standing for the block's index; a Linear outside the blocks maps to None), the ranks and
+    alphas in use, the scalings the forward multiplies by at `scale` (`scale * alpha / rank`), and the number of
+    parameters. From shapes alone, so it works on `from_header`'s stand-ins."""
+    check_keys(adapter)
+    check_scale(scale)
+    kinds = {}
+    for module in adapter.modules:
+        m = re.match(r"^(.*?)\.(\d+)\.(.*)$", module)
+        if m is None:
+            kinds[module] = None
+        else:
+            kinds.setdefault(f"{m[1]}.*.{m[3]}", []).append(int(m[2]))
+    return {
+        "modules": len(adapter.modules),
+        "module_kinds": {kind: None if blocks is None else _ranges(blocks) for kind, blocks in sorted(kinds.items())},
+        "ranks": sorted({adapter.rank(m) for m in adapter.modules}),
+        "alphas": sorted({float(adapter.alpha[m]) for m in adapter.modules}),
+        "scalings": sorted({float(scale * adapter.alpha[m] / adapter.rank(m)) for m in adapter.modules}),
+        "parameters": sum(math.prod(t.shape) for t in adapter.tensors.values()),
+    }
 
 
 def _number(x):

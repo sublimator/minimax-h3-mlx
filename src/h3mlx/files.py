@@ -161,7 +161,10 @@ def safetensors_header(path) -> dict:
     """A safetensors file's header: {tensor name: {"dtype", "shape", "data_offsets"}}, and `__metadata__` when it has
     one. Reads the eight-byte length and the JSON after it; no tensor data."""
     with open(path, "rb") as f:
-        (length,) = struct.unpack("<Q", f.read(8))
+        head = f.read(8)
+        if len(head) != 8:
+            raise ValueError(f"{path}: not a safetensors file ({len(head)} bytes)")
+        (length,) = struct.unpack("<Q", head)
         if not 0 < length <= 100_000_000:
             raise ValueError(f"{path}: not a safetensors file (header length {length})")
         return json.loads(f.read(length))
