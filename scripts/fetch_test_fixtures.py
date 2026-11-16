@@ -16,9 +16,13 @@ What it writes, all from Hugging Face at pinned revisions:
                                           text_connector, text_encoder and scheduler configs, the transformer's weight
                                           index, the tokenizer and the processor; the prompt upsampler's configs and
                                           processor
+  p_h3_image_training_adapter_v1.header.json
+                                          the safetensors header (keys, shapes, dtypes; no tensor data) of the public
+                                          P-H3-Image training adapter, ostris/minimax_h3_training_adapter @ e4e119c
 
-These files belong to MiniMax, Video Rebirth and Pruna and come under their licences; they are not part of this
-repository. Without them the tests that need them are skipped.
+These files belong to MiniMax, Video Rebirth, Pruna and the adapter's publisher and come under their licences (the
+training adapter's repository states none); they are not part of this repository. Without them the tests that need
+them are skipped.
 """
 
 import argparse
@@ -36,6 +40,9 @@ HYPERFLOW_REV = "5bde94d7de3e78dafa2abc43ee2f280a1cb244e8"
 ADAPTER = "minimax_h3_hyperflow_8step_v1.0.safetensors"
 P_H3_IMAGE = "PrunaAI/P-H3-Image"
 P_H3_IMAGE_REV = "7f98acef503cf2bcfba821a78cb1cf1a9928b2df"
+TRAINING_ADAPTER = "ostris/minimax_h3_training_adapter"
+TRAINING_ADAPTER_REV = "e4e119caa391053286145e48ebbaf0e0c00293d3"
+TRAINING_ADAPTER_FILE = "p_h3_image_training_adapter_v1.safetensors"
 
 
 def tree(api: HfApi, revision: str) -> dict:
@@ -45,6 +52,21 @@ def tree(api: HfApi, revision: str) -> dict:
             out[f.path.split("/", 1)[1]] = {
                 "lfs_sha256": f.lfs.sha256 if f.lfs else None, "oid": f.blob_id, "size": f.size}
     return dict(sorted(out.items()))
+
+
+def safetensors_header(api: HfApi, repo: str, filename: str, revision: str) -> dict:
+    """A remote .safetensors file's header as the file stores it: `__metadata__` and each tensor's dtype, shape and
+    offsets. Read with an HTTP range request; no tensor data is fetched."""
+    meta = api.parse_safetensors_file_metadata(repo, filename, revision=revision)
+    header = {"__metadata__": meta.metadata}
+    header.update({name: {"data_offsets": list(t.data_offsets), "dtype": t.dtype, "shape": list(t.shape)}
+                   for name, t in sorted(meta.tensors.items())})
+    return header
+
+
+def training_adapter_header(api: HfApi, out: Path) -> None:
+    header = safetensors_header(api, TRAINING_ADAPTER, TRAINING_ADAPTER_FILE, TRAINING_ADAPTER_REV)
+    (out / "p_h3_image_training_adapter_v1.header.json").write_text(json.dumps(header, indent=1))
 
 
 def main() -> None:
@@ -72,10 +94,7 @@ def main() -> None:
         "identical": revs[H3_REV] == revs[H3_BASE], "revisions": revs,
         "source": f"https://huggingface.co/api/models/{H3}/tree/<revision>/transformer_ref"}, indent=1))
 
-    meta = api.parse_safetensors_file_metadata(HYPERFLOW, ADAPTER, revision=HYPERFLOW_REV)
-    header = {"__metadata__": meta.metadata}
-    header.update({name: {"data_offsets": list(t.data_offsets), "dtype": t.dtype, "shape": list(t.shape)}
-                   for name, t in sorted(meta.tensors.items())})
+    header = safetensors_header(api, HYPERFLOW, ADAPTER, HYPERFLOW_REV)
     (out / "hyperflow_v1.0.header.json").write_text(json.dumps(header, indent=1))
 
     shutil.copyfile(hf_hub_download(HYPERFLOW, "hyperflow.json", revision=HYPERFLOW_REV),
@@ -87,6 +106,8 @@ def main() -> None:
         "processor/*", "prompt_upsampler/config.json", "prompt_upsampler/generation_config.json",
         "prompt_upsampler_processor/*"])
     shutil.rmtree(out / "P-H3-Image" / ".cache", ignore_errors=True)
+
+    training_adapter_header(api, out)
     print(f"wrote {out}")
 
 

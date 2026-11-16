@@ -2,16 +2,18 @@
 
 The oracle is the tiny diffusers transformer with both adapters loaded under names (`load_lora_adapter(adapter_name=)`)
 and switched with `set_adapters`, PEFT's own layer for the rounding of a stacked forward, and torch autograd for which
-weights a gradient reaches.
+weights a gradient reaches. The public P-H3-Image training adapter is checked by its header only.
 """
 
 import copy
+import json
 
 import mlx.core as mx
 import numpy as np
 import pytest
 import torch
-from conftest import assert_close, state_mx, to_mx, to_np
+from conftest import assert_close, fixture, state_mx, to_mx, to_np
+from diffusers.loaders.lora_conversion_utils import _convert_non_diffusers_minimax_h3_lora_to_diffusers
 from peft import LoraConfig
 from peft.tuners.lora.layer import Linear as PeftLinear
 from peft.utils import get_peft_model_state_dict
@@ -310,3 +312,39 @@ def test_stacking_refusals():
     assert lora.adapter_names(off) == ["assistant", "subject"]
     assert lora.set_active(off, ("assistant", "subject"))["proj_in" + lora.ADAPTERS] == ("subject",)
     assert off["transformer_blocks.0.attn.to_k" + lora.ADAPTERS] == ()
+
+
+# --- the public training adapter, by its header ----------------------------------------------------------------------------
+
+
+def test_training_adapter_header_fits_p_h3_image():
+    """The safetensors header of the public P-H3-Image training adapter (keys, shapes and dtypes; a release fixture,
+    no tensor data) against the released transformer's config.
+
+    What it shows: the file is in the original checkpoint's key layout, its names convert, every converted module is a
+    Linear of the transformer, and each pair has the shape that Linear needs. What it cannot show: anything about the
+    values. Whether the adapter fits these weights, or does what its name says, is not tested by a header."""
+    header = json.loads(fixture("p_h3_image_training_adapter_v1.header.json").read_text())
+    metadata = header.pop("__metadata__")
+    assert len(header) == 416 and {v["dtype"] for v in header.values()} == {"BF16"}
+    assert all(k.startswith("diffusion_model.") for k in header) and lora.is_original_layout(header)
+    assert "alpha" not in metadata and lora.METADATA_KEY not in metadata and not any(k.endswith(".alpha") for k in header)
+    cfg = json.loads(fixture("P-H3-Image", "transformer", "config.json").read_text())
+    cfg = {k: (tuple(v) if isinstance(v, list) else v) for k, v in cfg.items() if not k.startswith("_")}
+
+    # shapes only: these zeros are lazy and are never evaluated
+    adapter = lora.read({k: mx.zeros(tuple(v["shape"]), dtype=mx.bfloat16) for k, v in header.items()}, metadata)
+    lora.check(adapter, cfg)
+    assert adapter.modules == sorted(lora.block_modules(cfg)) and len(adapter.modules) == 6 * (50 + 2)
+    assert all(adapter.rank(m) == 16 and adapter.scaling(m) == 1.0 for m in adapter.modules), "no alpha anywhere: scaling 1"
+    assert all(v.dtype == mx.bfloat16 for v in adapter.tensors.values())
+    assert not any("adaln_proj" in m or "time_embedder" in m for m in adapter.modules)
+    # diffusers' converter gives the same keys and shapes from the same header
+    theirs = _convert_non_diffusers_minimax_h3_lora_to_diffusers(
+        {k: torch.zeros(tuple(v["shape"]), dtype=torch.bfloat16) for k, v in header.items()})
+    assert {k: tuple(v.shape) for k, v in theirs.items()} == {"transformer." + k: tuple(v.shape) for k, v in adapter.tensors.items()}
+    # and it stacks under a name beside a trainable adapter on the same Linears (shapes again; no weights exist here)
+    shapes = lora.wired_shapes(cfg)
+    base = {m + ".weight": mx.zeros(shapes[m], dtype=mx.bfloat16) for m in shapes}
+    stacked = lora.attach(lora.attach(base, cfg, adapter, name="assistant"), cfg, lora.init(cfg, rank=4), keep_dtype=True, name="subject")
+    assert stacked["transformer_blocks.49.ff.net.2" + lora.ADAPTERS] == ("assistant", "subject")
