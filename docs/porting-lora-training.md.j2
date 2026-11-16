@@ -76,7 +76,7 @@ port takes an argument and has no default.
 | a bounded backward pass | `src/h3mlx/backward.py` | the plain gradient of the row above | `tests/test_backward.py` (39) |
 | the optimizer step | `train.adamw`, `train.optimizer_step` | `torch.optim.AdamW`, `clip_grad_norm_` | `tests/test_train_optimizer.py` (32) |
 | the cache of encoded examples | `src/h3mlx/cache.py`, `src/h3mlx/files.py` | diffusers `p_h3_image/before_encoder.py` for one sizing rule; the recipe for the other | `tests/test_cache.py` (89, two of them on release fixtures) |
-| the training script | `scripts/train_lora.py`, `src/h3mlx/trainer.py` | none: the pieces above, in order | `tests/test_train_lora.py` (89, one of them on release fixtures) |
+| the training script | `scripts/train_lora.py`, `src/h3mlx/trainer.py` | none: the pieces above, in order | `tests/test_train_lora.py` (90, one of them on release fixtures) |
 
 ## 1. LoRA adapters
 
@@ -1485,6 +1485,9 @@ Not required, each for a reason (`test_only_the_backward_way_has_a_default` list
   (`test_the_two_bounded_gradients_train_the_same_weights`), so this is the one default, and it decides no number;
 - `--plan-only` and `--resume` are the two modes.
 
+The script downloads nothing. It sets `HF_HUB_OFFLINE` for its process before it imports anything, so a tokenizer or
+processor folder that is missing is an error and not a fetch.
+
 No learning-rate schedule: the rate is constant. The recipe's schedule and its optimizer settings were not read.
 
 {{ code('src/h3mlx/trainer.py', function='trajectory') }}
@@ -1629,6 +1632,7 @@ On real weights this path has never run.
 | test | pins |
 | --- | --- |
 | `test_a_missing_argument_is_an_error_that_names_it` (×27), `test_only_the_backward_way_has_a_default` | no defaults |
+| `test_the_script_turns_the_hub_off_before_it_imports_anything` | a process running the script has the Hugging Face hub off: it cannot download |
 | `test_arguments_that_do_not_make_a_run_are_refused` (×21), `test_a_dataset_that_is_not_one_is_refused` (×8) | what is refused before anything is read |
 | `test_plan_only_opens_no_weights_and_writes_nothing` | the plan with every loader raising, and its numbers against a real run |
 | `test_the_loop_is_the_pieces_in_order` | six steps against the same steps written out from the tested pieces |

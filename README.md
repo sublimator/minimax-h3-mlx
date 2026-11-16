@@ -44,10 +44,10 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 760 tests and skips 74. Those 74 need the releases' tokenizers, processors,
+No weights are needed. A plain clone runs 761 tests and skips 74. Those 74 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header and a public training adapter's header. These
 files aren't shipped here because they belong to MiniMax, Video Rebirth, Pruna and the adapter's publisher. Fetch them
-from Hugging Face at pinned revisions (about 50 MB, no weights) and all 834 run:
+from Hugging Face at pinned revisions (about 50 MB, no weights) and all 835 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest
