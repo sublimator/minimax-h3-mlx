@@ -16,6 +16,13 @@ logs every stage. `--plan-only` reads configs, the tokenizer and the processor o
 `--upsample`, of the request before it is expanded). `--decode-from <final_rows.npz>` re-decodes saved latents on their
 own: no prompt or sampling options, the rows checked, and the request that made them (saved in the file) logged as the
 source.
+
+`--lora adapter.safetensors --lora-scale 1.0` samples with a trained adapter (what `scripts/train_lora.py` writes, or
+any one-component LoRA file `h3mlx.lora.load` reads). The scale has no default: 1.0 is the adapter as trained, 0 is no
+adapter. The adapter is attached beside the transformer's weights for the whole denoise, never merged into them
+(`h3mlx.lora.for_sampling` says why); with `--quantize` the base matrices are quantized and the adapter stays at full
+precision beside them. The plan names the adapter from its file's header alone, and `run.json` and `final_rows.npz`
+record its file's hash and the scale.
 """
 
 import argparse
@@ -34,7 +41,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from h3mlx import image as I  # noqa: E402
-from h3mlx import load  # noqa: E402
+from h3mlx import load, lora  # noqa: E402
 from h3mlx import upsampler as U  # noqa: E402
 from h3mlx.packing import Ref, build_packed_sequence, build_ref2va_packed_sequence  # noqa: E402
 from h3mlx.vae import VaeConfig, VideoVAE  # noqa: E402
@@ -95,6 +102,16 @@ def plan(c: I.Components, prompt: str, images, height, width, sigmas) -> dict:
             "sigmas": [float(s) for s in sch.video_sigmas], "model_calls": int(len(sch.video_timesteps))}
 
 
+def adapter_plan(path: Path, scale: float, cfg: dict) -> dict:
+    """What `--lora` applies, from the adapter file's header alone (no tensor is read): the file, its hash, the scale,
+    and the adapter's Linears, ranks, alphas and scalings (`lora.summary`). An adapter that is not a LoRA file the port
+    reads, or that does not fit this transformer's Linears, is a ValueError here."""
+    shapes = lora.from_header(path)
+    lora.check(shapes, cfg)
+    return {"path": str(path), "sha256": sha256(path), "bytes": path.stat().st_size, "scale": scale,
+            "applied": scale != 0, **lora.summary(shapes, scale)}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--weights", type=Path, required=True, help="the P-H3-Image release (diffusers layout)")
@@ -115,6 +132,10 @@ def main(argv=None) -> int:
     ap.add_argument("--modulation-cache", action=argparse.BooleanOptionalAction, default=True,
                     help="compute each call's AdaLN modulation up front and drop adaln_proj (~26 GB); bit-identical "
                          "results; on by default")
+    ap.add_argument("--lora", type=Path,
+                    help="a trained adapter (.safetensors), attached to the transformer for the whole denoise")
+    ap.add_argument("--lora-scale", type=float,
+                    help="the adapter's strength; required with --lora (no default): 1.0 is as trained, 0 is no adapter")
     ap.add_argument("--max-new-tokens", type=int, help="upsampler budget, reasoning included (default 1024, edits 1536)")
     ap.add_argument("--plan-only", action="store_true", help="configs, tokenizer and processor only; no weights")
     ap.add_argument("--decode-from", type=Path,
@@ -128,7 +149,8 @@ def main(argv=None) -> int:
         given = [n for n, v in (("--prompt-file", args.prompt_file), ("--image", args.image), ("--sigmas", args.sigmas),
                                 ("--upsample", args.upsample), ("--height", args.height), ("--width", args.width), ("--plan-only", args.plan_only),
                                 ("--seed", args.seed is not None), ("--max-new-tokens", args.max_new_tokens is not None),
-                                ("--quantize", args.quantize is not None))
+                                ("--quantize", args.quantize is not None), ("--lora", args.lora is not None),
+                                ("--lora-scale", args.lora_scale is not None))
                  if v]
         if given:
             ap.error(f"--decode-from decodes the saved rows as they are; drop {', '.join(given)}")
@@ -144,6 +166,18 @@ def main(argv=None) -> int:
             I.schedules(sigmas)
         except ValueError as e:
             ap.error(f"--sigmas: {e}")
+    if args.lora is not None and args.lora_scale is None:
+        ap.error("--lora needs --lora-scale, the adapter's strength: there is no default (1.0 is the adapter as trained)")
+    if args.lora is None and args.lora_scale is not None:
+        ap.error("--lora-scale is the strength of an adapter: give the adapter with --lora")
+    lora_plan = None  # the plan's entry for --lora; the file's tensors are read once the transformer is open
+    if args.lora is not None:
+        transformer_config = configs(args.weights.expanduser())[0]
+        try:
+            lora.check_scale(args.lora_scale)
+            lora_plan = adapter_plan(args.lora.expanduser(), args.lora_scale, transformer_config)
+        except (ValueError, NotImplementedError, OSError) as e:
+            ap.error(f"--lora: {e}")
 
     t0 = time.time()
     mx.set_memory_limit(int(args.memory_limit_gb * 1e9))
@@ -223,6 +257,8 @@ def main(argv=None) -> int:
             log["upsampled_prompt"] = prompt
             event("upsampled", tokens=answer.get("tokens"), prompt_chars=len(prompt), aspect_ratio=aspect)
         log["plan"] = plan(c, prompt, images, args.height, args.width, sigmas)
+        if lora_plan is not None:
+            log["plan"]["lora"] = lora_plan
         if args.upsample and args.plan_only:
             log["plan"]["text_basis"] = ("the request as given: --upsample replaces it with a longer prompt before "
                                          "encoding, so the run's text and sequence rows may differ")
@@ -235,6 +271,14 @@ def main(argv=None) -> int:
         c.vae, _, _ = load.load_vae(weights / "vae", dtype=vae_dtype)
         c.connector = load.load_safetensors(weights / "text_connector")
         c.dit_params, _ = load.load_transformer(weights / "transformer")
+        if lora_plan is not None:
+            # attached now, to the weights as loaded: the text encoder has not run, and `--quantize` comes after
+            c.dit_params = lora.for_sampling(c.dit_params, c.dit_cfg, lora.load(lora_plan["path"]), args.lora_scale)
+            if sha256(Path(lora_plan["path"])) != lora_plan["sha256"]:
+                raise RuntimeError(f"--lora: {lora_plan['path']} changed while it was being read; the hash in the "
+                                   "plan is not this file's")
+            event("lora", applied=lora_plan["applied"], scale=lora_plan["scale"], modules=lora_plan["modules"],
+                  sha256=lora_plan["sha256"])
         if args.quantize:
             load.check_quantizable(c.dit_params)  # shapes only: refuse now, not after the text encoder
         per_call = dit_tflop_per_call(log["plan"]["sequence_rows"], c.dit_cfg)
@@ -260,7 +304,8 @@ def main(argv=None) -> int:
                       "request": request if args.upsample else None, "seed": args.seed,
                       "height": log["plan"]["height"], "width": log["plan"]["width"], "sigmas": log["plan"]["sigmas"],
                       "images": log["images"], "weights": str(weights), "commit": log["provenance"]["commit"],
-                      "quantize": args.quantize, "modulation_cache": args.modulation_cache}
+                      "quantize": args.quantize, "modulation_cache": args.modulation_cache,
+                      "lora": lora_plan and {k: lora_plan[k] for k in ("path", "sha256", "scale")}}
             np.savez(out / "final_rows.npz", video_rows=np.array(v.astype(mx.float32)), source=np.array(json.dumps(source)),
                      **meta)
             event("denoised", saved="final_rows.npz", **meta)
