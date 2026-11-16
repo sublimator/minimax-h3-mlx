@@ -101,7 +101,7 @@ def test_denoise_with_cache_equals_without():
 
 def test_cache_is_bit_identical_over_a_50_point_schedule():
     """A larger mixed-precision model where one product over the union of the timesteps rounded differently from the
-    step's own (review D2, e.g. step 6). Per-call tables must make every step bit-identical; the uncached path must
+    step's own (at step 6, for one). Per-call tables must make every step bit-identical; the uncached path must
     stay as close to an f32 torch run as torch's own bf16 run is (ratio <= 1.25; observed <= 1.06)."""
     from test_dit_mixed_precision import rel_err
 
