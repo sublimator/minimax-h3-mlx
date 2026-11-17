@@ -30,11 +30,9 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
   take that gradient without holding every block's graph at once; `h3mlx.cache` keeps encoded examples on disk under
   keys that change with every input, encode choice and code version. `scripts/train_lora.py` puts them together:
   every training argument required, a `--plan-only` that opens no weights, limits that stop a run, a run record, and
-  checkpoints it resumes from, one session to a run directory. **In the tests it runs on a tiny random transformer.**
-  A first run on the released weights found a wrong gradient that no tiny model had shown, the attention's backward
-  pass in bf16, which the training forward now takes in float32 (`docs/porting-lora-training.md`, §7.1); §14 of that
-  guide lists what a real run still needs. `scripts/run_p_h3_image.py --lora`
-  samples with a trained adapter, attached at a scale that has no default (§12 of that guide).
+  checkpoints it resumes from, one session to a run directory. It has trained on the released P-H3-Image weights
+  (see [Training a LoRA](#training-a-lora)). `scripts/run_p_h3_image.py --lora` samples with a trained adapter,
+  attached at a scale that has no default (§12 of `docs/porting-lora-training.md`).
 - **Porting guides:** [`docs/porting.md`](docs/porting.md) (diffusers -> h3mlx),
   [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md),
   [`docs/porting-p-h3-image.md`](docs/porting-p-h3-image.md) and
@@ -47,15 +45,15 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 884 tests and skips 91. Those 91 need the releases' tokenizers, processors,
+No weights are needed. A plain clone runs 889 tests and skips 91. Those 91 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header and a public training adapter's header. These
 files aren't shipped here because they belong to MiniMax, Video Rebirth, Pruna and the adapter's publisher. Fetch them
-from Hugging Face at pinned revisions (about 50 MB, no weights) and all 975 run:
+from Hugging Face at pinned revisions (about 50 MB, no weights) and all 980 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest
 
-Or point `H3MLX_FIXTURES` at a copy. Seven of the 75 also need `ffmpeg` and `ffprobe` on the `PATH`.
+Or point `H3MLX_FIXTURES` at a copy. Seven of the 91 also need `ffmpeg` and `ffprobe` on the `PATH`.
 
 The oracle is diffusers main at `d3d8af89` (P-H3-Image isn't in a diffusers release yet); its H3 code is 0.42.1's plus a
 tensor-parallel plan, and the H3 tests pass against both.
@@ -155,7 +153,7 @@ wrote. The scale has no default: 1.0 is the adapter as trained, and 0 is the run
 is attached beside the weights for the whole denoise, never merged into them; with `--quantize` the base matrices are
 quantized and the adapter stays at full precision. The plan names the adapter from its file's header, and `run.json`
 and `final_rows.npz` record the file's hash and the scale. This is tested against diffusers on tiny models only
-(`docs/porting-lora-training.md`, §12); no trained adapter has been sampled on the real weights by the tests.
+(`docs/porting-lora-training.md`, §12) and has been used on the real weights by hand (§14.1).
 
 Sizes follow the pipeline. Text-to-image defaults to 2912x2912 (8 MP); the card lists the 8 MP size for each aspect
 ratio, and other sizes are rounded to multiples of 32. An edit is generated at Picture 1's size, scaled up to at least
@@ -213,6 +211,40 @@ same brief. Neither lost detail at full resolution (faces, hands, the fish's sca
 | bf16 | 8-bit | 4-bit |
 | --- | --- | --- |
 | ![The fishmonger in bf16](docs/images/quant-bf16.jpg) | ![The same seed with 8-bit weights: the same scene, small details moved](docs/images/quant-8bit.jpg) | ![The same seed with 4-bit weights: a different fishmonger and framing](docs/images/quant-4bit.jpg) |
+
+## Training a LoRA
+
+`scripts/train_lora.py` trains a LoRA on P-H3-Image. The dataset is a JSON file of examples, each a picture (path
+relative to the file), its caption and its size:
+
+    {"examples": [{"picture": "front.png", "prompt": "a studio portrait of ohwx man ...", "height": 768, "width": 768}]}
+
+Nothing that decides the training has a default, so put the arguments in a file, one per line (each flag and each
+value on its own line), and pass it with `@`. These are the settings of our fourth run (§14.1 of
+[`docs/porting-lora-training.md`](docs/porting-lora-training.md)), grouped here for reading:
+
+    --weights P-H3-Image --dataset data/dataset.json --cache-dir data/cache --run-dir runs/run-004
+    --rank 16 --alpha 16 --targets attn.to_q,attn.to_k,attn.to_v,attn.to_out.0,ff.net.0.proj,ff.net.2 --refiner
+    --assistant p_h3_image_training_adapter_v1.safetensors
+    --learning-rate 1e-4 --betas 0.9 0.999 --eps 1e-6 --weight-decay 1e-4 --max-grad-norm 1.0
+    --shift 12 --grid 1000 --density uniform --weighting none --condition-t 0.999 --seed 1
+    --latent-seed 42 --no-latent-float16-round --vae-dtype float32 --text-dtype bfloat16
+    --max-steps 1500 --max-seconds 12600 --max-peak-memory-gb 150 --checkpoint-every 250
+
+    uv run python scripts/train_lora.py @run-004.args --plan-only   # sizes and checks, no weights read
+    uv run python scripts/train_lora.py @run-004.args
+
+The assistant is ostris's P-H3-Image training adapter (`ostris/minimax_h3_training_adapter`,
+`p_h3_image_training_adapter_v1.safetensors`): P-H3-Image is step- and guidance-distilled, and training on it without
+the adapter left the early checkpoints soft and smeared. Each checkpoint's `adapter.safetensors` samples with
+`run_p_h3_image.py --lora PATH --lora-scale 1.0`; the assistant is not used at sampling. SIGTERM stops a run with a
+checkpoint, and the same arguments resume it.
+
+**Measured on the M3 Ultra** (MLX 0.32.4, bf16 transformer, the block-by-block gradient): 6.4 to 6.9 s a step at
+768 x 768 with an MLX peak of 70 GB; 22.5 s a step at 1536 x 1536 with 73 GB. With the assistant and the attention
+fix, a person's face reached a face-recognition similarity of 0.73 to 0.82 on a portrait prompt by step 500 to 750,
+and 0.45 to 0.58 in new scenes; at 768 the adapters learned the face's structure and styling, not fine skin detail or
+small marks. §14 of the guide has the runs, the table and what is not done.
 
 ## Licence
 

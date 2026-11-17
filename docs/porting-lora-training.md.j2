@@ -50,9 +50,9 @@ assumes the main guide (`docs/porting.md`) for the transformer and the scheduler
 
 **The tests here train no real model.** There is a training script (§11), and in the tests it runs on a tiny random
 transformer: it overfits one synthetic example there, stops at its limits and resumes to the same weights.
-Everything below is weight-free. A first run on the released weights has since been made with the script, and it
-found a wrong gradient that no tiny model had shown (§7.1, the attention's backward pass on MLX 0.32.4); its measurements are not
-in this guide, and §14 lists what a real run still needs.
+The tests are weight-free. Runs on the released weights have since been made with the script: the first found a
+wrong gradient that no tiny model had shown (§7.1, the attention's backward pass on MLX 0.32.4), and §14 gives their
+measurements, what they showed about likeness, and what is still not done.
 
 **Sources, pinned.**
 
@@ -2254,42 +2254,74 @@ value before its cast is one such: for a float32 sample it rounds to the same fl
 subtraction is a single correctly rounded operation either way, and only the bf16 cases fail, where the timestep
 must be cast to bf16 before the subtraction.
 
-## 14. Not done, and open
+## 14. Runs on the released weights, and what is not done
 
-**What a run on real weights still needs.** A first one has been made, and the first item is what it found. The
-items after it were written before that run and stand as they were: none of what they name is built, and the run's
-own measurements are not in this guide.
+### 14.1 What the runs showed
 
-- **What the first real run found.** Its loss was finite and plausible while its gradients were wrong by orders of
-  magnitude: the attention's backward pass in bf16 on MLX 0.32.4 (§7.1). No tiny model had shown it, because theirs
-  have attention scores in the tens and a head width MLX's fused kernels do not take. The training forward's
-  attention is float32 now, and `sharp_setup` gives the tests a model with scores in the tens of thousands at such a
-  width. A run has to be made
-  again to know what else the real model does that the tiny ones do not.
-- **A run at real size at all.** The script has loaded a tiny random transformer and nothing else. Its first real
-  step is the first time the block-by-block gradient runs over 50 real blocks, and the first time the encode path
-  runs the real VAE and text encoder.
-- **Memory and time, measured.** `--plan-only` gives the sizes that can be computed (weights, adapter, optimizer
-  state, saved block inputs). The peak of a real step, and how long one takes, are unknown; §8's numbers are from a
-  model of hidden size 96. The memory limit stops a run after MLX's counter has gone over, not before the machine is
-  out of memory.
-- **The recipe's settings.** Which density, loss weighting, learning rate, betas, epsilon, weight decay and clip the
-  recipe uses were not read from its source, and neither was its schedule. The script takes them as arguments and
-  suggests none. The values that were read are in §6.1.
+**The runs.** Four LoRA runs and a few short shape tests on the released P-H3-Image weights (revision `7f98ace`), on
+an M3 Ultra (60-core GPU, 256 GB) with MLX 0.32.4: bf16 transformer, VAE in float32, text encoder in bf16. One
+subject, a man generated for the purpose, in 11 and then 9 pictures at 768 x 768, each caption naming him "ohwx man"
+and describing the scene. Rank 16, alpha 16, on the six attention and feed-forward matrices of every block; learning
+rate 1e-4; AdamW with betas 0.9 and 0.999; a clip at 1.0; the shift-12 grid of 1,000 with uniform density and no
+weighting; the block-by-block gradient (§8.2).
+
+| run | what it changed | steps | a step | MLX peak | gradient norm before the clip |
+| --- | --- | --- | --- | --- | --- |
+| 1 | (the attention's backward in bf16, below) | 300 | 6.3 s | 69.7 GB | up to 3.6e8 |
+| 2 | the training forward's attention in float32 (§7.1) | 300 | 6.4 s | 70.0 GB | 1.21 at most |
+| 3 | the public training adapter as a frozen assistant (§5.4) | 770, stopped | 6.4 s | 70.2 GB | |
+| 4 | the token refiner's blocks trained too; two pictures with tiny faces dropped; eps 1e-6, weight decay 1e-4 | 758, stopped | 6.9 s | 70.2 GB | |
+| shape test | 20 pictures at 1536 x 1536 | 3 | 22.5 s | 73.3 GB | |
+
+Runs 3 and 4 were stopped by SIGTERM once their checkpoints had answered what they were for; each wrote its
+checkpoint and exited 3 (§11.7). The block-by-block gradient ran at both sizes without meeting the GPU watchdog.
+
+**The defect the first run found.** A plausible loss with gradients wrong by orders of magnitude: MLX 0.32.4's fused
+backward for `mx.fast.scaled_dot_product_attention` keeps the unscaled scores in the inputs' dtype before rebuilding
+the probabilities, so in bf16 a large score loses enough bits to put a large error into the exponent (§7.1).
+0.32.3 and earlier give bounded gradients on the same inputs, and MLX's main branch at `fc344c98` (2026-11-17) gives
+0.32.4's numbers. The training forward's attention runs in float32; sampling is unchanged.
+
+**The assistant matters on this base.** At the first step, on the same picture and noise level, the loss was 1.62
+without the training adapter and 0.39 with it. Without it the early checkpoints sampled soft and smeared, as
+ai-toolkit's notes on this distilled model say; with it they sampled sharp.
+
+**Likeness.** Each checkpoint was sampled with `run_p_h3_image.py --lora` at scale 1.0, 2048 x 2048, seed 0, on a
+portrait prompt like the captions and two new scenes, and the face scored with a face-recognition model (InsightFace
+`buffalo_l`, cosine) against the subject's portrait, which his ten other training pictures score 0.48 to 0.95 against (median 0.69).
+
+| adapter | portrait | new scene 1 | new scene 2 |
+| --- | --- | --- | --- |
+| none | 0.15 | (no face) | 0.01 |
+| run 2, step 300 (1024 x 1024) | 0.40 | 0.13 | 0.05 |
+| run 3, step 500 | 0.73 | 0.35 | 0.46 |
+| run 3, step 750 | 0.75 | 0.07 (turned away) | 0.45 |
+| run 4, step 500 | 0.74 | 0.58 | 0.50 |
+| run 4, step 750 | 0.82 | 0.57 | 0.50 |
+
+By eye the adapters learned his bone structure and styling and kept the base model's smoothing of age and skin; small
+asymmetric marks (a notch in one eyebrow, a mole) were not learned. At 768 his face covers about 10 by 15 tokens of 32
+pixels, coarser than such detail. A run on higher-resolution pictures was not made. For comparison, the edit workflow
+with one portrait of him as Picture 1 and no adapter scored 0.74 to 0.95 on the same kinds of scene.
+
+### 14.2 Not done
+
 - **Pictures as they come.** The script takes each example's size from the dataset file and refuses a picture of
   another shape. There is no bucketing by aspect ratio, no cropping, no captioning, no augmentation and no batch
   larger than one.
 - **Samples while it trains.** The sampling script takes a trained adapter (§12), and a checkpoint's
-  `adapter.safetensors` is one, so a run can be looked at by hand. The training script does not sample, and it
-  computes no validation loss.
-- **The sampler with an adapter, on real weights.** §12 is tested on tiny float32 models. No trained adapter has
-  been sampled over the real bf16 transformer, quantized or not.
-- **The assistant adapter on real weights.** `--assistant` attaches a frozen adapter and is tested on random ones.
-  The public training adapter was read by its header only (§5.4), never loaded onto real weights.
-- **A step-distilled base.** P-H3-Image samples in 8 steps without guidance. Whether a plain flow-matching loss on it
-  keeps that behaviour, with or without the assistant, is untested.
+  `adapter.safetensors` is one, so a run can be looked at by hand (§14.1 was made that way). The training script does
+  not sample, and it computes no validation loss.
+- **The recipe's settings, from the recipe.** ai-toolkit's settings for this model were read on its main branch at
+  `7a5fe1a8` after the runs: the training adapter on by default, rank 16 and alpha 16, timestep type `shift`, no
+  guidance loss, and adapters on every `Linear` whose name holds `blocks`, which includes the token refiner's; its
+  general job defaults are 3,000 steps, learning rate 1e-4, `adamw8bit` with eps 1e-6 and weight decay 1e-4, caption
+  dropout 0.05, and resolution buckets of 512, 768 and 1024. The script still takes every setting as an argument and
+  suggests none.
 - **The trained file in diffusers.** The adapter is written in diffusers' format, which §1.5 tests in both directions
   on tiny models. A file trained by this script has not been loaded into diffusers on real weights.
+- **Longer runs on a distilled base.** ai-toolkit warns that even with the assistant the distillation breaks down over
+  a long run. These runs stopped at 770 steps or fewer; longer ones are untested.
 - **Housekeeping for long runs.** Every checkpoint is kept (the plan prints their total size); there is no pruning.
   The whole dataset's entries are held in memory. One process trains on one device.
 - **A smaller base in memory.** The gradients are tested over a quantized base (§7.4, §8.5), but the script has no
@@ -2302,17 +2334,15 @@ own measurements are not in this guide.
 - **Gradient accumulation.** One example, one optimizer step. Several examples' gradients are not summed before a
   step, which is how a trainer with a batch of one usually gets the effect of a larger one.
 - **Prompts as the model will be given them.** The sampling script can expand a short request with the release's
-  prompt upsampler before encoding it; the training script encodes each prompt as written. Whether training prompts
-  should be expanded the same way is a choice a first run has to make, and there is no caption dropout.
-- **Long evaluations on the GPU.** The text encoder's loader already splits its pass into one evaluation a layer,
-  because a single long one at several thousand tokens was stopped by the system's GPU watchdog in a probe. Training
-  evaluates more per block than sampling does, and the checkpointed gradient evaluates the whole backward pass at
-  once. Whether either runs into that limit at real sequence lengths is not known and has to be measured; the
-  block-by-block gradient evaluates one block at a time, which is the smaller risk.
+  prompt upsampler before encoding it; the training script encodes each prompt as written, and has no caption
+  dropout.
+- **The checkpointed gradient at real size.** The runs used the block-by-block gradient. The checkpointed one (§8.1)
+  evaluates the whole backward pass at once and was not tried at real sequence lengths, where the GPU watchdog could
+  stop it.
 - **Stopping from outside.** SIGTERM is handled (§11.7). Ctrl-C is not: it interrupts where it lands and leaves the
   last periodic checkpoint. Neither lock here is to be relied on over a network filesystem (§10.2).
 
-Open, and not specific to a first run:
+### 14.3 Open
 
 - **Sums on the GPU have no fixed order.** A gradient over a bf16 base is repeatable on the CPU stream and can
   differ by a bf16 rounding step from run to run on the default device (§7.1). A resumed run is byte-for-byte an
@@ -2325,12 +2355,14 @@ Open, and not specific to a first run:
   Lanczos on 8-bit pixels for both sizing rules (§10.3).
 - **An encoder's identity does not read its weights** (§10.1): a weight file swapped for another of the same name and
   size is not noticed by the cache or by a resume.
-- **The recipe's unread parts.** How the trainer mixes the picture with noise, how it samples timesteps, its density,
-  its loss weighting and its optimizer settings were not read (§6.1). No preset is defined.
-- **The assistant adapter's values.** Only its header was read (§5.4).
+- **The recipe's unread parts.** Its settings were read after the runs (§14.2); how its trainer mixes the picture
+  with noise was not, beyond §6.1. No preset is defined.
+- **The assistant adapter's values.** Read and attached in runs 3 and 4 (§14.1); its header says ai-toolkit 0.13.40,
+  3,250 steps. Its values are not otherwise checked.
 - **bf16.** Gradients over a bf16 base are tested on four tiny layers against torch's own error (§7.3), and a run of
   optimizer steps over one only loosely (§9.1). A bf16 product path for the trainable matrices is not built.
-- **Real files.** No published adapter's tensors were read by this code; the tests write their own. Layout details of
+- **Real files.** One published adapter's tensors were read by this code, the training adapter's, in runs 3 and 4;
+  the tests write their own. Layout details of
   real files that the converter's docstring does not mention would not be caught.
 - **Routing between partitions.** `h3mlx.lora` returns an adapter and the caller attaches it to the weights it means.
   diffusers' routing of a file to `transformer` or `transformer_ref` is not ported. The sampling script's `--lora`
