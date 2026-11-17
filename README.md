@@ -30,8 +30,10 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
   take that gradient without holding every block's graph at once; `h3mlx.cache` keeps encoded examples on disk under
   keys that change with every input, encode choice and code version. `scripts/train_lora.py` puts them together:
   every training argument required, a `--plan-only` that opens no weights, limits that stop a run, a run record, and
-  checkpoints it resumes from, one session to a run directory. **It has run on a tiny random transformer in the tests and never on real weights;**
-  `docs/porting-lora-training.md` §14 lists what a first real run would still need. `scripts/run_p_h3_image.py --lora`
+  checkpoints it resumes from, one session to a run directory. **In the tests it runs on a tiny random transformer.**
+  A first run on the released weights found a wrong gradient that no tiny model had shown, the attention's backward
+  pass in bf16, which the training forward now takes in float32 (`docs/porting-lora-training.md`, §7.1); §14 of that
+  guide lists what a real run still needs. `scripts/run_p_h3_image.py --lora`
   samples with a trained adapter, attached at a scale that has no default (§12 of that guide).
 - **Porting guides:** [`docs/porting.md`](docs/porting.md) (diffusers -> h3mlx),
   [`docs/porting-hyperflow.md`](docs/porting-hyperflow.md),
@@ -45,10 +47,10 @@ LoRA code is tested the same way against [PEFT](https://github.com/huggingface/p
     uv sync
     uv run pytest
 
-No weights are needed. A plain clone runs 808 tests and skips 91. Those 91 need the releases' tokenizers, processors,
+No weights are needed. A plain clone runs 884 tests and skips 91. Those 91 need the releases' tokenizers, processors,
 configs and weight indexes, plus HyperFlow's manifest and adapter header and a public training adapter's header. These
 files aren't shipped here because they belong to MiniMax, Video Rebirth, Pruna and the adapter's publisher. Fetch them
-from Hugging Face at pinned revisions (about 50 MB, no weights) and all 899 run:
+from Hugging Face at pinned revisions (about 50 MB, no weights) and all 975 run:
 
     uv run python scripts/fetch_test_fixtures.py   # writes tests/data/release/ (git-ignored)
     uv run pytest

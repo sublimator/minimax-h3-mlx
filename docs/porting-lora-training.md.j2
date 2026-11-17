@@ -11,7 +11,8 @@
    Sections 8 and 9 have no library original to quote: their oracles are the plain gradient of section 7 and torch's
    optimizer, run in the tests. Sections 10 and 11 (the cache and the training script) are this port's own; what
    they take from the recipe is cited by file and line, as in section 6. Section 12 (the sampler with an adapter)
-   quotes PEFT's `set_scale` and diffusers' `apply_lora_scale`. #}
+   quotes PEFT's `set_scale` and diffusers' `apply_lora_scale`. Section 7.1 cites MLX's own source (ml-explore/mlx
+   at tag v0.32.4) by file and function and does not quote it: no checkout of it is read by this template. #}
 {% set PEFT = '../peft' %}
 {% set LAYER = 'src/peft/tuners/lora/layer.py' %}
 {% set DM = '../diffusers-main' %}
@@ -47,10 +48,11 @@ In each section the original comes first, then the port, then what changed and w
 assumes the main guide (`docs/porting.md`) for the transformer and the scheduler, and the HyperFlow guide
 (`docs/porting-hyperflow.md`) for how a LoRA reaches the forward (`ops.plinear`).
 
-**Nothing here has trained a real model.** There is a training script now (§11), and it has run only on a tiny random
-transformer: it overfits one synthetic example there, stops at its limits and resumes to the same weights. No real
-weights have been loaded by it, no real picture encoded, and §14 lists what a first real run would still need.
-Everything below is weight-free.
+**The tests here train no real model.** There is a training script (§11), and in the tests it runs on a tiny random
+transformer: it overfits one synthetic example there, stops at its limits and resumes to the same weights.
+Everything below is weight-free. A first run on the released weights has since been made with the script, and it
+found a wrong gradient that no tiny model had shown (§7.1, the attention's backward pass on MLX 0.32.4); its measurements are not
+in this guide, and §14 lists what a real run still needs.
 
 **Sources, pinned.**
 
@@ -59,6 +61,7 @@ Everything below is weight-free.
 | LoRA layer, scaling, init, merge (Apache-2.0) | `huggingface/peft`, `src/peft/tuners/lora/` | tag `v0.21.2` (`eaa35c7`), the version the tests import |
 | LoRA files, the original-layout converter, the scheduler, `training_utils`, the P-H3-Image pipeline's layout and row steps (Apache-2.0) | `huggingface/diffusers` main | `d3d8af89e5b08a352cf47bba3a451c5fed9a49b1`, the commit the tests import |
 | a training recipe for this model (MIT; read, not run, not quoted) | `ostris/ai-toolkit`, `extensions_built_in/diffusion_models/minimax_h3/` | `d6a18ad72da9abca3ffb67ea8e42c25764eee61a` |
+| the fused attention's backward pass (MIT; cited by file and function in §7.1, not quoted) | `ml-explore/mlx`, `mlx/fast.cpp`, `mlx/backend/metal/` | tag `v0.32.4`, the version the port locks |
 
 **The oracle, and what it is not.** The tests compare against PEFT, diffusers and torch run on tiny models and random
 tensors. diffusers' example training scripts are not part of the checkout these guides read. For the training-time
@@ -76,11 +79,11 @@ port takes an argument and has no default.
 | noise-level sampling, loss weighting | `src/h3mlx/train.py` | diffusers `training_utils.py`, its two schedulers | `tests/test_train_sampling.py` (37) |
 | named adapters on one `Linear` | `src/h3mlx/lora.py`, `ops.plinear` | PEFT `layer.py`; diffusers `load_lora_adapter`, `set_adapters` | `tests/test_lora_stack.py` (14, one of them on a release fixture) |
 | one training example | `train.build_example` | diffusers `p_h3_image/before_denoise.py`, `scheduling_minimax_h3.py`; the recipe | `tests/test_train_example.py` (33) |
-| the example's loss and gradient | `train.example_loss`, `train.loss_and_gradients` | torch autograd on diffusers' transformer with PEFT's layers | `tests/test_train_gradients.py` (31) |
-| a bounded backward pass | `src/h3mlx/backward.py` | the plain gradient of the row above | `tests/test_backward.py` (39) |
+| the example's loss and gradient | `train.example_loss`, `train.loss_and_gradients`, `ops.attention_for_training` | torch autograd on diffusers' transformer with PEFT's layers; torch's `scaled_dot_product_attention` and `rms_norm` | `tests/test_train_gradients.py` (46), `tests/test_attention_backward.py` (56) |
+| a bounded backward pass | `src/h3mlx/backward.py` | the plain gradient of the row above | `tests/test_backward.py` (43) |
 | the optimizer step | `train.adamw`, `train.optimizer_step` | `torch.optim.AdamW`, `clip_grad_norm_` | `tests/test_train_optimizer.py` (32) |
 | the cache of encoded examples | `src/h3mlx/cache.py`, `src/h3mlx/files.py` | diffusers `p_h3_image/before_encoder.py` for one sizing rule; the recipe for the other | `tests/test_cache.py` (99, three of them on release fixtures) |
-| the training script | `scripts/train_lora.py`, `src/h3mlx/trainer.py` | none: the pieces above, in order | `tests/test_train_lora.py` (103, one of them on release fixtures) |
+| the training script | `scripts/train_lora.py`, `src/h3mlx/trainer.py` | none: the pieces above, in order | `tests/test_train_lora.py` (104, one of them on release fixtures) |
 | a trained adapter at sampling | `lora.for_sampling`, `lora.from_header`, `lora.summary`, `scripts/run_p_h3_image.py` | PEFT `set_scale`; diffusers `load_lora_adapter`, `set_adapters`, `apply_lora_scale`, and its P-H3-Image pipeline | `tests/test_lora_sampling.py` (25); on release fixtures, 2 in `tests/test_p_h3_image.py` and 14 in `tests/test_run_p_h3_image.py` |
 
 ## 1. LoRA adapters
@@ -915,10 +918,12 @@ both gradients of §8:
 {{ code('src/h3mlx/train.py', struct='ExampleForward') }}
 
 `example_loss` does not call `ops.dit_forward`. It runs that forward's operations in its order, from the functions
-`dit_forward` is itself made of (`ops.dit_inputs`, `ops.dit_block`, `ops.dit_outputs`), in three stages. Two things
-differ from the sampling forward, and neither changes a value: `test_the_training_forward_is_the_sampling_forward`
-compares the loss with one taken through `ops.dit_forward`, bit for bit, on three examples, each in float32 and over
-a bf16 base, with adapters on every `Linear`.
+`dit_forward` is itself made of (`ops.dit_inputs`, `ops.dit_block`, `ops.dit_outputs`), in three stages. Three
+things differ from the sampling forward, and none changes a value where the release runs:
+`test_the_training_forward_is_the_sampling_forward` compares the loss with one taken through `ops.dit_forward`, on
+three examples with adapters on every `Linear`. It is the same bit for bit in float32, and over a bf16 base at a head
+width of 64 (the release's is 128; the third difference, below, says why the width matters). Over a bf16 base at a
+head width of 32, the other tiny models', the two losses are within 0.2% of each other and not the same bits.
 
 **Nothing is evaluated inside it.** The sampling forward calls `mx.eval` after every block, which keeps its lazy
 graph one block long. Under autograd that is the wrong thing: an array evaluated while it is being traced keeps the
@@ -960,14 +965,165 @@ Relative error of the table's gradient against the exact sum, bf16, on the CPU s
   depend on either gather, and makes one: the same example with a timestep entry of its own for every row. Each table
   then has a row per sequence row, used once, so nothing is summed in the gather; the rows' cotangents are summed
   later, in float32, in the product with the float32 matrices. The forward's values and the loss are the same bits.
-  On 2,316 rows the gradients with shared tables are within 0.44% of that reference (one rounding of each sum
-  apart); taken through the sampling forward's gather they are 20% to 52% away.
+  On 2,316 rows the gradients with shared tables are within 0.66% of that reference (one rounding of each sum
+  apart); with the sampling forward's gather in the training forward they are 20% to 52% away.
 - **Why sampling keeps the plain gather.** The training gather makes a float32 copy of the gathered rows, twice their
   size, and sampling has no backward. `dit_block` and `dit_outputs` take the gather as an argument, `take`, and
   `ops.dit_forward` leaves it at `take_rows`: its operations are the ones it had.
 - **Order on the GPU.** On the default device MLX adds a gather's cotangents in no fixed order, so a float32 sum can
   differ in its last bit from one run to the next, and a bf16 result that sits on a rounding boundary can then move
   one step. The CPU stream is repeatable. Tests that need exact equality over a bf16 base run there.
+
+**The attention runs in float32.** This one was found by the first run on real weights, not by a test: its loss was
+finite and plausible at every step while the gradient's norm ran to millions. A block's attention is one call, in
+diffusers and here:
+
+{{ code(TR, lines=(199, 209), root=DM) }}
+{{ code('src/h3mlx/ops.py', function='attention') }}
+{{ code('src/h3mlx/ops.py', function='attention_for_training') }}
+
+In the forward the two are the same bits where the release runs. Their gradients are not, on MLX 0.32.4, which is
+the version the port locks and the oldest it accepts. Everything measured below is on that version, on an M2 Max,
+unless it says otherwise.
+
+**What MLX does.** MLX 0.32.4 added a fused backward pass for `mx.fast.scaled_dot_product_attention` on the GPU.
+In its source at the 0.32.4 tag:
+
+- when a gradient is being traced, the forward also returns each row's log-sum-exp, in float32 (`mlx/fast.cpp`,
+  `output_logsumexp`);
+- the backward (`mlx/backend/metal/scaled_dot_product_attention.cpp`, `ScaledDotProductAttentionVJP::eval_gpu` and
+  `sdpa_vjp_blocked`) recomputes the unscaled scores `S = Q Kᵀ` into a tile of the inputs' dtype
+  (`Dtype ctype = q.dtype()`);
+- its kernel (`mlx/backend/metal/kernels/scaled_dot_product_attention_vjp.metal`, `sdpa_vjp_ds`) rebuilds each
+  probability from that tile as `exp(float(S) * scale − lse)`, and the scores' cotangent from the probability.
+
+With bf16 inputs the unscaled score is therefore rounded to eight significant bits before the exponential. One bf16
+step at a score s is 2^(⌊log₂ s⌋ − 7), and the logit under the exponential is off by up to half a step times the
+scale. So the size that matters is the unscaled score, q · k before the scale, which at 128 a head is 11.3 times the
+logit. The rebuilt probabilities stop summing to 1, and all three gradients carry the error.
+
+`bench/attention_bf16_backward.py` computes exactly that in float64 (exact scores from the bf16 inputs, an exact
+log-sum-exp, then the tile's rounding) beside MLX's own bf16 gradients. Two heads of 605 rows at the release's head
+width of 128, q and k drawn at a growing standard deviation with one key in each head aligned with a query, and
+every input rounded to bf16 first. Norms of the gradients for q, k and v:
+
+| largest score | a bf16 step there | logit error up to | largest row sum of the rebuilt probabilities | exact | the float64 model | MLX's fast call, bf16 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2,784 | 16 | 0.7 | 1.4 | 356, 353, 367 | 360, 357, 369 | 360, 357, 369 |
+| 25,025 | 128 | 5.7 | 256 | 425, 418, 391 | 712, 693, 3,127 | 713, 693, 3,127 |
+| 100,101 | 512 | 22.6 | 4.3e9 | 352, 347, 393 | 7.67e8, 7.67e8, 4.87e10 | 7.73e8, 7.73e8, 4.87e10 |
+| 178,170 | 1,024 | 45.3 | 2.2e9 | 580, 580, 393 | 2.10e9, 2.21e9, 3.21e10 | 2.10e9, 2.21e9, 3.21e10 |
+
+The model gives MLX's wrong gradients to two or three digits at every scale, for all three inputs. That is the
+cause, and not only a candidate for it.
+
+**Against torch.** The same op against torch's `scaled_dot_product_attention` in float32, each variant given the
+same bf16 numbers. Relative error of the gradient for q and for v (the gradient for k follows q's):
+
+| largest score | the logit it is | torch, bf16 | MLX's fast call, float32 | MLX's fast call, bf16 | by hand in bf16, and the fast call on the CPU stream | `attention_for_training`, bf16 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 111 | 10 | 0.003, 0.004 | 8e-7, 6e-7 | 0.005, 0.008 | 0.006, 0.004 | 0.0017, 0.0016 |
+| 2,784 | 246 | 0.007, 0.003 | 5e-6, 5e-6 | 0.11, 0.12 | 0.09, 0.03 | 0.0017, 0.0016 |
+| 11,136 | 984 | 0.007, 0.002 | 2e-5, 2e-5 | 0.46, 0.54 | 0.35, 0.05 | 0.0017, 0.0015 |
+| 25,025 | 2,212 | 0.007, 0.002 | 5e-5, 3e-5 | 1.0, 7.8 | 0.66, 0.07 | 0.0017, 0.0014 |
+| 44,543 | 3,937 | 0.006, 0.002 | 6e-5, 6e-5 | 4.6, 16 | 0.68, 0.07 | 0.0017, 0.0014 |
+| 100,101 | 8,848 | 0.009, 0.002 | 2e-4, 1e-4 | 2.2e6, 1.2e8 | 2.6, 0.10 | 0.0016, 0.0014 |
+| 178,170 | 15,748 | 0.006, 0.002 | 2e-4, 2e-4 | 3.6e6, 8.2e7 | 1.6, 0.10 | 0.0017, 0.0014 |
+
+- **What torch does.** Its bf16 backward stays within 1% of its float32 one at every scale.
+- **What MLX does in float32.** The same as torch, to 2e-4 at a score of 178,000.
+- **What MLX's fast call does in bf16, on the default device.** It is 11% off at a score of 2,800, half wrong at
+  11,000, eight times the true gradient for v at 25,000, and a million times and more from 100,000. A randomly
+  initialised model's scores are in the tens. A pretrained one's are not; what the released weights' are has not
+  been measured here, where there are no weights.
+- **What MLX does in bf16 without the fused backward.** On the CPU stream MLX differentiates the op written out
+  (`ScaledDotProductAttentionVJP::use_fallback`), and so does the attention written out by hand: the same numbers as
+  each other, the right size at every scale, and wrong for q and k by a third at a score of 11,000 and by more than
+  their own size from 100,000. That is also what MLX 0.32.3 and 0.31.2 give on the default device, where the
+  backward kernel does not exist (it is not in the 0.32.3 tag): the same script in throwaway environments gives
+  1,074, 1,048 and 391 at a score of 100,000, where float32 gives 352, 347 and 393. And it is what 0.32.4 gives with
+  its own switch, the environment variable `MLX_SDPA_VJP_FALLBACK`. So no bf16 attention in MLX has a backward that
+  holds at these scores, on any of the three versions, and the float32 one does on all three: the bf16 inputs
+  widened to float32 give float32's gradients on 0.32.4, 0.32.3 and 0.31.2 alike.
+- **float16** has a finer step, eleven bits, and a smaller range: the unscaled score overflows at 65,504.
+  `test_training_attention_backward_is_torchs_at_every_logit_scale` holds the training attention to torch in bf16
+  and in float16, up to a score of 119,000.
+- **What the port does.** `attention_for_training` runs the same call on q, k and v widened to float32 and casts the
+  result back. `attn_block`, `dit_block`, `token_refiner` and `dit_inputs` take the attention as an argument,
+  `attend`, as they take the gather; the training forward passes this one, for the blocks and for the token
+  refiner, and `ops.dit_forward` leaves it at `attention`.
+
+What else is established, and what is not:
+
+- **The forward is right, and at the release's head width it is float32's.** On MLX 0.32.4's default device, at
+  head widths of 64, 72, 80, 96 and 128, the bf16 call returns the float32 result rounded to bf16 in every entry
+  (the bench's fourth table; the tests pin 64 and 128, at small scores and large). At 32, 48, 63, 65, 100, 127, 129
+  and 160, and anywhere on the CPU stream, it does not: there MLX computes the forward in bf16, and differentiates
+  the op written out. The tiny test models have a head width of 32 and never ran the fused kernels, forward or
+  backward. On 0.32.3 and 0.31.2 the bf16 forward at 128 is computed in bf16 as well (2% to 44% of its entries are
+  not the float32 result's).
+- **At a head width of 192 the float32 call cannot be differentiated on this machine:** its kernel does not load,
+  and MLX's error names it, `steel_attention_float32_…_save_lse_t` (the bench prints the message; the bf16 call's
+  gradient runs there). The release's width is 128, where both load.
+- **Any one of q, k and v widened is enough on this MLX,** because the call promotes the others. The port widens all
+  three and does not rely on that.
+- **Not established: what the forward's kernels do on paths not tried.** The forward matched float32 in every entry
+  of every case here.
+
+**On the whole model.** `test_gradients_through_sharp_attention_over_a_bf16_base` uses a tiny transformer whose head
+width the fused kernels take (64) and multiplies every `norm_q` and `norm_k` weight by 30 or 50 (`sharpened`), which
+puts the largest score of every attention, the token refiner's included, between 14,800 and 122,700. Four blocks in
+bf16, float32 matrices on the block and refiner linears. The reference is the same forward with the attention written
+out by hand in float32, which is another backward pass over the same values:
+
+| gain | seed | largest scores | a bf16 score's logit error, up to | ours against the reference | with the bf16 call in the training forward | ours against the float32 model | torch over the bf16 base against it |
+| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| 30 | 0 | 14,808 to 31,331 | 4 to 8 | 0.0048 | 640 | 1.00 | 32.6 |
+| 30 | 1 | 17,124 to 44,115 | 8 to 16 | 0.0039 | 1.3e5 | 0.91 | 23.8 |
+| 30 | 2 | 15,919 to 37,991 | 4 to 16 | 0.0009 | 2.1e5 | 1.08 | 0.97 |
+| 50 | 0 | 41,197 to 86,991 | 16 to 32 | 0.0012 | 1.5e20 | 0.27 | 6.92 |
+| 50 | 1 | 47,591 to 122,674 | 16 to 32 | 0.0027 | 5.8e25 | 0.99 | 1.36 |
+| 50 | 2 | 44,089 to 105,208 | 16 to 32 | 0.0020 | 3.0e26 | 0.69 | 0.70 |
+
+- **The loss is still the sampling forward's,** bit for bit, in all six.
+- **The gradient is the reference's within 0.5%,** where the bf16 call's was 640 to 3e26 times too large. The test
+  asks for 2% and for the bf16 call to be at least a hundred times off.
+- **In float32 there is an exact reference,** torch and PEFT:
+  `test_gradients_through_sharp_attention_in_float32_are_torchs` holds the whole gradient to 5e-3 with the blocks'
+  scores in the tens of thousands (measured: 1e-4 to 9e-4).
+- **Over a bf16 base, attention this sharp is not the float32 model's.** The last two columns are relative to the
+  float32 model's gradient: ours is 0.3 to 1.1 of its size away, and torch's own bf16 gradient 0.7 to 33. Rounding q
+  and k to bf16 moves a logit of several thousand by several units, which is enough to change which keys a query
+  attends to; in the bench, that rounding alone moves a float32 gradient by 4% at a score of 2,800 and by more than
+  its size at 100,000. The fix removes a backward pass that was wrong by orders of magnitude. It does not make the
+  gradient of a bf16 model with very sharp attention a smooth thing, in torch or here.
+- **The bounded gradients and the script** have the same case:
+  `test_bounded_gradients_through_sharp_attention_over_a_bf16_base` (§8.5) and
+  `test_a_bf16_base_with_sharp_attention_trains_on_the_right_gradient` (§11.10), where the script's first three
+  steps log norms of 0.95, 13 and 0.83 and, with the bf16 call put back, 4.5e6, 7.0e3 and 6.6e4, with losses
+  within 0.01 of each other. That is the first real run's picture on a tiny model.
+- **The cost of the op,** at 56 heads of 600 rows by 128, where q, k and v are 4.3 million elements each (8.6 MB in
+  bf16, 17.2 in float32) and the scores 20 million: one forward and backward of the attention takes 8 ms against 6,
+  and MLX's peak over it is 457 MB against 173 (five runs each, each in its own process).
+- **The cost in a step.** The bench also takes the block-by-block gradient (§8.2) of a transformer with the
+  release's widths (hidden 5,376, 56 heads of 128, feed-forward 14,336) and two blocks of random weights, a rank-16
+  adapter on the block matrices, 644 rows. With the training attention it takes 0.40, 0.40 and 0.42 s, and with the
+  bf16 call 0.44, 0.40 and 0.40 s: no difference that three runs show. Its peak is 1,793 MB against 1,497, 0.3 GB
+  more, and block by block that does not grow with the number of blocks. On the synthetic model of §8.4, whose
+  head width of 32 has no fused kernel, the float32 scores are held outright, and its tables were measured again.
+- **Why sampling keeps the bf16 call.** It has no backward pass, its forward is already the float32 one, and it
+  would pay for the copies. `test_the_sampling_forward_keeps_the_half_precision_call` runs it with the training
+  attention made to raise.
+
+**The other fast op is right.** The differentiated forward calls one more of MLX's fused ops on bf16 rows,
+`mx.fast.rms_norm` (`ops.rms_norm`): twice on every block's rows, on q and k per head, in the token refiner and
+before the heads. Its backward
+was tested where a wrong one would hurt: rows far below the epsilon, where the derivative is largest, a row of
+exact zeros, rows of 1e6, affine weights of 40, and rows of every size from 1e-6 to 1e4 at once, at epsilons of 1e-5
+and 1e-6, on both devices. The gradients for the input and for the weight are within 0.5% of torch's float32
+gradients in every case, where torch's own bf16 backward is at 0.3%
+(`test_rms_norm_backward_in_bf16_is_torchs`, and the bench's fourth table). Nothing was changed there. The layer
+norm and the attention of the VAEs are fused ops too, and they are in the encoders, which are not differentiated.
 
 ### 7.2 Float32
 
@@ -988,9 +1144,9 @@ the attention and feed-forward linears (`test_gradients_over_a_bf16_base_track_t
 
 | seed | gradient error against float32, torch | MLX | loss error, torch | MLX |
 | --- | --- | --- | --- | --- |
-| 0 | 0.0114 | 0.0117 | 0.0041 | 0.0053 |
-| 1 | 0.0118 | 0.0116 | 0.0005 | 0.0005 |
-| 2 | 0.0156 | 0.0151 | 0.0010 | 0.0015 |
+| 0 | 0.0114 | 0.0114 | 0.0041 | 0.0048 |
+| 1 | 0.0118 | 0.0113 | 0.0005 | 0.0006 |
+| 2 | 0.0156 | 0.0145 | 0.0010 | 0.0016 |
 
 The test asks that MLX's gradient error be at most 1.5 times torch's own plus 1e-3, and that both losses be within 1%
 of the float32 loss.
@@ -1013,9 +1169,9 @@ would compute:
 
 | seed | gradient error against float32, torch | MLX | MLX with the matrices in bf16 |
 | --- | --- | --- | --- |
-| 0 | 0.0098 | 0.0102 | 0.57 |
-| 1 | 0.0118 | 0.0118 | 0.87 |
-| 2 | 0.0109 | 0.0114 | 0.60 |
+| 0 | 0.0098 | 0.0095 | 0.61 |
+| 1 | 0.0118 | 0.0124 | 0.70 |
+| 2 | 0.0109 | 0.0112 | 0.66 |
 
 - **Larger adapters are noisier.** In a two-layer variant with adapter matrices three times larger, the gradient
   errors ran from 1% to 10% on both sides over six seeds, with MLX between 0.5 and 1.5 times torch's (a probe, not a
@@ -1054,8 +1210,16 @@ of adapter names in the dict of constants. The arrays in it are left as the same
 | `test_no_gradient_for_the_base_or_the_assistant` | gradients for the trainable group only |
 | `test_the_targets_sign_reaches_the_loss_and_the_gradient` | the target's sign, against a target solved from the step equation |
 | `test_gradients_over_a_bf16_base_track_torchs` (×3) | bf16 base, float32 factors: MLX's error against torch's own |
-| `test_products_with_float32_matrices_are_float32_over_a_bf16_base` (×3) | the trainable products are float32: an adapter that bf16 products get 57% to 87% wrong |
-| `test_the_training_forward_is_the_sampling_forward` (×6) | the staged forward's loss is `ops.dit_forward`'s, bit for bit |
+| `test_products_with_float32_matrices_are_float32_over_a_bf16_base` (×3) | the trainable products are float32: an adapter that bf16 products get 61% to 70% wrong |
+| `test_the_training_forward_is_the_sampling_forward` (×9) | the staged forward's loss is `ops.dit_forward`'s: bit for bit in float32 and over a bf16 base at a head width of 64, within 0.2% at 32 |
+| `test_gradients_through_sharp_attention_over_a_bf16_base` (×6) | scores in the tens of thousands over a bf16 base: the loss bit for bit, the gradient against a by-hand float32 attention, and the bf16 call's a hundred times off at least |
+| `test_gradients_through_sharp_attention_in_float32_are_torchs` (×6) | the same in float32 against torch and PEFT |
+| `test_training_attention_backward_is_torchs_at_every_logit_scale` (×12) | the op in bf16 and float16 against torch's float32 gradient, at scores of 140, 13,000 and 119,000, on both devices |
+| `test_the_sampling_attentions_backward_in_bf16_goes_wrong_as_logits_grow` | what the bf16 call does at a score of 119,000 on MLX 0.32.4: a hundred times too large on the default device, wrong for q and k on the CPU stream |
+| `test_training_attention_forward_is_the_sampling_attentions` (×4), `test_where_the_bf16_call_computes_in_bf16_the_training_attention_is_close_not_equal` (×2) | the forward: the same bits at head widths of 64 and 128, close and more exact at 32 |
+| `test_training_attention_dtypes` (×3), `test_training_attention_takes_a_mask` | float32 untouched; half precision in and out; the mask |
+| `test_the_sampling_forward_keeps_the_half_precision_call` | sampling does not run the training attention |
+| `test_rms_norm_backward_in_bf16_is_torchs` (×32) | the RMS norm's bf16 backward at extreme inputs, on both devices |
 | `test_the_training_gathers_gradient_is_torchs_index_select` (×3) | the gather's gradient against torch's, bit for bit in bf16 and float16; the two gathers' forward values the same bits |
 | `test_a_tables_gradient_over_a_bf16_base_is_the_rows_sum` | the whole gradient at 2,316 rows against a reference with nothing to sum |
 | `test_the_loss_refuses_matrices_the_forward_would_not_read`, `test_the_loss_refuses_a_text_of_the_wrong_shape` | what `check_inputs` refuses, and what each case did without it |
@@ -1130,40 +1294,44 @@ ways: through the sampling forward with its evals, plain, checkpointed, block by
 | 596 rows | 4 blocks | 8 blocks | 16 blocks | growth per block |
 | --- | ---: | ---: | ---: | ---: |
 | default device: through the sampling forward | 69 | 136 | 271 | 16.9 |
-| default device: plain | 68 | 106 | 153 | 7.1 |
-| default device: checkpointed | 76 | 78 | 100 | 2.0 |
-| default device: block by block | 30 | 31 | 30 | 0.0 |
+| default device: plain | 84 | 131 | 190 | 8.9 |
+| default device: checkpointed | 88 | 91 | 115 | 2.2 |
+| default device: block by block | 35 | 37 | 37 | 0.2 |
 | CPU stream: through the sampling forward | 80 | 159 | 316 | 19.7 |
-| CPU stream: plain | 33 | 59 | 109 | 6.3 |
-| CPU stream: checkpointed | 20 | 21 | 43 | 1.9 |
-| CPU stream: block by block | 17 | 17 | 18 | 0.1 |
+| CPU stream: plain | 43 | 76 | 139 | 8.0 |
+| CPU stream: checkpointed | 23 | 23 | 46 | 1.9 |
+| CPU stream: block by block | 21 | 21 | 22 | 0.1 |
 
 | 2,324 rows | 4 blocks | 8 blocks | 16 blocks | growth per block |
 | --- | ---: | ---: | ---: | ---: |
 | default device: through the sampling forward | 468 | 784 | 1564 | 91.4 |
-| default device: plain | 509 | 672 | 1047 | 44.8 |
-| default device: checkpointed | 431 | 442 | 536 | 8.7 |
-| default device: block by block | 166 | 168 | 172 | 0.5 |
+| default device: plain | 780 | 1032 | 1625 | 70.4 |
+| default device: checkpointed | 652 | 653 | 741 | 7.4 |
+| default device: block by block | 235 | 237 | 234 | -0.1 |
 | CPU stream: through the sampling forward | 437 | 871 | 1739 | 108.5 |
-| CPU stream: plain | 228 | 390 | 715 | 40.7 |
-| CPU stream: checkpointed | 119 | 119 | 208 | 7.4 |
-| CPU stream: block by block | 109 | 111 | 116 | 0.5 |
+| CPU stream: plain | 362 | 615 | 1118 | 63.0 |
+| CPU stream: checkpointed | 182 | 186 | 273 | 7.6 |
+| CPU stream: block by block | 175 | 180 | 182 | 0.6 |
 
 What the numbers show, and what they do not:
 
-- **Differentiating the sampling forward as it is grows fastest,** on both devices, and at 16 blocks it is the
-  largest number in every table. Taking the evals out of the forward (plain) cuts the growth to between a third and
-  a half.
+- **Differentiating the sampling forward as it is grows fastest,** on both devices. Taking the evals out of the
+  forward (plain) cuts the growth to between two fifths and about three quarters. The plain gradient starts higher
+  than it did, because the training forward's attention is float32 (§7.1) and at this model's head width MLX then
+  holds float32 scores, 43 MB a block at 2,324 rows: at 16 blocks and 2,324 rows on the default device it is the
+  largest number in its table (1,625 MB against 1,564). The row through the sampling forward is what it was, its
+  attention still the bf16 call.
 - **Block by block is nearly flat.** Its growth per block is the saved input: 596 rows × 96 × 2 bytes is 0.11 MB, and
   2,324 rows is 0.45 MB.
 - **Checkpointing saves less, and less predictably.** On this model it grows more slowly than plain on both devices.
   On the sixteen-block chain of §8.1, which the script also prints, it saves a third on the CPU stream (86 MB plain,
   55 MB checkpointed) and nothing on the default device (195 MB plain, 209 MB checkpointed), where one evaluation
   holds its buffers until the device has run them. What it saves depends on the device and on the graph.
-- **Time.** At 16 blocks the two bounded ways took 1.3 to 2 times the plain gradient's time on the default device
-  and 1.5 to 1.6 times on the CPU stream (one run each; the script prints the seconds).
-- **The default device's numbers move between runs,** by tens of MB in some cells: the checkpointed gradient at 4
-  blocks and 596 rows measured 54 MB in one run and 76 MB in another. The CPU stream's repeat.
+- **Time.** At 16 blocks the two bounded ways took 1.2 to 1.8 times the plain gradient's time on the default device
+  and 1.2 to 1.4 times on the CPU stream (one run each; the script prints the seconds).
+- **The default device's numbers move between runs,** by tens of MB in some cells: before the attention's change,
+  the checkpointed gradient at 4 blocks and 596 rows measured 54 MB in one run and 76 MB in another. The CPU
+  stream's repeat.
 - **The number is MLX's counter.** `mx.get_peak_memory()` counts active buffers; what MLX holds in its buffer cache
   is not in it.
 - **Nothing here predicts 50 real blocks.** The real model has hidden size 5,376, tens of thousands of rows and an
@@ -1184,6 +1352,7 @@ The checkpointed path is not asserted on the default device.
 | --- | --- |
 | `test_checkpointed_loss_is_the_loss` (×2) | checkpointing changes no value: the loss bit for bit |
 | `test_bounded_gradients_equal_the_plain_gradient` (×24) | both ways against the plain gradient: float32 and bf16 base, one and two adapters, adapters on every linear and on the block linears |
+| `test_bounded_gradients_through_sharp_attention_over_a_bf16_base` (×4) | attention scores in the tens of thousands over a bf16 base: each way is the plain gradient exactly, and with the bf16 attention call it is a thousand times as large or not finite |
 | `test_bounded_gradients_at_other_levels_and_layouts` (×2) | text-to-image and two references, a shared timestep, a loss weight |
 | `test_bounded_gradients_over_a_quantized_base` (×2) | quantized weights captured by a checkpoint, and as constants of each product |
 | `test_bounded_gradients_refuse_what_the_loss_refuses` (×3) | `check_inputs` before anything is computed |
@@ -1759,6 +1928,7 @@ On real weights this path has never run.
 | `test_the_loop_overfits_one_example` | the loss falls on one example; the adapter file |
 | `test_the_record_holds_the_run` | every argument, the versions, the seed, the step, a line per step; each example once a pass |
 | `test_weighting_and_density_reach_the_loop`, `test_the_two_bounded_gradients_train_the_same_weights`, `test_a_frozen_assistant_is_used_and_not_saved`, `test_a_bf16_base_trains` | the options |
+| `test_a_bf16_base_with_sharp_attention_trains_on_the_right_gradient` | a bf16 base with attention scores in the tens of thousands: the logged loss and norm of the first step against the step by hand with a float32 attention written out, and what the script logs with the bf16 attention call put back |
 | `test_the_wall_clock_stops_the_session_and_the_run_resumes`, `test_the_memory_limit_stops_the_session`, `test_max_steps_finishes_the_run_and_a_resume_can_extend_it` | each limit stops the run |
 | `test_sigterm_stops_at_the_next_boundary_with_a_checkpoint`, `test_a_second_process_is_refused_and_sigterm_stops_the_first_cleanly` | SIGTERM: a clean stop with a checkpoint, in this process and in another; two processes on one run directory |
 | `test_one_session_in_a_run_directory_at_a_time`, `test_a_new_run_overwrites_nothing` (×3) | the run directory's lock; a new run and the three outputs |
@@ -2046,6 +2216,12 @@ Each wrong implementation below was made on a copy of the sources and run agains
 | an unsigned 64-bit tensor without a size; an unknown dtype as a `KeyError` | `test_every_safetensors_dtype_has_a_size` |
 | a published entry's tensors removed, or the whole entry rolled back, when the directory will not flush after the record's rename; that failure raised as a plain I/O error; no flush between the two renames, or one that fails without cleanup | `test_a_failure_after_the_records_rename_keeps_the_entry`, `test_a_write_that_fails_leaves_no_entry` |
 | a checkpoint removed when its directory will not flush, or left out of the record's list though it stands | `test_a_failure_after_a_rename_removes_nothing` |
+| the training attention left as the bf16 call, for bf16 or for float16; its result not cast back; its mask dropped | `test_training_attention_backward_is_torchs_at_every_logit_scale`, `test_training_attention_takes_a_mask` |
+| the attention argument not passed on by `attn_block`, by `dit_block`, by the token refiner or by `dit_inputs`; the training forward's blocks, or its start, left on the sampling attention | `test_gradients_through_sharp_attention_over_a_bf16_base` |
+| the sampling forward given the training attention, looked up when it runs or captured as a default | `test_the_sampling_forward_keeps_the_half_precision_call` |
+
+Two changes to the training attention are not caught, because on this MLX they change nothing: widening q and k
+and not v, or v and not q and k. The call promotes the rest to float32 itself.
 
 One change in this list is caught by a narrow margin. The block-by-block gradient's forward walk evaluates each block
 before the next; without that evaluation the gradients are the same and only the memory differs, on the default
@@ -2060,8 +2236,16 @@ must be cast to bf16 before the subtraction.
 
 ## 14. Not done, and open
 
-**What a first run on real weights would still need.** None of it is built or measured:
+**What a run on real weights still needs.** A first one has been made, and the first item is what it found. The
+items after it were written before that run and stand as they were: none of what they name is built, and the run's
+own measurements are not in this guide.
 
+- **What the first real run found.** Its loss was finite and plausible while its gradients were wrong by orders of
+  magnitude: the attention's backward pass in bf16 on MLX 0.32.4 (§7.1). No tiny model had shown it, because theirs
+  have attention scores in the tens and a head width MLX's fused kernels do not take. The training forward's
+  attention is float32 now, and `sharp_setup` gives the tests a model with scores in the tens of thousands at such a
+  width. A run has to be made
+  again to know what else the real model does that the tiny ones do not.
 - **A run at real size at all.** The script has loaded a tiny random transformer and nothing else. Its first real
   step is the first time the block-by-block gradient runs over 50 real blocks, and the first time the encode path
   runs the real VAE and text encoder.
