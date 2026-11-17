@@ -202,6 +202,18 @@ def check_scale(scale) -> None:
         raise ValueError(f"an adapter's scale must be a finite number, got {scale!r}")
 
 
+def check_scalings(adapter: Adapter, scale) -> None:
+    """Every module's scaling at `scale`, `scale * alpha / rank`, is finite in float32, the dtype the forward
+    multiplies by. A scale can be finite as a Python float and still overflow there (1e40 does), which would put an
+    infinity into every Linear the adapter is on."""
+    check_scale(scale)
+    for module in adapter.modules:
+        scaling = scale * adapter.alpha[module] / adapter.rank(module)
+        if not mx.isfinite(mx.array(scaling, dtype=mx.float32)).item():
+            raise ValueError(f"{module}: scale {scale!r} times alpha / rank is {scaling!r}, which is not finite in "
+                             "float32, the dtype the forward multiplies by")
+
+
 def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None,
            scale: float = 1.0) -> dict:
     """The transformer's weights with the adapter beside them, for `ops.plinear`; `params` is not modified.
@@ -209,7 +221,8 @@ def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, 
     By default each matrix is cast to its base weight's dtype, as PEFT's injection does (`load_lora_adapter`, and
     `hyperflow.attach`). `keep_dtype=True` leaves the adapter as it is: float32 factors over a bf16 base, what
     `cast_training_params` gives a trainer (and what diffusers' `low_cpu_mem_usage=True` loading gives a float32 file).
-    A module whose scaling is not 1 also gets a `lora_scaling` entry.
+    A module whose scaling is not 1 also gets a `lora_scaling` entry, in float32; a scaling that is finite as a Python
+    float and not in float32 (a scale of 1e40) is refused.
 
     `scale` is the adapter's strength, 1.0 being as trained: each module's scaling becomes `scale * alpha / rank`,
     computed in that order, which is PEFT's `set_scale` and so what diffusers' `set_adapters(name, weights=scale)`
@@ -223,7 +236,7 @@ def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, 
     only list or carry a scaling for, which is what the frozen half of `split` looks like (`join` is the way back
     from it); attaching onto that half would name the adapter twice on each Linear and apply it twice."""
     check(adapter, cfg)
-    check_scale(scale)
+    check_scalings(adapter, scale)
     if name is None:
         taken = [m for m in adapter.modules if _carries_lora(params, m)]
         if taken:
@@ -667,6 +680,8 @@ def read(tensors: dict, header: dict | None = None, prefix: str | None = None, h
     ranks = {m: int(tensors[m + ".lora_B.weight"].shape[1]) for m in by_module}
 
     config = json.loads(header[METADATA_KEY]) if header.get(METADATA_KEY) else None
+    if config is not None and not isinstance(config, dict):
+        raise ValueError(f"{METADATA_KEY} is not a JSON object (got a {type(config).__name__})")
     if config is not None and prefix is not None:
         config = {k.removeprefix(prefix + "."): v for k, v in config.items() if k.startswith(prefix + ".")}
     if config is not None:
@@ -724,7 +739,9 @@ def for_sampling(params: dict, cfg: dict, adapter: Adapter, scale) -> dict:
     negative zero in a Linear's output becomes a positive one.
 
     Whatever the scale, the adapter is checked against the transformer and its matrices are read and must be finite:
-    one NaN in an adapter is a NaN in every picture, and here it is refused before anything else runs."""
+    one NaN in an adapter is a NaN in every picture, and here it is refused before anything else runs. They must
+    stay finite once cast to their base weight's dtype too: a float32 factor of 1e5 is an infinity over a float16
+    base (the release's bf16 has float32's range)."""
     check_scale(scale)
     check(adapter, cfg)
     finite = {key: mx.isfinite(tensor).all() for key, tensor in adapter.tensors.items()}
@@ -732,9 +749,21 @@ def for_sampling(params: dict, cfg: dict, adapter: Adapter, scale) -> dict:
     bad = sorted(key for key, ok in finite.items() if not ok.item())
     if bad:
         raise ValueError(f"{len(bad)} of the adapter's {len(finite)} matrices hold a NaN or an infinity, e.g. {bad[:3]}")
+    taken = [m for m in adapter.modules if _carries_lora(params, m)]
+    if taken:  # `attach` refuses this too; checked here so that scale 0 does not pass weights that run another adapter
+        raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: the sampler takes the base "
+                         "weights and one adapter")
     if scale == 0:
         return params
-    return attach(params, cfg, adapter, scale=scale)
+    out = attach(params, cfg, adapter, scale=scale)
+    cast = {runtime_key(m, x): out[runtime_key(m, x)] for m in adapter.modules for x in ("A", "B")}
+    finite = {key: mx.isfinite(tensor).all() for key, tensor in cast.items()}
+    mx.eval(finite)
+    bad = sorted(key for key, ok in finite.items() if not ok.item())
+    if bad:
+        raise ValueError(f"{len(bad)} of the adapter's {len(finite)} matrices are finite in the file and not in their "
+                         f"base weight's dtype, e.g. {bad[:3]}")
+    return out
 
 
 def from_header(path, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
@@ -752,8 +781,12 @@ def from_header(path, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Ad
     if not isinstance(header, dict):
         raise ValueError(f"{path}: not a safetensors header")
     metadata = header.pop("__metadata__", None) or {}
-    if not all(isinstance(entry, dict) and isinstance(entry.get("shape"), list) for entry in header.values()):
-        raise ValueError(f"{path}: not a safetensors header")
+    if not (isinstance(metadata, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in metadata.items())):
+        raise ValueError(f"{path}: not a safetensors header (its __metadata__ is not a map of strings to strings)")
+    dims_ok = lambda shape: all(type(d) is int and 0 <= d < 2**31 for d in shape)  # noqa: E731 (bool is not int here)
+    if not all(isinstance(entry, dict) and isinstance(entry.get("shape"), list) and dims_ok(entry["shape"])
+               for entry in header.values()):
+        raise ValueError(f"{path}: not a safetensors header (a tensor without a shape of non-negative integers)")
     stand_ins = {key: mx.ones(()) if key.endswith(".alpha") else mx.zeros(tuple(entry["shape"]))
                  for key, entry in header.items()}
     return read(stand_ins, metadata, prefix, head_dim)
@@ -774,9 +807,10 @@ def summary(adapter: Adapter, scale=1.0) -> dict:
     """What an adapter is, for a plan or a record: how many Linears it is on and which (each kind of Linear with the
     blocks it covers, `*` standing for the block's index; a Linear outside the blocks maps to None), the ranks and
     alphas in use, the scalings the forward multiplies by at `scale` (`scale * alpha / rank`), and the number of
-    parameters. From shapes alone, so it works on `from_header`'s stand-ins."""
+    parameters. From shapes alone, so it works on `from_header`'s stand-ins; a scale whose scalings overflow float32 is
+    refused here as `attach` refuses it, so a plan does not pass what the run would refuse."""
     check_keys(adapter)
-    check_scale(scale)
+    check_scalings(adapter, scale)
     kinds = {}
     for module in adapter.modules:
         m = re.match(r"^(.*?)\.(\d+)\.(.*)$", module)

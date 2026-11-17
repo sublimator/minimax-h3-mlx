@@ -167,4 +167,7 @@ def safetensors_header(path) -> dict:
         (length,) = struct.unpack("<Q", head)
         if not 0 < length <= 100_000_000:
             raise ValueError(f"{path}: not a safetensors file (header length {length})")
-        return json.loads(f.read(length))
+        raw = f.read(length)
+        if len(raw) != length:
+            raise ValueError(f"{path}: not a safetensors file (a header of {length} bytes, {len(raw)} in the file)")
+        return json.loads(raw)

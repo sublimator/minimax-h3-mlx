@@ -252,7 +252,9 @@ def main(argv=None, clock=time.monotonic) -> int:
             entries = [cache.read(cache_dir, r) for r in asked]
             return trainer.train_session(
                 session, entries, load_weights=lambda: load.load_transformer(weights / "transformer")[0],
-                load_assistant=(lambda: lora.load(assistant)) if assistant else None, plan=plan,
+                load_assistant=((lambda: lora.load(assistant, head_dim=cfg["attention_head_dim"]))
+                                if assistant else None),
+                plan=plan,
                 command=sys.argv[1:] if argv is None else [str(a) for a in argv], clock=clock, log=log)
     except trainer.Refused as e:
         ap.error(str(e))

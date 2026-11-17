@@ -261,8 +261,49 @@ def test_for_sampling_refuses():
     for scale in (1.0, 0):
         with pytest.raises(ValueError, match="do not fit the Linear"):
             lora.for_sampling(base, cfg, misfit, scale)
-    with pytest.raises(ValueError, match="already carry a LoRA"):
-        lora.for_sampling(lora.attach(base, cfg, adapter), cfg, adapter, 1.0)
+    for scale in (1.0, 0):  # at 0 too: the weights handed back would run the adapter already on them
+        with pytest.raises(ValueError, match="already carry a LoRA"):
+            lora.for_sampling(lora.attach(base, cfg, adapter), cfg, adapter, scale)
+
+
+def test_a_scale_finite_in_python_and_not_in_float32_is_refused():
+    """A finite scale whose scaling, `scale * alpha / rank`, overflows float32 (the dtype the forward multiplies by)
+    would put an infinity into every Linear the adapter is on. Refused at `attach`, so `for_sampling` refuses it too;
+    the largest float32 scaling is still taken."""
+    model = randomised(TINY, 2)
+    cfg = dict(model.config)
+    base = state_mx(model)
+    adapter = mixed(cfg)
+    for bad in (1e40, -1e40, 1e308):
+        with pytest.raises(ValueError, match="not finite in float32"):
+            lora.attach(base, cfg, adapter, scale=bad)
+        with pytest.raises(ValueError, match="not finite in float32"):
+            lora.for_sampling(base, cfg, adapter, bad)
+    biggest = float(np.finfo(np.float32).max) / 2.5  # the largest alpha / rank here is 1.5: still finite
+    got = lora.attach(base, cfg, adapter, scale=biggest)
+    assert all(np.isfinite(got[m + lora.SCALING].item()) for m in adapter.modules)
+
+
+def test_factors_finite_in_the_file_and_not_in_the_base_dtype_are_refused():
+    """The file's matrices are checked as they are, then again once cast to their base weight's dtype: a float32 factor
+    of 1e5 is finite and is an infinity in float16 (largest 65,504). bf16 has float32's range, so the same file over a
+    bf16 base is taken."""
+    model = randomised(TINY, 2)
+    cfg = dict(model.config)
+    adapter = mixed(cfg)
+    key = adapter.modules[3] + ".lora_B.weight"
+    tensors = dict(adapter.tensors)
+    big = np.array(tensors[key])
+    big[1, 2] = 1e5
+    tensors[key] = mx.array(big)
+    wide = lora.Adapter(tensors, dict(adapter.alpha))
+    half = {k: v.astype(mx.float16) for k, v in state_mx(model).items()}
+    refused = f"1 of the adapter's {len(tensors)} matrices are finite in the file and not in their base weight's dtype"
+    with pytest.raises(ValueError, match=f"{refused}.*{key}"):
+        lora.for_sampling(half, cfg, wide, 1.0)
+    bf16 = {k: v.astype(mx.bfloat16) for k, v in state_mx(model).items()}
+    got = lora.for_sampling(bf16, cfg, wide, 1.0)
+    assert np.isfinite(to_np(got[key].astype(mx.float32))).all()
 
 
 def test_a_quantized_base_keeps_the_adapter_dense():
@@ -364,6 +405,66 @@ def test_from_header_refuses_what_is_not_a_lora_file(tmp_path):
         lora.from_header(tmp_path / "half.safetensors")
     with pytest.raises(FileNotFoundError):
         lora.from_header(tmp_path / "absent.safetensors")
+
+
+def test_from_header_refuses_a_malformed_header_as_a_value_error(tmp_path):
+    """The sampler turns a ValueError from the header into an argument error, before a model loads. Each of these
+    used to escape as another exception (a TypeError, MLX's `std::bad_cast`, an AttributeError) or to be read as if
+    whole (a header shorter than it says)."""
+    def write(name, header: str, length=None):
+        path = tmp_path / f"{name}.safetensors"
+        path.write_bytes((len(header.encode()) if length is None else length).to_bytes(8, "little") + header.encode())
+        return path
+
+    def entry(key, shape):
+        return f'"{key}": {{"dtype": "F32", "shape": {shape}, "data_offsets": [0, 0]}}'
+
+    a, b = entry("t.lora_A.weight", "[4, 8]"), entry("t.lora_B.weight", "[8, 4]")
+    strings, shape = "__metadata__ is not a map of strings to strings", "shape of non-negative integers"
+    cases = {
+        "truncated": (write("truncated", "{" + a + "}", length=5000), "a header of 5000 bytes"),
+        "metadata a list": (write("meta-list", '{"__metadata__": [1, 2], ' + a + "}"), strings),
+        "metadata not strings": (write("meta-int", '{"__metadata__": {"alpha": 8}, ' + a + "}"), strings),
+        "shape of text": (write("shape-text", "{" + entry("t.lora_A.weight", '["x", 4]') + "}"), shape),
+        "shape of bools": (write("shape-bool", "{" + entry("t.lora_A.weight", "[true, 4]") + "}"), shape),
+        "negative shape": (write("shape-neg", "{" + entry("t.lora_A.weight", "[-1, 4]") + "}"), shape),
+        "lora metadata a list": (write("lora-meta", '{"__metadata__": {"lora_adapter_metadata": "[1, 2]"}, '
+                                       + a + ", " + b + "}"), "is not a JSON object"),
+    }
+    for what, (path, message) in cases.items():
+        with pytest.raises(ValueError, match=message):
+            lora.from_header(path)
+
+
+def test_the_sampler_reads_an_original_file_at_the_transformers_head_width(tmp_path):
+    """A DiffSynth-Studio file fuses q, k and v per head; reading it takes the head width, and the sampler's plan now
+    passes the transformer's. At TINY's 2 x 32 the default of 128 refused a file that fits; at 4 x 32 (128 wide in all)
+    it would have split q, k and v at the wrong stride with no error. The scripts' loads pass it as well."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import run_p_h3_image as R
+
+    for cfg in (dict(TINY), dict(TINY, num_attention_heads=4, attention_head_dim=32)):
+        path = tmp_path / f"diffsynth-{cfg['num_attention_heads']}.safetensors"
+        save_file(original_file(cfg, "diffsynth"), str(path))
+        plan = R.adapter_plan(path, 1.0, cfg)
+        right = lora.load(path, head_dim=cfg["attention_head_dim"])
+        assert plan["modules"] == len(right.modules)
+        assert lora.summary(lora.from_header(path, head_dim=cfg["attention_head_dim"])) == lora.summary(right)
+    for script in ("run_p_h3_image.py", "train_lora.py"):
+        source = (Path(__file__).resolve().parents[1] / "scripts" / script).read_text()
+        loads = [line for line in source.splitlines() if "lora.load(" in line or "lora.from_header(" in line]
+        assert loads and all("head_dim=" in line for line in loads), (script, loads)
+
+
+def test_the_plan_refuses_a_scale_that_overflows_float32(tmp_path):
+    """The plan's summary refuses what `attach` would, so `--plan-only` does not pass a run that would fail."""
+    model = randomised(TINY, 2)
+    adapter = mixed(dict(model.config))
+    with pytest.raises(ValueError, match="not finite in float32"):
+        lora.summary(adapter, 1e40)
 
 
 def test_summary_names_the_linears_the_ranks_and_the_scalings():

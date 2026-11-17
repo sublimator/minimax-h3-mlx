@@ -106,7 +106,7 @@ def adapter_plan(path: Path, scale: float, cfg: dict) -> dict:
     """What `--lora` applies, from the adapter file's header alone (no tensor is read): the file, its hash, the scale,
     and the adapter's Linears, ranks, alphas and scalings (`lora.summary`). An adapter that is not a LoRA file the port
     reads, or that does not fit this transformer's Linears, is a ValueError here."""
-    shapes = lora.from_header(path)
+    shapes = lora.from_header(path, head_dim=cfg["attention_head_dim"])
     lora.check(shapes, cfg)
     return {"path": str(path), "sha256": sha256(path), "bytes": path.stat().st_size, "scale": scale,
             "applied": scale != 0, **lora.summary(shapes, scale)}
@@ -273,7 +273,8 @@ def main(argv=None) -> int:
         c.dit_params, _ = load.load_transformer(weights / "transformer")
         if lora_plan is not None:
             # attached now, to the weights as loaded: the text encoder has not run, and `--quantize` comes after
-            c.dit_params = lora.for_sampling(c.dit_params, c.dit_cfg, lora.load(lora_plan["path"]), args.lora_scale)
+            trained = lora.load(lora_plan["path"], head_dim=c.dit_cfg["attention_head_dim"])
+            c.dit_params = lora.for_sampling(c.dit_params, c.dit_cfg, trained, args.lora_scale)
             if sha256(Path(lora_plan["path"])) != lora_plan["sha256"]:
                 raise RuntimeError(f"--lora: {lora_plan['path']} changed while it was being read; the hash in the "
                                    "plan is not this file's")
