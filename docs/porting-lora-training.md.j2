@@ -1122,7 +1122,7 @@ was tested where a wrong one would hurt: rows far below the epsilon, where the d
 exact zeros, rows of 1e6, affine weights of 40, and rows of every size from 1e-6 to 1e4 at once, at epsilons of 1e-5
 and 1e-6, on both devices. The gradients for the input and for the weight are within 0.5% of torch's float32
 gradients in every case, where torch's own bf16 backward is at 0.3%
-(`test_rms_norm_backward_in_bf16_is_torchs`, and the bench's fourth table). Nothing was changed there. The layer
+(`test_rms_norm_backward_in_bf16_is_torchs`, and the bench's fifth table). Nothing was changed there. The layer
 norm and the attention of the VAEs are fused ops too, and they are in the encoders, which are not differentiated.
 
 ### 7.2 Float32
@@ -2042,6 +2042,25 @@ and the port's is the first: it is a function of the arguments, with nothing to 
   finite, a file that is not there or is not a LoRA file, and an adapter that does not fit this transformer's
   Linears are refused when the arguments are checked, before a model loads and before `run.json` exists. Scale 0
   excuses none of them.
+- **Finite, and still finite where it is used.** A scale can be a finite Python float and overflow float32, the
+  dtype the forward multiplies by, once it is `scale * alpha / rank` (1e40 does): `check_scalings` refuses it, in
+  the plan's summary and again in `attach`. The adapter's matrices are checked as read and again once cast to their
+  base weight's dtype, since a finite float32 factor can be an infinity in float16 (bf16 has float32's range)
+  (`test_a_scale_finite_in_python_and_not_in_float32_is_refused`,
+  `test_factors_finite_in_the_file_and_not_in_the_base_dtype_are_refused`,
+  `test_the_plan_refuses_a_scale_that_overflows_float32`).
+- **Weights that already carry an adapter are refused at every scale.** At 0 the sampler hands back the weights it
+  was given, so without the check those weights would still run the adapter already on them.
+- **A malformed header is a ValueError, so an argument error.** A header shorter than its stated length, a
+  `__metadata__` that is not a map of strings to strings, a tensor whose shape is not a list of non-negative
+  integers, and a `lora_adapter_metadata` that is not a JSON object are each refused as such
+  (`test_from_header_refuses_a_malformed_header_as_a_value_error`). They used to escape as other exceptions, past
+  the arguments' check.
+- **An original-layout file is read at the transformer's head width.** A DiffSynth-Studio file fuses q, k and v per
+  head (§2.3). The plan, the sampler's load and the training script's `--assistant` pass the transformer's
+  `attention_head_dim`, where they used to take the default of 128: a tiny model's file was refused, and at 4 x 32
+  one would have been split at the wrong stride with no error
+  (`test_the_sampler_reads_an_original_file_at_the_transformers_head_width`).
 - **The record.** `run.json` has the plan's entry, the two arguments, and a `lora` event when the adapter goes on,
   before the run starts. `final_rows.npz` carries the file's path, its hash and the scale in its `source` record
   beside the prompt and the seed, and `null` when there was no adapter; a re-decode (`--decode-from`) reports them as

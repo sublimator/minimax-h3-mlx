@@ -242,12 +242,17 @@ class ExampleForward:
     the heads and the loss). Each stage takes its weights as a dict, so a caller chooses which of them are arguments
     of a transform.
 
-    These are `ops.dit_forward`'s operations in its order, and the loss is the same bit for bit. Three things differ,
-    and none changes a value. Nothing is evaluated between the stages: the sampling forward evaluates after every
-    block, and an array evaluated while it is being traced keeps its graph. The modulation tables' rows are gathered
-    with `ops.take_rows_for_training`, whose gradient over a half-precision table is the sum torch's is. And the
-    attention is `ops.attention_for_training`, which runs half-precision q, k and v through the same call in
-    float32: its backward is then right when attention logits are large, which the half-precision call's is not."""
+    These are `ops.dit_forward`'s operations in its order. Three things differ. Nothing is evaluated between the
+    stages: the sampling forward evaluates after every block, and an array evaluated while it is being traced keeps
+    its graph. The modulation tables' rows are gathered with `ops.take_rows_for_training`, whose gradient over a
+    half-precision table is the sum torch's is. And the attention is `ops.attention_for_training`, which runs
+    half-precision q, k and v through the same call in float32: its backward is then right when attention scores are
+    large, which the half-precision call's is not.
+
+    Where the release runs (MLX's fused kernels on the GPU), none of the three changes a value: the loss is the
+    sampling forward's bit for bit, in float32 and over a bf16 base (tested at head width 64; the release's is 128).
+    Where MLX computes a half-precision attention in half precision instead (head width 32, the CPU), the float32
+    call is the more exact of the two and the losses differ by rounding (within 0.2% on the tiny models)."""
 
     def __init__(self, cfg: dict, example: Example, text: mx.array, weight=None):
         lay = example.layout
