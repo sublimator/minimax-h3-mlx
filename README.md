@@ -220,8 +220,9 @@ relative to the file), its caption and its size:
     {"examples": [{"picture": "front.png", "prompt": "a studio portrait of ohwx man ...", "height": 768, "width": 768}]}
 
 Nothing that decides the training has a default, so put the arguments in a file, one per line (each flag and each
-value on its own line), and pass it with `@`. These are the settings of our fourth run (§14.1 of
-[`docs/porting-lora-training.md`](docs/porting-lora-training.md)), grouped here for reading:
+value on its own line), and pass it with `@`. [`examples/train-lora.args`](examples/train-lora.args) is that file
+with the settings of our fourth run (§14.1 of [`docs/porting-lora-training.md`](docs/porting-lora-training.md));
+the same, grouped here for reading:
 
     --weights P-H3-Image --dataset data/dataset.json --cache-dir data/cache --run-dir runs/run-004
     --rank 16 --alpha 16 --targets attn.to_q,attn.to_k,attn.to_v,attn.to_out.0,ff.net.0.proj,ff.net.2 --refiner
@@ -231,20 +232,22 @@ value on its own line), and pass it with `@`. These are the settings of our four
     --latent-seed 42 --no-latent-float16-round --vae-dtype float32 --text-dtype bfloat16
     --max-steps 1500 --max-seconds 12600 --max-peak-memory-gb 150 --checkpoint-every 250
 
-    uv run python scripts/train_lora.py @run-004.args --plan-only   # sizes and checks, no weights read
-    uv run python scripts/train_lora.py @run-004.args
+    uv run python scripts/train_lora.py @examples/train-lora.args --plan-only   # sizes and checks, no weights read
+    uv run python scripts/train_lora.py @examples/train-lora.args
+    uv run python scripts/train_lora.py @examples/train-lora.args --resume      # after a stop, from its checkpoint
 
 The assistant is ostris's P-H3-Image training adapter (`ostris/minimax_h3_training_adapter`,
 `p_h3_image_training_adapter_v1.safetensors`): P-H3-Image is step- and guidance-distilled, and training on it without
 the adapter left the early checkpoints soft and smeared. Each checkpoint's `adapter.safetensors` samples with
 `run_p_h3_image.py --lora PATH --lora-scale 1.0`; the assistant is not used at sampling. SIGTERM stops a run with a
-checkpoint, and the same arguments resume it.
+checkpoint, and the same arguments with `--resume` continue it.
 
 **Measured on the M3 Ultra** (MLX 0.32.4, bf16 transformer, the block-by-block gradient): 6.4 to 6.9 s a step at
 768 x 768 with an MLX peak of 70 GB; 22.5 s a step at 1536 x 1536 with 73 GB. With the assistant and the attention
-fix, a person's face reached a face-recognition similarity of 0.73 to 0.82 on a portrait prompt by step 500 to 750,
-and 0.45 to 0.58 in new scenes; at 768 the adapters learned the face's structure and styling, not fine skin detail or
-small marks. §14 of the guide has the runs, the table and what is not done.
+fix, one person's face reached a face-recognition similarity (cosine) of 0.73 to 0.82 on a portrait prompt by step
+500 to 750, and 0.35 to 0.58 in two new scenes where the face was turned toward the camera (0.07 where it was turned
+away): one subject, three prompts, one seed. At 768 the adapters learned the face's structure and styling, not fine
+skin detail or small marks. §14 of the guide has the runs, the table and what is not done.
 
 ## Licence
 

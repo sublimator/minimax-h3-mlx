@@ -2269,8 +2269,8 @@ weighting; the block-by-block gradient (§8.2).
 | --- | --- | --- | --- | --- | --- |
 | 1 | (the attention's backward in bf16, below) | 300 | 6.3 s | 69.7 GB | up to 3.6e8 |
 | 2 | the training forward's attention in float32 (§7.1) | 300 | 6.4 s | 70.0 GB | 1.21 at most |
-| 3 | the public training adapter as a frozen assistant (§5.4) | 770, stopped | 6.4 s | 70.2 GB | |
-| 4 | the token refiner's blocks trained too; two pictures with tiny faces dropped; eps 1e-6, weight decay 1e-4 | 758, stopped | 6.9 s | 70.2 GB | |
+| 3 | the public training adapter as a frozen assistant (§5.4) | 770, stopped | 6.4 s | 70.2 GB | 5.14 at most |
+| 4 | the token refiner's blocks trained too; two pictures with tiny faces dropped; eps 1e-6, weight decay 1e-4 | 758, stopped | 6.9 s | 70.2 GB | 1.88 at most |
 | shape test | 20 pictures at 1536 x 1536 | 3 | 22.5 s | 73.3 GB | |
 
 Runs 3 and 4 were stopped by SIGTERM once their checkpoints had answered what they were for; each wrote its
@@ -2282,9 +2282,11 @@ the probabilities, so in bf16 a large score loses enough bits to put a large err
 0.32.3 and earlier give bounded gradients on the same inputs, and MLX's main branch at `fc344c98` (2026-11-17) gives
 0.32.4's numbers. The training forward's attention runs in float32; sampling is unchanged.
 
-**The assistant matters on this base.** At the first step, on the same picture and noise level, the loss was 1.62
-without the training adapter and 0.39 with it. Without it the early checkpoints sampled soft and smeared, as
-ai-toolkit's notes on this distilled model say; with it they sampled sharp.
+**The assistant changes the fit on this base.** At the first step, on the same picture and noise level, the loss was
+1.62 without the training adapter and 0.39 with it. In these runs the early checkpoints without it sampled soft and
+smeared, as ai-toolkit's notes on this distilled model would lead one to expect, and those with it sampled sharp; that
+is an observation, not an isolated experiment (the first were sampled at 1024 x 1024, the second at 2048 x 2048 and
+after more steps).
 
 **Likeness.** Each checkpoint was sampled with `run_p_h3_image.py --lora` at scale 1.0, 2048 x 2048, seed 0, on a
 portrait prompt like the captions and two new scenes, and the face scored with a face-recognition model (InsightFace
@@ -2313,7 +2315,7 @@ with one portrait of him as Picture 1 and no adapter scored 0.74 to 0.95 on the 
   `adapter.safetensors` is one, so a run can be looked at by hand (§14.1 was made that way). The training script does
   not sample, and it computes no validation loss.
 - **The recipe's settings, from the recipe.** ai-toolkit's settings for this model were read on its main branch at
-  `7a5fe1a8` after the runs: the training adapter on by default, rank 16 and alpha 16, timestep type `shift`, no
+  `7a5fe1a8` after the first runs: the training adapter on by default, rank 16 and alpha 16, timestep type `shift`, no
   guidance loss, and adapters on every `Linear` whose name holds `blocks`, which includes the token refiner's; its
   general job defaults are 3,000 steps, learning rate 1e-4, `adamw8bit` with eps 1e-6 and weight decay 1e-4, caption
   dropout 0.05, and resolution buckets of 512, 768 and 1024. The script still takes every setting as an argument and
@@ -2355,7 +2357,7 @@ with one portrait of him as Picture 1 and no adapter scored 0.74 to 0.95 on the 
   Lanczos on 8-bit pixels for both sizing rules (§10.3).
 - **An encoder's identity does not read its weights** (§10.1): a weight file swapped for another of the same name and
   size is not noticed by the cache or by a resume.
-- **The recipe's unread parts.** Its settings were read after the runs (§14.2); how its trainer mixes the picture
+- **The recipe's unread parts.** Its settings were read after the first runs (§14.2); how its trainer mixes the picture
   with noise was not, beyond §6.1. No preset is defined.
 - **The assistant adapter's values.** Read and attached in runs 3 and 4 (§14.1); its header says ai-toolkit 0.13.40,
   3,250 steps. Its values are not otherwise checked.
