@@ -1,3 +1,17 @@
+<!--
+rendered_from: porting-lora-training.md.j2
+rendered_at: 2026-11-17T00:53:26Z
+branch: train-lora-review-fixes
+commit: 3e47ce1
+commit_message: docs: the staged forward's bit equality scoped to the fused path; the sampler's new refusals in the guide
+-->
+
+---
+
+<sub>Last updated: 2026-11-17 | branch: train-lora-review-fixes | commit: 3e47ce1 (docs: the staged forward's bit equality scoped to the fused path; the sampler's new refusals in the guide)</sub>
+
+---
+
 # Porting LoRA training to MLX, part 1: PEFT and diffusers → `h3mlx`
 
 This guide covers the first pieces a LoRA trainer for the MLX transformer needs, each ported op by op and tested
@@ -109,7 +123,7 @@ PEFT sets the scaling when it builds the layer, and applies it in the forward:
 rank and `hyperflow.attach` refuses anything else. A general adapter needs it, so `plinear` now multiplies when the
 weights carry a scaling, and is unchanged when they don't:
 
-📍 [`src/h3mlx/ops.py:100-105`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/ops.py#L100-L105)
+📍 [`src/h3mlx/ops.py:100-105`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/ops.py#L100-L105)
 ```python
  100 def times_scalar(x: mx.array, s) -> mx.array:
  101     """torch's `tensor * python_float`. A half-precision tensor is multiplied in float32 by the float32 scalar and
@@ -118,7 +132,7 @@ weights carry a scaling, and is unchanged when they don't:
  104         return (x.astype(mx.float32) * s).astype(x.dtype)
  105     return x * s
 ```
-📍 [`src/h3mlx/ops.py:108-146`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/ops.py#L108-L146)
+📍 [`src/h3mlx/ops.py:108-146`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/ops.py#L108-L146)
 ```python
  108 def plinear(x: mx.array, p: dict, name: str, bias: bool = False) -> mx.array:
  109     """The Linear `name` of state dict `p`, plus its LoRA when `name.lora_A.weight` / `name.lora_B.weight` are present.
@@ -197,7 +211,7 @@ alone and must equal PEFT's bit for bit in bf16 and float16; it also checks that
 `kaiming_uniform_(a=sqrt(5))` is a uniform draw in ±bound with bound = √3 · gain / √fan_in and gain = √(2 / (1 + a²)),
 which comes to 1 / √in. `lora_B` is zero, so a new adapter does nothing until it is trained.
 
-📍 [`src/h3mlx/lora.py:138-148`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L138-L148)
+📍 [`src/h3mlx/lora.py:138-148`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L138-L148)
 ```python
  138 def kaiming_uniform(shape, generator) -> np.ndarray:
  139     """`nn.init.kaiming_uniform_(weight, a=math.sqrt(5))` for a (rank, in) `lora_A`, drawn from a torch generator so the
@@ -211,7 +225,7 @@ which comes to 1 / √in. `lora_B` is zero, so a new adapter does nothing until 
  147     bound = math.sqrt(3.0) * std
  148     return torch.empty(tuple(shape), dtype=torch.float32).uniform_(-bound, bound, generator=generator).numpy()
 ```
-📍 [`src/h3mlx/lora.py:151-173`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L151-L173)
+📍 [`src/h3mlx/lora.py:151-173`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L151-L173)
 ```python
  151 def init(cfg: dict, rank: int, alpha: float | None = None, modules=None, seed: int = 0) -> Adapter:
  152     """A new adapter as PEFT initialises one (`init_lora_weights=True`): `lora_A` Kaiming-uniform, `lora_B` zero, so it
@@ -256,7 +270,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
 
 ### 1.3 Attaching, and the dtype
 
-📍 [`src/h3mlx/lora.py:38-63`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L38-L63)
+📍 [`src/h3mlx/lora.py:38-63`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L38-L63)
 ```python
   38 @dataclass
   39 class Adapter:
@@ -285,7 +299,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   62         """`lora_alpha / r`, as PEFT's `update_layer` sets it (without rsLoRA)."""
   63         return self.alpha[module] / self.rank(module)
 ```
-📍 [`src/h3mlx/lora.py:69-82`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L69-L82)
+📍 [`src/h3mlx/lora.py:69-82`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L69-L82)
 ```python
   69 def wired_shapes(cfg: dict) -> dict:
   70     """{module: (out, in)} for every Linear of the transformer, all of which the forward runs through `ops.plinear`:
@@ -302,7 +316,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   81                 "proj_out": (patch_dim, hidden), "audio_proj_out": (cfg["audio_in_channels"], hidden)})
   82     return out
 ```
-📍 [`src/h3mlx/lora.py:114-132`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L114-L132)
+📍 [`src/h3mlx/lora.py:114-132`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L114-L132)
 ```python
  114 def check(adapter: Adapter, cfg: dict) -> None:
  115     """Every module is a Linear of the transformer (the forward applies a LoRA on each of them, and on nothing else: a
@@ -324,58 +338,59 @@ order of the draws, and that the forward with a fresh adapter is the base model'
  131             raise ValueError(f"{module}: LoRA rank must be positive, got {a[0]}")
  132         check_alpha(module, adapter.alpha[module])
 ```
-📍 [`src/h3mlx/lora.py:205-254`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L205-L254)
+📍 [`src/h3mlx/lora.py:217-267`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L217-L267)
 ```python
- 205 def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None,
- 206            scale: float = 1.0) -> dict:
- 207     """The transformer's weights with the adapter beside them, for `ops.plinear`; `params` is not modified.
- 208
- 209     By default each matrix is cast to its base weight's dtype, as PEFT's injection does (`load_lora_adapter`, and
- 210     `hyperflow.attach`). `keep_dtype=True` leaves the adapter as it is: float32 factors over a bf16 base, what
- 211     `cast_training_params` gives a trainer (and what diffusers' `low_cpu_mem_usage=True` loading gives a float32 file).
- 212     A module whose scaling is not 1 also gets a `lora_scaling` entry.
- 213
- 214     `scale` is the adapter's strength, 1.0 being as trained: each module's scaling becomes `scale * alpha / rank`,
- 215     computed in that order, which is PEFT's `set_scale` and so what diffusers' `set_adapters(name, weights=scale)`
- 216     leaves on every layer. Any finite number: a negative one subtracts the adapter's delta, and zero keeps the adapter
- 217     attached with a delta of zero (`for_sampling` leaves it off instead).
- 218
- 219     Without a `name` the adapter is the only one its Linears can carry. With one it is stacked: its matrices go under
- 220     PEFT's runtime names, and the name is appended to each Linear's `lora_adapters`, so adapters apply in the order
- 221     they were attached (`set_active` changes that). A named and an unnamed adapter can't share a Linear, and a name is
- 222     used once: diffusers' `load_lora_adapter` refuses a name already in use too. That includes a name these weights
- 223     only list or carry a scaling for, which is what the frozen half of `split` looks like (`join` is the way back
- 224     from it); attaching onto that half would name the adapter twice on each Linear and apply it twice."""
- 225     check(adapter, cfg)
- 226     check_scale(scale)
- 227     if name is None:
- 228         taken = [m for m in adapter.modules if _carries_lora(params, m)]
- 229         if taken:
- 230             raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: one unnamed adapter per "
- 231                              "Linear; give each a name to stack them")
- 232     else:
- 233         if not name or "." in name:
- 234             raise ValueError(f"an adapter name is a non-empty word without dots, got {name!r}")
- 235         taken = [m for m in adapter.modules if m + ".lora_A.weight" in params]
- 236         if taken:
- 237             raise ValueError(f"{len(taken)} Linear(s) already carry an unnamed LoRA, e.g. {taken[:3]}")
- 238         used = _named_parts(params, name)
- 239         if used:
- 240             raise ValueError(f"the adapter name {name!r} is already in use in these weights ({len(used)} keys, e.g. "
- 241                              f"{used[:2]}). If they are the frozen half of `split`, `join` it with its trainable half; "
- 242                              "a changed adapter goes in as that trainable half, not through a second `attach`")
- 243     out = dict(params)
- 244     for module in adapter.modules:
- 245         dtype = params[module + ".weight"].dtype
- 246         for matrix in ("A", "B"):
- 247             tensor = adapter.tensors[f"{module}.lora_{matrix}.weight"]
- 248             out[runtime_key(module, matrix, name)] = tensor if keep_dtype else tensor.astype(dtype)
- 249         scaling = adapter.scaling(module) if scale == 1.0 else scale * adapter.alpha[module] / adapter.rank(module)
- 250         if scaling != 1.0:
- 251             out[module + SCALING + ("" if name is None else "." + name)] = mx.array(scaling, dtype=mx.float32)
- 252         if name is not None:
- 253             out[module + ADAPTERS] = params.get(module + ADAPTERS, ()) + (name,)
- 254     return out
+ 217 def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None,
+ 218            scale: float = 1.0) -> dict:
+ 219     """The transformer's weights with the adapter beside them, for `ops.plinear`; `params` is not modified.
+ 220
+ 221     By default each matrix is cast to its base weight's dtype, as PEFT's injection does (`load_lora_adapter`, and
+ 222     `hyperflow.attach`). `keep_dtype=True` leaves the adapter as it is: float32 factors over a bf16 base, what
+ 223     `cast_training_params` gives a trainer (and what diffusers' `low_cpu_mem_usage=True` loading gives a float32 file).
+ 224     A module whose scaling is not 1 also gets a `lora_scaling` entry, in float32; a scaling that is finite as a Python
+ 225     float and not in float32 (a scale of 1e40) is refused.
+ 226
+ 227     `scale` is the adapter's strength, 1.0 being as trained: each module's scaling becomes `scale * alpha / rank`,
+ 228     computed in that order, which is PEFT's `set_scale` and so what diffusers' `set_adapters(name, weights=scale)`
+ 229     leaves on every layer. Any finite number: a negative one subtracts the adapter's delta, and zero keeps the adapter
+ 230     attached with a delta of zero (`for_sampling` leaves it off instead).
+ 231
+ 232     Without a `name` the adapter is the only one its Linears can carry. With one it is stacked: its matrices go under
+ 233     PEFT's runtime names, and the name is appended to each Linear's `lora_adapters`, so adapters apply in the order
+ 234     they were attached (`set_active` changes that). A named and an unnamed adapter can't share a Linear, and a name is
+ 235     used once: diffusers' `load_lora_adapter` refuses a name already in use too. That includes a name these weights
+ 236     only list or carry a scaling for, which is what the frozen half of `split` looks like (`join` is the way back
+ 237     from it); attaching onto that half would name the adapter twice on each Linear and apply it twice."""
+ 238     check(adapter, cfg)
+ 239     check_scalings(adapter, scale)
+ 240     if name is None:
+ 241         taken = [m for m in adapter.modules if _carries_lora(params, m)]
+ 242         if taken:
+ 243             raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: one unnamed adapter per "
+ 244                              "Linear; give each a name to stack them")
+ 245     else:
+ 246         if not name or "." in name:
+ 247             raise ValueError(f"an adapter name is a non-empty word without dots, got {name!r}")
+ 248         taken = [m for m in adapter.modules if m + ".lora_A.weight" in params]
+ 249         if taken:
+ 250             raise ValueError(f"{len(taken)} Linear(s) already carry an unnamed LoRA, e.g. {taken[:3]}")
+ 251         used = _named_parts(params, name)
+ 252         if used:
+ 253             raise ValueError(f"the adapter name {name!r} is already in use in these weights ({len(used)} keys, e.g. "
+ 254                              f"{used[:2]}). If they are the frozen half of `split`, `join` it with its trainable half; "
+ 255                              "a changed adapter goes in as that trainable half, not through a second `attach`")
+ 256     out = dict(params)
+ 257     for module in adapter.modules:
+ 258         dtype = params[module + ".weight"].dtype
+ 259         for matrix in ("A", "B"):
+ 260             tensor = adapter.tensors[f"{module}.lora_{matrix}.weight"]
+ 261             out[runtime_key(module, matrix, name)] = tensor if keep_dtype else tensor.astype(dtype)
+ 262         scaling = adapter.scaling(module) if scale == 1.0 else scale * adapter.alpha[module] / adapter.rank(module)
+ 263         if scaling != 1.0:
+ 264             out[module + SCALING + ("" if name is None else "." + name)] = mx.array(scaling, dtype=mx.float32)
+ 265         if name is not None:
+ 266             out[module + ADAPTERS] = params.get(module + ADAPTERS, ()) + (name,)
+ 267     return out
 ```
 
 - **Any `Linear` of the transformer.** PEFT wraps any `nn.Linear` a file names, and diffusers loads a LoRA onto each:
@@ -399,7 +414,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   refuses them, and so do `init`, `read` and `save` (§1.5). `test_alpha_must_be_positive_and_finite` shows PEFT's
   layer taking each of the four and ours refusing it at every entry and exit.
 
-📍 [`src/h3mlx/lora.py:91-100`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L91-L100)
+📍 [`src/h3mlx/lora.py:91-100`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L91-L100)
 ```python
   91 def check_alpha(what: str, alpha) -> None:
   92     """An alpha is a positive, finite number. PEFT takes any: zero leaves an adapter that does nothing and cannot
@@ -412,7 +427,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   99     if not ok:
  100         raise ValueError(f"{what}: lora_alpha is {alpha!r}; it must be a positive, finite number")
 ```
-📍 [`src/h3mlx/lora.py:103-111`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L103-L111)
+📍 [`src/h3mlx/lora.py:103-111`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L103-L111)
 ```python
  103 def check_keys(adapter: Adapter) -> None:
  104     """The tensors are the two matrices of each module that has an alpha, and nothing else: no stray tensor, no half
@@ -502,42 +517,42 @@ float32 run at most 1.5× torch's own, plus 1e-3). Measured relative errors, tor
 1008                         base_layer.weight.data += delta_weight
 ```
 
-📍 [`src/h3mlx/lora.py:388-396`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L388-L396)
+📍 [`src/h3mlx/lora.py:401-409`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L401-L409)
 ```python
- 388 def delta_weight(a: mx.array, b: mx.array, scaling: float) -> mx.array:
- 389     """PEFT's `Linear.get_delta_weight` on CPU: `(B @ A) * scaling`, with half-precision factors multiplied in float32
- 390     and the product cast back to their dtype."""
- 391     dtype = b.dtype
- 392     half = dtype in (mx.float16, mx.bfloat16)
- 393     if half:
- 394         a, b = a.astype(mx.float32), b.astype(mx.float32)
- 395     out = (b @ a) * scaling
- 396     return out.astype(dtype) if half else out
+ 401 def delta_weight(a: mx.array, b: mx.array, scaling: float) -> mx.array:
+ 402     """PEFT's `Linear.get_delta_weight` on CPU: `(B @ A) * scaling`, with half-precision factors multiplied in float32
+ 403     and the product cast back to their dtype."""
+ 404     dtype = b.dtype
+ 405     half = dtype in (mx.float16, mx.bfloat16)
+ 406     if half:
+ 407         a, b = a.astype(mx.float32), b.astype(mx.float32)
+ 408     out = (b @ a) * scaling
+ 409     return out.astype(dtype) if half else out
 ```
-📍 [`src/h3mlx/lora.py:399-420`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L399-L420)
+📍 [`src/h3mlx/lora.py:412-433`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L412-L433)
 ```python
- 399 def merge(params: dict, cfg: dict, adapter: Adapter) -> dict:
- 400     """The transformer's plain weights with the adapter added into them (PEFT's `Linear.merge`: `weight +=
- 401     delta_weight`, in the weight's dtype); `params` is not modified, and the result has its keys and nothing of the
- 402     adapter left to apply.
- 403
- 404     Attaching and merging are alternatives here. Weights that already carry a LoRA, named or not, on one of the
- 405     adapter's Linears are refused: the attached factors would stay in the result, and `plinear` would apply them on top
- 406     of the merged ones. (A PEFT layer holds both states itself, and its forward skips an adapter once it is merged.)
- 407     Not for quantized weights."""
- 408     check(adapter, cfg)
- 409     taken = [m for m in adapter.modules if _carries_lora(params, m)]
- 410     if taken:
- 411         raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: merge into the plain "
- 412                          "weights, not into attached ones (the adapter would be applied twice)")
- 413     out = dict(params)
- 414     for module in adapter.modules:
- 415         w = params[module + ".weight"]
- 416         if isinstance(w, ops.QuantizedWeight):
- 417             raise ValueError(f"{module}: can't merge a LoRA into a quantized weight; merge first, then quantize")
- 418         a, b = adapter.tensors[module + ".lora_A.weight"], adapter.tensors[module + ".lora_B.weight"]
- 419         out[module + ".weight"] = (w + delta_weight(a, b, adapter.scaling(module))).astype(w.dtype)
- 420     return out
+ 412 def merge(params: dict, cfg: dict, adapter: Adapter) -> dict:
+ 413     """The transformer's plain weights with the adapter added into them (PEFT's `Linear.merge`: `weight +=
+ 414     delta_weight`, in the weight's dtype); `params` is not modified, and the result has its keys and nothing of the
+ 415     adapter left to apply.
+ 416
+ 417     Attaching and merging are alternatives here. Weights that already carry a LoRA, named or not, on one of the
+ 418     adapter's Linears are refused: the attached factors would stay in the result, and `plinear` would apply them on top
+ 419     of the merged ones. (A PEFT layer holds both states itself, and its forward skips an adapter once it is merged.)
+ 420     Not for quantized weights."""
+ 421     check(adapter, cfg)
+ 422     taken = [m for m in adapter.modules if _carries_lora(params, m)]
+ 423     if taken:
+ 424         raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: merge into the plain "
+ 425                          "weights, not into attached ones (the adapter would be applied twice)")
+ 426     out = dict(params)
+ 427     for module in adapter.modules:
+ 428         w = params[module + ".weight"]
+ 429         if isinstance(w, ops.QuantizedWeight):
+ 430             raise ValueError(f"{module}: can't merge a LoRA into a quantized weight; merge first, then quantize")
+ 431         a, b = adapter.tensors[module + ".lora_A.weight"], adapter.tensors[module + ".lora_B.weight"]
+ 432         out[module + ".weight"] = (w + delta_weight(a, b, adapter.scaling(module))).astype(w.dtype)
+ 433     return out
 ```
 
 `delta_weight` takes PEFT's CPU path: half-precision factors are multiplied in float32 and the product is cast back.
@@ -838,166 +853,168 @@ The pipeline mixin adds three more rules before any of that, which matter for fi
 
 Ours is one reader for all of it, and one writer:
 
-📍 [`src/h3mlx/lora.py:591-597`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L591-L597)
+📍 [`src/h3mlx/lora.py:604-610`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L604-L610)
 ```python
- 591 def pattern_key(pattern_keys, key_to_match: str) -> str:
- 592     """PEFT's `get_pattern_key`: the first `rank_pattern` / `alpha_pattern` key that matches the module name as a
- 593     regular expression on its last dotted parts, else the name itself."""
- 594     for key in pattern_keys:
- 595         if re.match(rf"(.*\.)?({key})$", key_to_match):
- 596             return key
- 597     return key_to_match
+ 604 def pattern_key(pattern_keys, key_to_match: str) -> str:
+ 605     """PEFT's `get_pattern_key`: the first `rank_pattern` / `alpha_pattern` key that matches the module name as a
+ 606     regular expression on its last dotted parts, else the name itself."""
+ 607     for key in pattern_keys:
+ 608         if re.match(rf"(.*\.)?({key})$", key_to_match):
+ 609             return key
+ 610     return key_to_match
 ```
-📍 [`src/h3mlx/lora.py:600-615`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L600-L615)
+📍 [`src/h3mlx/lora.py:613-628`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L613-L628)
 ```python
- 600 def _component(tensors: dict, prefix: str | None) -> tuple[dict, str | None]:
- 601     """The keys of one component with its prefix removed (`load_lora_adapter(prefix=...)`'s filter), and that prefix.
- 602     With no `prefix` given the file must hold one component, prefixed or not."""
- 603     if prefix == "":
- 604         raise ValueError("an empty prefix names no component: pass None for a file without prefixes")
- 605     found = [p for p in PREFIXES if any(k.startswith(p + ".") for k in tensors)]
- 606     if prefix is None:
- 607         if len(found) > 1:
- 608             raise ValueError(f"this file holds LoRAs for {found}: say which with `prefix=`")
- 609         prefix = found[0] if found else None
- 610         other = () if prefix is None else [k for k in tensors if not k.startswith(prefix + ".")]
- 611         if other:
- 612             raise ValueError(f"keys with and without the `{prefix}.` prefix in one file, e.g. {sorted(other)[:3]}")
- 613     if prefix is None:
- 614         return dict(tensors), None
- 615     return {k.removeprefix(prefix + "."): v for k, v in tensors.items() if k.startswith(prefix + ".")}, prefix
+ 613 def _component(tensors: dict, prefix: str | None) -> tuple[dict, str | None]:
+ 614     """The keys of one component with its prefix removed (`load_lora_adapter(prefix=...)`'s filter), and that prefix.
+ 615     With no `prefix` given the file must hold one component, prefixed or not."""
+ 616     if prefix == "":
+ 617         raise ValueError("an empty prefix names no component: pass None for a file without prefixes")
+ 618     found = [p for p in PREFIXES if any(k.startswith(p + ".") for k in tensors)]
+ 619     if prefix is None:
+ 620         if len(found) > 1:
+ 621             raise ValueError(f"this file holds LoRAs for {found}: say which with `prefix=`")
+ 622         prefix = found[0] if found else None
+ 623         other = () if prefix is None else [k for k in tensors if not k.startswith(prefix + ".")]
+ 624         if other:
+ 625             raise ValueError(f"keys with and without the `{prefix}.` prefix in one file, e.g. {sorted(other)[:3]}")
+ 626     if prefix is None:
+ 627         return dict(tensors), None
+ 628     return {k.removeprefix(prefix + "."): v for k, v in tensors.items() if k.startswith(prefix + ".")}, prefix
 ```
-📍 [`src/h3mlx/lora.py:618-622`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L618-L622)
+📍 [`src/h3mlx/lora.py:631-635`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L631-L635)
 ```python
- 618 def _refuse_dora(keys) -> None:
- 619     """DoRA is not implemented: refuse its keys (diffusers drops a kohya `dora_scale` with a warning, and loads PEFT's
- 620     `lora_magnitude_vector` as DoRA)."""
- 621     if any("dora_scale" in k or "lora_magnitude_vector" in k for k in keys):
- 622         raise NotImplementedError("DoRA adapters are not supported")
+ 631 def _refuse_dora(keys) -> None:
+ 632     """DoRA is not implemented: refuse its keys (diffusers drops a kohya `dora_scale` with a warning, and loads PEFT's
+ 633     `lora_magnitude_vector` as DoRA)."""
+ 634     if any("dora_scale" in k or "lora_magnitude_vector" in k for k in keys):
+ 635         raise NotImplementedError("DoRA adapters are not supported")
 ```
-📍 [`src/h3mlx/lora.py:625-698`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L625-L698)
+📍 [`src/h3mlx/lora.py:638-713`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L638-L713)
 ```python
- 625 def read(tensors: dict, header: dict | None = None, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
- 626     """An adapter from a LoRA file's tensors and its safetensors header (`__metadata__`), as diffusers would load it.
- 627
- 628     Keys: `transformer.<module>.lora_A/B.weight` (what `save_lora_weights` writes and `load_lora_adapter` reads by
- 629     default), the same without the prefix (what `save_lora_adapter` writes), PEFT's own state dict (a `.default.`
- 630     infix), or the original checkpoint's names (`convert_original`, which folds any `.alpha` tensors into the matrices;
- 631     `head_dim` is passed to it).
- 632
- 633     `prefix` picks one component's keys from a file that holds several, as `load_lora_adapter(prefix=...)` does; other
- 634     components' keys are then not looked at. Without it the file must hold one component. An original-layout file
- 635     names no component and is read whole whatever `prefix` says: the converter labels it `transformer.`, and the
- 636     mixin loads those layers into either partition (`load_into_transformer_ref`). The adapter itself belongs to no
- 637     partition; the caller attaches it to the weights it means.
- 638
- 639     Alpha, per module: from the `lora_adapter_metadata` diffusers writes (`r`, `lora_alpha`, `rank_pattern`,
- 640     `alpha_pattern`, resolved as PEFT resolves them); else from a plain `alpha` entry in the header, taken as one
- 641     network alpha for every module; else the module's own rank (scaling 1), which is `get_peft_kwargs`' rule. DoRA,
- 642     rsLoRA, a LoRA bias, a `bias` setting other than none, `fan_in_fan_out` and an alpha that is not positive and
- 643     finite are refused, not ignored."""
- 644     header = dict(header or {})
- 645     tensors = dict(tensors)
- 646     has_alpha_tensors = any(k.endswith(".alpha") for k in tensors)
- 647     if is_original_layout(tensors):
- 648         _refuse_dora(tensors)  # before the converter, which would call a `dora_scale` key a leftover
- 649         tensors = convert_original(tensors, head_dim)
- 650         prefix = "transformer"  # the converter's label, not a choice of partition
- 651     elif any(".default.weight" in k for k in tensors) and not any(k.startswith(tuple(p + "." for p in PREFIXES)) for k in tensors):
- 652         tensors = {k.replace(".default.", "."): v for k, v in tensors.items()}  # a PEFT state dict, adapter "default"
- 653     tensors, prefix = _component(tensors, prefix)
- 654     _refuse_dora(tensors)  # of the component read, not of the others
- 655
- 656     by_module = {}
- 657     for key in tensors:
- 658         m = KEY_RE.match(key)
- 659         if m is None:
- 660             raise ValueError(f"unexpected key {key!r}: only <module>.lora_A/B.weight keys are supported")
- 661         by_module.setdefault(m["module"], set()).add(m["matrix"])
- 662     incomplete = sorted(k for k, v in by_module.items() if v != {"A", "B"})
- 663     if incomplete:
- 664         raise ValueError(f"modules with only one of lora_A / lora_B: {incomplete[:8]}")
- 665     if not by_module:
- 666         raise ValueError("no LoRA tensors" + (f" under the `{prefix}.` prefix" if prefix else "") + " in this file")
- 667     ranks = {m: int(tensors[m + ".lora_B.weight"].shape[1]) for m in by_module}
+ 638 def read(tensors: dict, header: dict | None = None, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
+ 639     """An adapter from a LoRA file's tensors and its safetensors header (`__metadata__`), as diffusers would load it.
+ 640
+ 641     Keys: `transformer.<module>.lora_A/B.weight` (what `save_lora_weights` writes and `load_lora_adapter` reads by
+ 642     default), the same without the prefix (what `save_lora_adapter` writes), PEFT's own state dict (a `.default.`
+ 643     infix), or the original checkpoint's names (`convert_original`, which folds any `.alpha` tensors into the matrices;
+ 644     `head_dim` is passed to it).
+ 645
+ 646     `prefix` picks one component's keys from a file that holds several, as `load_lora_adapter(prefix=...)` does; other
+ 647     components' keys are then not looked at. Without it the file must hold one component. An original-layout file
+ 648     names no component and is read whole whatever `prefix` says: the converter labels it `transformer.`, and the
+ 649     mixin loads those layers into either partition (`load_into_transformer_ref`). The adapter itself belongs to no
+ 650     partition; the caller attaches it to the weights it means.
+ 651
+ 652     Alpha, per module: from the `lora_adapter_metadata` diffusers writes (`r`, `lora_alpha`, `rank_pattern`,
+ 653     `alpha_pattern`, resolved as PEFT resolves them); else from a plain `alpha` entry in the header, taken as one
+ 654     network alpha for every module; else the module's own rank (scaling 1), which is `get_peft_kwargs`' rule. DoRA,
+ 655     rsLoRA, a LoRA bias, a `bias` setting other than none, `fan_in_fan_out` and an alpha that is not positive and
+ 656     finite are refused, not ignored."""
+ 657     header = dict(header or {})
+ 658     tensors = dict(tensors)
+ 659     has_alpha_tensors = any(k.endswith(".alpha") for k in tensors)
+ 660     if is_original_layout(tensors):
+ 661         _refuse_dora(tensors)  # before the converter, which would call a `dora_scale` key a leftover
+ 662         tensors = convert_original(tensors, head_dim)
+ 663         prefix = "transformer"  # the converter's label, not a choice of partition
+ 664     elif any(".default.weight" in k for k in tensors) and not any(k.startswith(tuple(p + "." for p in PREFIXES)) for k in tensors):
+ 665         tensors = {k.replace(".default.", "."): v for k, v in tensors.items()}  # a PEFT state dict, adapter "default"
+ 666     tensors, prefix = _component(tensors, prefix)
+ 667     _refuse_dora(tensors)  # of the component read, not of the others
  668
- 669     config = json.loads(header[METADATA_KEY]) if header.get(METADATA_KEY) else None
- 670     if config is not None and prefix is not None:
- 671         config = {k.removeprefix(prefix + "."): v for k, v in config.items() if k.startswith(prefix + ".")}
- 672     if config is not None:
- 673         if "r" not in config or "lora_alpha" not in config:
- 674             raise ValueError(f"the file's {METADATA_KEY} has no `r` / `lora_alpha`" + (f" under `{prefix}.`" if prefix else ""))
- 675         on = [k for k in UNSUPPORTED if config.get(k)]
- 676         if config.get("bias") not in (None, "none"):  # PEFT then trains and saves base-layer biases as well
- 677             on.append(f"bias={config['bias']!r}")
- 678         if on:
- 679             raise NotImplementedError(f"this adapter was saved with {on}, which the port does not implement")
- 680         rank_pattern, alpha_pattern = config.get("rank_pattern") or {}, config.get("alpha_pattern") or {}
- 681         alpha = {}
- 682         for module, rank in ranks.items():
- 683             r = rank_pattern.get(pattern_key(rank_pattern, module), config["r"])
- 684             if r != rank:
- 685                 raise ValueError(f"{module}: the metadata says rank {r} but lora_B has rank {rank}")
- 686             alpha[module] = alpha_pattern.get(pattern_key(alpha_pattern, module), config["lora_alpha"])
- 687             check_alpha(f"{module} (the file's {METADATA_KEY})", alpha[module])
- 688         return Adapter(tensors, alpha)
- 689
- 690     network_alpha = None
- 691     if "alpha" in header and not has_alpha_tensors:
- 692         try:
- 693             network_alpha = float(header["alpha"])
- 694         except ValueError:  # diffusers warns and loads with alpha == rank
- 695             network_alpha = None
- 696         else:
- 697             check_alpha("the file header's `alpha`", network_alpha)
- 698     return Adapter(tensors, {m: (rank if network_alpha is None else network_alpha) for m, rank in ranks.items()})
+ 669     by_module = {}
+ 670     for key in tensors:
+ 671         m = KEY_RE.match(key)
+ 672         if m is None:
+ 673             raise ValueError(f"unexpected key {key!r}: only <module>.lora_A/B.weight keys are supported")
+ 674         by_module.setdefault(m["module"], set()).add(m["matrix"])
+ 675     incomplete = sorted(k for k, v in by_module.items() if v != {"A", "B"})
+ 676     if incomplete:
+ 677         raise ValueError(f"modules with only one of lora_A / lora_B: {incomplete[:8]}")
+ 678     if not by_module:
+ 679         raise ValueError("no LoRA tensors" + (f" under the `{prefix}.` prefix" if prefix else "") + " in this file")
+ 680     ranks = {m: int(tensors[m + ".lora_B.weight"].shape[1]) for m in by_module}
+ 681
+ 682     config = json.loads(header[METADATA_KEY]) if header.get(METADATA_KEY) else None
+ 683     if config is not None and not isinstance(config, dict):
+ 684         raise ValueError(f"{METADATA_KEY} is not a JSON object (got a {type(config).__name__})")
+ 685     if config is not None and prefix is not None:
+ 686         config = {k.removeprefix(prefix + "."): v for k, v in config.items() if k.startswith(prefix + ".")}
+ 687     if config is not None:
+ 688         if "r" not in config or "lora_alpha" not in config:
+ 689             raise ValueError(f"the file's {METADATA_KEY} has no `r` / `lora_alpha`" + (f" under `{prefix}.`" if prefix else ""))
+ 690         on = [k for k in UNSUPPORTED if config.get(k)]
+ 691         if config.get("bias") not in (None, "none"):  # PEFT then trains and saves base-layer biases as well
+ 692             on.append(f"bias={config['bias']!r}")
+ 693         if on:
+ 694             raise NotImplementedError(f"this adapter was saved with {on}, which the port does not implement")
+ 695         rank_pattern, alpha_pattern = config.get("rank_pattern") or {}, config.get("alpha_pattern") or {}
+ 696         alpha = {}
+ 697         for module, rank in ranks.items():
+ 698             r = rank_pattern.get(pattern_key(rank_pattern, module), config["r"])
+ 699             if r != rank:
+ 700                 raise ValueError(f"{module}: the metadata says rank {r} but lora_B has rank {rank}")
+ 701             alpha[module] = alpha_pattern.get(pattern_key(alpha_pattern, module), config["lora_alpha"])
+ 702             check_alpha(f"{module} (the file's {METADATA_KEY})", alpha[module])
+ 703         return Adapter(tensors, alpha)
+ 704
+ 705     network_alpha = None
+ 706     if "alpha" in header and not has_alpha_tensors:
+ 707         try:
+ 708             network_alpha = float(header["alpha"])
+ 709         except ValueError:  # diffusers warns and loads with alpha == rank
+ 710             network_alpha = None
+ 711         else:
+ 712             check_alpha("the file header's `alpha`", network_alpha)
+ 713     return Adapter(tensors, {m: (rank if network_alpha is None else network_alpha) for m, rank in ranks.items()})
 ```
-📍 [`src/h3mlx/lora.py:801-822`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L801-L822)
+📍 [`src/h3mlx/lora.py:835-856`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L835-L856)
 ```python
- 801 def config(adapter: Adapter) -> dict:
- 802     """The `LoraConfig` arguments that describe the adapter, as `get_peft_kwargs` derives them: the most common rank and
- 803     alpha, and a `^`-anchored pattern entry for each module that differs. The other entries state what the port
- 804     implements (no dropout, DoRA, rsLoRA or LoRA bias). A subset of what `LoraConfig.to_dict()` holds, so it loads
- 805     with `LoraConfig(**config)` on PEFT versions that add or drop other fields."""
- 806     ranks = {m: adapter.rank(m) for m in adapter.modules}
- 807     alphas = {m: _number(adapter.alpha[m]) for m in adapter.modules}
- 808     r = Counter(ranks.values()).most_common()[0][0]
- 809     lora_alpha = Counter(alphas.values()).most_common()[0][0]
- 810     return {
- 811         "r": r,
- 812         "lora_alpha": lora_alpha,
- 813         "rank_pattern": {f"^{m}": v for m, v in ranks.items() if v != r},
- 814         "alpha_pattern": {f"^{m}": v for m, v in alphas.items() if v != lora_alpha},
- 815         "target_modules": adapter.modules,
- 816         "bias": "none",
- 817         "lora_dropout": 0.0,
- 818         "use_dora": False,
- 819         "use_rslora": False,
- 820         "lora_bias": False,
- 821         "fan_in_fan_out": False,
- 822     }
+ 835 def config(adapter: Adapter) -> dict:
+ 836     """The `LoraConfig` arguments that describe the adapter, as `get_peft_kwargs` derives them: the most common rank and
+ 837     alpha, and a `^`-anchored pattern entry for each module that differs. The other entries state what the port
+ 838     implements (no dropout, DoRA, rsLoRA or LoRA bias). A subset of what `LoraConfig.to_dict()` holds, so it loads
+ 839     with `LoraConfig(**config)` on PEFT versions that add or drop other fields."""
+ 840     ranks = {m: adapter.rank(m) for m in adapter.modules}
+ 841     alphas = {m: _number(adapter.alpha[m]) for m in adapter.modules}
+ 842     r = Counter(ranks.values()).most_common()[0][0]
+ 843     lora_alpha = Counter(alphas.values()).most_common()[0][0]
+ 844     return {
+ 845         "r": r,
+ 846         "lora_alpha": lora_alpha,
+ 847         "rank_pattern": {f"^{m}": v for m, v in ranks.items() if v != r},
+ 848         "alpha_pattern": {f"^{m}": v for m, v in alphas.items() if v != lora_alpha},
+ 849         "target_modules": adapter.modules,
+ 850         "bias": "none",
+ 851         "lora_dropout": 0.0,
+ 852         "use_dora": False,
+ 853         "use_rslora": False,
+ 854         "lora_bias": False,
+ 855         "fan_in_fan_out": False,
+ 856     }
 ```
-📍 [`src/h3mlx/lora.py:825-843`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L825-L843)
+📍 [`src/h3mlx/lora.py:859-877`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L859-L877)
 ```python
- 825 def save(path, adapter: Adapter, prefix: str | None = "transformer") -> None:
- 826     """Write the adapter as diffusers does: `<prefix>.<module>.lora_A/B.weight` tensors and, in the safetensors header,
- 827     `format: pt` plus the `LoraConfig` arguments as JSON under `lora_adapter_metadata` (each key prefixed too). That is
- 828     `save_lora_weights`' file, which `load_lora_adapter` reads by default. `prefix=None` writes `save_lora_adapter`'s:
- 829     no prefixes, read back with `load_lora_adapter(..., prefix=None)`. Tensors keep their dtype. Nothing is written
- 830     for an adapter whose tensors do not match its modules, or with an alpha that is not positive and finite."""
- 831     path = Path(path)
- 832     if path.suffix != ".safetensors":
- 833         raise ValueError(f"expected a .safetensors path, got {path}")
- 834     if prefix == "":
- 835         raise ValueError("an empty prefix would put a leading dot on every key: pass None for no prefix")
- 836     check_keys(adapter)
- 837     for module in adapter.modules:
- 838         check_alpha(module, adapter.alpha[module])
- 839     lead = "" if prefix is None else prefix + "."
- 840     tensors = {lead + k: v for k, v in adapter.tensors.items()}
- 841     meta = {lead + k: v for k, v in config(adapter).items()}
- 842     described = json.dumps(meta, indent=2, sort_keys=True, allow_nan=False)  # strict JSON: no NaN or Infinity tokens
- 843     mx.save_safetensors(str(path), tensors, metadata={"format": "pt", METADATA_KEY: described})
+ 859 def save(path, adapter: Adapter, prefix: str | None = "transformer") -> None:
+ 860     """Write the adapter as diffusers does: `<prefix>.<module>.lora_A/B.weight` tensors and, in the safetensors header,
+ 861     `format: pt` plus the `LoraConfig` arguments as JSON under `lora_adapter_metadata` (each key prefixed too). That is
+ 862     `save_lora_weights`' file, which `load_lora_adapter` reads by default. `prefix=None` writes `save_lora_adapter`'s:
+ 863     no prefixes, read back with `load_lora_adapter(..., prefix=None)`. Tensors keep their dtype. Nothing is written
+ 864     for an adapter whose tensors do not match its modules, or with an alpha that is not positive and finite."""
+ 865     path = Path(path)
+ 866     if path.suffix != ".safetensors":
+ 867         raise ValueError(f"expected a .safetensors path, got {path}")
+ 868     if prefix == "":
+ 869         raise ValueError("an empty prefix would put a leading dot on every key: pass None for no prefix")
+ 870     check_keys(adapter)
+ 871     for module in adapter.modules:
+ 872         check_alpha(module, adapter.alpha[module])
+ 873     lead = "" if prefix is None else prefix + "."
+ 874     tensors = {lead + k: v for k, v in adapter.tensors.items()}
+ 875     meta = {lead + k: v for k, v in config(adapter).items()}
+ 876     described = json.dumps(meta, indent=2, sort_keys=True, allow_nan=False)  # strict JSON: no NaN or Infinity tokens
+ 877     mx.save_safetensors(str(path), tensors, metadata={"format": "pt", METADATA_KEY: described})
 ```
 
 What differs from the original, on purpose:
@@ -1165,20 +1182,20 @@ prefixes against the mixin's two loaders.
 3403         state_dict = unflattened
 ```
 
-📍 [`src/h3mlx/lora.py:425-436`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L425-L436)
+📍 [`src/h3mlx/lora.py:438-449`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L438-L449)
 ```python
- 425 _FLATTENED = [  # musubi-tuner's `lora_unet_` names, every `.` collapsed to `_`
- 426     (r"blocks_(\d+)_attn_(qkv|out)_proj", r"blocks.\1.attn.\2_proj"),
- 427     (r"blocks_(\d+)_mlp_fc([12])", r"blocks.\1.mlp.fc\2"),
- 428     (r"blocks_(\d+)_adaln_proj_linear", r"blocks.\1.adaln_proj.linear"),
- 429     (r"token_refiner_blocks_(\d+)_attn_(qkv|out)_proj", r"token_refiner.blocks.\1.attn.\2_proj"),
- 430     (r"token_refiner_blocks_(\d+)_mlp_fc([12])", r"token_refiner.blocks.\1.mlp.fc\2"),
- 431     (r"(video|audio)_patch_proj", r"\1_patch_proj"),
- 432     (r"condition_proj", "condition_proj"),
- 433     (r"time_embedder_proj_(in|out)", r"time_embedder.proj_\1"),
- 434     (r"final_layer_adaln_proj_linear", "final_layer.adaln_proj.linear"),
- 435     (r"final_layer_(video|audio)_out", r"final_layer.\1_out"),
- 436 ]
+ 438 _FLATTENED = [  # musubi-tuner's `lora_unet_` names, every `.` collapsed to `_`
+ 439     (r"blocks_(\d+)_attn_(qkv|out)_proj", r"blocks.\1.attn.\2_proj"),
+ 440     (r"blocks_(\d+)_mlp_fc([12])", r"blocks.\1.mlp.fc\2"),
+ 441     (r"blocks_(\d+)_adaln_proj_linear", r"blocks.\1.adaln_proj.linear"),
+ 442     (r"token_refiner_blocks_(\d+)_attn_(qkv|out)_proj", r"token_refiner.blocks.\1.attn.\2_proj"),
+ 443     (r"token_refiner_blocks_(\d+)_mlp_fc([12])", r"token_refiner.blocks.\1.mlp.fc\2"),
+ 444     (r"(video|audio)_patch_proj", r"\1_patch_proj"),
+ 445     (r"condition_proj", "condition_proj"),
+ 446     (r"time_embedder_proj_(in|out)", r"time_embedder.proj_\1"),
+ 447     (r"final_layer_adaln_proj_linear", "final_layer.adaln_proj.linear"),
+ 448     (r"final_layer_(video|audio)_out", r"final_layer.\1_out"),
+ 449 ]
 ```
 
 Ours is the same sequence: drop `diffusion_model.`, note and strip DiffSynth's `.default.` infix, and match
@@ -1213,18 +1230,18 @@ musubi-tuner's flattened names against the same ten patterns.
 A kohya-style file stores an `.alpha` scalar beside each pair. The converter multiplies `alpha / rank` into the two
 matrices, balancing the factor between them, and drops the scalar. The result therefore has scaling 1.
 
-📍 [`src/h3mlx/lora.py:513-522`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L513-L522)
+📍 [`src/h3mlx/lora.py:526-535`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L526-L535)
 ```python
- 513         alpha = sd.pop(base + ".alpha", None)
- 514         if alpha is not None:
- 515             if not alpha.item() > 0 or math.isinf(alpha.item()):
- 516                 raise ValueError(f"`{base}.alpha` is {alpha.item()}: a LoRA alpha must be positive and finite")
- 517             # the forward scales by alpha / rank; split that factor between down and up
- 518             scale_down, scale_up = alpha.item() / down.shape[0], 1.0
- 519             while scale_down * 2 < scale_up:
- 520                 scale_down *= 2
- 521                 scale_up /= 2
- 522             down, up = ops.times_scalar(down, scale_down), ops.times_scalar(up, scale_up)
+ 526         alpha = sd.pop(base + ".alpha", None)
+ 527         if alpha is not None:
+ 528             if not alpha.item() > 0 or math.isinf(alpha.item()):
+ 529                 raise ValueError(f"`{base}.alpha` is {alpha.item()}: a LoRA alpha must be positive and finite")
+ 530             # the forward scales by alpha / rank; split that factor between down and up
+ 531             scale_down, scale_up = alpha.item() / down.shape[0], 1.0
+ 532             while scale_down * 2 < scale_up:
+ 533                 scale_down *= 2
+ 534                 scale_up /= 2
+ 535             down, up = ops.times_scalar(down, scale_down), ops.times_scalar(up, scale_up)
 ```
 
 - **The products round as torch's.** The fold multiplies each matrix by a Python float, so it uses `times_scalar`
@@ -1280,27 +1297,27 @@ matrices, balancing the factor between them, and drops the scalar. The result th
 3495                     converted_state_dict[f"{target}.attn.{proj}.lora_B.weight"] = up_proj.contiguous()
 ```
 
-📍 [`src/h3mlx/lora.py:543-561`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L543-L561)
+📍 [`src/h3mlx/lora.py:556-574`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L556-L574)
 ```python
- 543             qkv = pull(f"{source}.attn.qkv_proj")
- 544             if qkv is not None:
- 545                 down, up = qkv
- 546                 if up.shape[0] % 3 != 0:
- 547                     raise ValueError(f"`{source}.attn.qkv_proj` has {up.shape[0]} output rows, which is not divisible "
- 548                                      "by 3. This is not a fused MiniMax-H3 QKV projection.")
- 549                 if is_diffsynth:
- 550                     # [head0: q k v, head1: q k v, ...] -> [q_all; k_all; v_all]
- 551                     if up.shape[0] % (3 * head_dim) != 0:
- 552                         raise ValueError(f"`{source}.attn.qkv_proj` has {up.shape[0]} output rows, which is not a "
- 553                                          f"multiple of 3 * {head_dim}. This is not a per-head-interleaved MiniMax-H3 "
- 554                                          "QKV projection.")
- 555                     num_heads = up.shape[0] // (3 * head_dim)
- 556                     grouped = up.reshape(num_heads, 3 * head_dim, up.shape[1])
- 557                     up = mx.concatenate([s.reshape(num_heads * head_dim, up.shape[1])
- 558                                          for s in mx.split(grouped, 3, axis=1)], axis=0)
- 559                 for proj, up_proj in zip(("to_q", "to_k", "to_v"), mx.split(up, 3, axis=0)):
- 560                     out[f"{target}.attn.{proj}.lora_A.weight"] = down
- 561                     out[f"{target}.attn.{proj}.lora_B.weight"] = up_proj
+ 556             qkv = pull(f"{source}.attn.qkv_proj")
+ 557             if qkv is not None:
+ 558                 down, up = qkv
+ 559                 if up.shape[0] % 3 != 0:
+ 560                     raise ValueError(f"`{source}.attn.qkv_proj` has {up.shape[0]} output rows, which is not divisible "
+ 561                                      "by 3. This is not a fused MiniMax-H3 QKV projection.")
+ 562                 if is_diffsynth:
+ 563                     # [head0: q k v, head1: q k v, ...] -> [q_all; k_all; v_all]
+ 564                     if up.shape[0] % (3 * head_dim) != 0:
+ 565                         raise ValueError(f"`{source}.attn.qkv_proj` has {up.shape[0]} output rows, which is not a "
+ 566                                          f"multiple of 3 * {head_dim}. This is not a per-head-interleaved MiniMax-H3 "
+ 567                                          "QKV projection.")
+ 568                     num_heads = up.shape[0] // (3 * head_dim)
+ 569                     grouped = up.reshape(num_heads, 3 * head_dim, up.shape[1])
+ 570                     up = mx.concatenate([s.reshape(num_heads * head_dim, up.shape[1])
+ 571                                          for s in mx.split(grouped, 3, axis=1)], axis=0)
+ 572                 for proj, up_proj in zip(("to_q", "to_k", "to_v"), mx.split(up, 3, axis=0)):
+ 573                     out[f"{target}.attn.{proj}.lora_A.weight"] = down
+ 574                     out[f"{target}.attn.{proj}.lora_B.weight"] = up_proj
 ```
 
 `lora_A` is shared by the three projections and `lora_B` is cut in thirds. A DiffSynth-Studio file keeps the raw
@@ -1354,30 +1371,30 @@ checkpoint's row order, q, k and v interleaved per head, and is reordered first.
 3532     return {f"transformer.{k}": v for k, v in converted_state_dict.items()}
 ```
 
-📍 [`src/h3mlx/lora.py:565-573`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L565-L573)
+📍 [`src/h3mlx/lora.py:578-586`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L578-L586)
 ```python
- 565             fc1 = pull(f"{source}.mlp.fc1")
- 566             if fc1 is not None:
- 567                 down, up = fc1
- 568                 if up.shape[0] % 2 != 0:
- 569                     raise ValueError(f"`{source}.mlp.fc1` has {up.shape[0]} output rows, which is not even. This is "
- 570                                      "not a fused MiniMax-H3 SwiGLU projection.")
- 571                 up_gate, up_value = mx.split(up, 2, axis=0)
- 572                 out[f"{target}.ff.net.0.proj.lora_A.weight"] = down
- 573                 out[f"{target}.ff.net.0.proj.lora_B.weight"] = mx.concatenate([up_value, up_gate], axis=0)
+ 578             fc1 = pull(f"{source}.mlp.fc1")
+ 579             if fc1 is not None:
+ 580                 down, up = fc1
+ 581                 if up.shape[0] % 2 != 0:
+ 582                     raise ValueError(f"`{source}.mlp.fc1` has {up.shape[0]} output rows, which is not even. This is "
+ 583                                      "not a fused MiniMax-H3 SwiGLU projection.")
+ 584                 up_gate, up_value = mx.split(up, 2, axis=0)
+ 585                 out[f"{target}.ff.net.0.proj.lora_A.weight"] = down
+ 586                 out[f"{target}.ff.net.0.proj.lora_B.weight"] = mx.concatenate([up_value, up_gate], axis=0)
 ```
-📍 [`src/h3mlx/lora.py:437-446`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L437-L446)
+📍 [`src/h3mlx/lora.py:450-459`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L450-L459)
 ```python
- 437 _STANDALONE = {  # the projections outside the block stack
- 438     "video_patch_proj": "proj_in",
- 439     "audio_patch_proj": "audio_proj_in",
- 440     "condition_proj": "context_embedder",
- 441     "time_embedder.proj_in": "time_embedder.linear_1",
- 442     "time_embedder.proj_out": "time_embedder.linear_2",
- 443     "final_layer.adaln_proj.linear": "norm_out.linear",
- 444     "final_layer.video_out": "proj_out",
- 445     "final_layer.audio_out": "audio_proj_out",
- 446 }
+ 450 _STANDALONE = {  # the projections outside the block stack
+ 451     "video_patch_proj": "proj_in",
+ 452     "audio_patch_proj": "audio_proj_in",
+ 453     "condition_proj": "context_embedder",
+ 454     "time_embedder.proj_in": "time_embedder.linear_1",
+ 455     "time_embedder.proj_out": "time_embedder.linear_2",
+ 456     "final_layer.adaln_proj.linear": "norm_out.linear",
+ 457     "final_layer.video_out": "proj_out",
+ 458     "final_layer.audio_out": "audio_proj_out",
+ 459 }
 ```
 
 The original computes `fc2(silu(gate) * value)` from a fused `[gate; value]`, diffusers' SwiGLU `value * silu(gate)`
@@ -1464,7 +1481,7 @@ The scheduler works in `t = 1 − sigma`, with `t = 1` clean. Its own notes stat
  256         return timestep * sample + (1.0 - timestep) * noise
 ```
 
-📍 [`src/h3mlx/train.py:30-54`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L30-L54)
+📍 [`src/h3mlx/train.py:30-54`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L30-L54)
 ```python
   30 def scale_noise(sample: mx.array, timestep, noise: mx.array) -> mx.array:
   31     """`MiniMaxH3Scheduler.scale_noise`: `x_t = t * x_0 + (1 - t) * noise`, `t` in [0, 1] and 1 clean.
@@ -1540,7 +1557,7 @@ diffusers has no function for the training target of this model. It is fixed by 
  328         ratio = sigma_next / sigma
  329         prev_sample = ratio * sample.to(dtype=compute_dtype) + (1.0 - ratio) * denoised.to(dtype=compute_dtype)
 ```
-📍 [`src/h3mlx/ops.py:414-422`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/ops.py#L414-L422)
+📍 [`src/h3mlx/ops.py:414-422`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/ops.py#L414-L422)
 ```python
  414 def flow_step(v: mx.array, t: float, x: mx.array, sigma: float, sigma_next: float) -> mx.array:
  415     """x0 = x + (1 - t) * v (sigma from the timestep, in x's dtype); x_next = r*x + (1 - r)*x0, r = s_next / s, f32."""
@@ -1556,7 +1573,7 @@ diffusers has no function for the training target of this model. It is fixed by 
 With `x_t = t·x_0 + (1 − t)·noise` and `x_0 = x_t + (1 − t)·v`, the model's output must satisfy
 `(1 − t)·v = (1 − t)·(x_0 − noise)`. So the target is `x_0 − noise` at every `t`.
 
-📍 [`src/h3mlx/train.py:57-61`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L57-L61)
+📍 [`src/h3mlx/train.py:57-61`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L57-L61)
 ```python
   57 def velocity_target(sample: mx.array, noise: mx.array) -> mx.array:
   58     """What the transformer is trained to predict for `scale_noise(sample, t, noise)`, at every `t`: `x_0 - noise`.
@@ -1578,7 +1595,7 @@ velocity with the other sign, and the wrong one for this model. Three tests fail
 
 ### 3.3 The loss
 
-📍 [`src/h3mlx/train.py:64-87`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L64-L87)
+📍 [`src/h3mlx/train.py:64-87`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L64-L87)
 ```python
   64 def flow_match_loss(pred: mx.array, target: mx.array, weight=None) -> mx.array:
   65     """`mean(weight * (pred - target) ** 2)` over every element, in float32 whatever the inputs' dtypes. `weight` is a
@@ -1653,35 +1670,35 @@ velocity with the other sign, and the wrong one for this model. Three tests fail
  390     return u
 ```
 
-📍 [`src/h3mlx/train.py:439-465`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L439-L465)
+📍 [`src/h3mlx/train.py:444-470`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L444-L470)
 ```python
- 439 def density_for_timestep_sampling(weighting_scheme: str, batch_size: int, logit_mean: float | None = None,
- 440                                   logit_std: float | None = None, mode_scale: float | None = None,
- 441                                   generator=None) -> np.ndarray:
- 442     """diffusers' `compute_density_for_timestep_sampling`: `batch_size` values `u` in [0, 1], float32.
- 443
- 444     * `"logit_normal"`: the sigmoid of a normal draw (`logit_mean`, `logit_std`).
- 445     * `"mode"`: `1 - u - mode_scale * (cos(pi * u / 2) ** 2 - 1 + u)` of a uniform draw.
- 446     * anything else: a uniform draw.
- 447
- 448     The draw is torch's, from `generator` (a `torch.Generator`; None is torch's global one), so it is the same stream
- 449     as theirs. The arithmetic after it is numpy float32 in their order: equal to theirs bit for bit except for the
- 450     sigmoid's `exp` and the `cos`, which numpy and torch round differently in the last place or two.
- 451
- 452     A scheme's own parameters are required, as in theirs (TypeError), and must be finite, which theirs does not check
- 453     (ValueError here). A negative or NaN `logit_std` is torch's own RuntimeError on both sides."""
- 454     import torch
- 455
- 456     if weighting_scheme == "logit_normal":
- 457         _density_parameters(weighting_scheme, logit_mean=logit_mean, logit_std=logit_std)
- 458         u = torch.normal(mean=logit_mean, std=logit_std, size=(batch_size,), generator=generator).numpy()
- 459         return (np.float32(1) / (np.float32(1) + np.exp(-u))).astype(np.float32)
- 460     if weighting_scheme == "mode":
- 461         _density_parameters(weighting_scheme, mode_scale=mode_scale)
- 462         u = torch.rand(size=(batch_size,), generator=generator).numpy()
- 463         c = np.cos(np.float32(math.pi) * u / np.float32(2))
- 464         return (np.float32(1) - u - np.float32(mode_scale) * (c * c - np.float32(1) + u)).astype(np.float32)
- 465     return torch.rand(size=(batch_size,), generator=generator).numpy()
+ 444 def density_for_timestep_sampling(weighting_scheme: str, batch_size: int, logit_mean: float | None = None,
+ 445                                   logit_std: float | None = None, mode_scale: float | None = None,
+ 446                                   generator=None) -> np.ndarray:
+ 447     """diffusers' `compute_density_for_timestep_sampling`: `batch_size` values `u` in [0, 1], float32.
+ 448
+ 449     * `"logit_normal"`: the sigmoid of a normal draw (`logit_mean`, `logit_std`).
+ 450     * `"mode"`: `1 - u - mode_scale * (cos(pi * u / 2) ** 2 - 1 + u)` of a uniform draw.
+ 451     * anything else: a uniform draw.
+ 452
+ 453     The draw is torch's, from `generator` (a `torch.Generator`; None is torch's global one), so it is the same stream
+ 454     as theirs. The arithmetic after it is numpy float32 in their order: equal to theirs bit for bit except for the
+ 455     sigmoid's `exp` and the `cos`, which numpy and torch round differently in the last place or two.
+ 456
+ 457     A scheme's own parameters are required, as in theirs (TypeError), and must be finite, which theirs does not check
+ 458     (ValueError here). A negative or NaN `logit_std` is torch's own RuntimeError on both sides."""
+ 459     import torch
+ 460
+ 461     if weighting_scheme == "logit_normal":
+ 462         _density_parameters(weighting_scheme, logit_mean=logit_mean, logit_std=logit_std)
+ 463         u = torch.normal(mean=logit_mean, std=logit_std, size=(batch_size,), generator=generator).numpy()
+ 464         return (np.float32(1) / (np.float32(1) + np.exp(-u))).astype(np.float32)
+ 465     if weighting_scheme == "mode":
+ 466         _density_parameters(weighting_scheme, mode_scale=mode_scale)
+ 467         u = torch.rand(size=(batch_size,), generator=generator).numpy()
+ 468         c = np.cos(np.float32(math.pi) * u / np.float32(2))
+ 469         return (np.float32(1) - u - np.float32(mode_scale) * (c * c - np.float32(1) + u)).astype(np.float32)
+ 470     return torch.rand(size=(batch_size,), generator=generator).numpy()
 ```
 
 The draw is torch's own call on a torch generator, so the stream is theirs. The arithmetic after it is numpy float32
@@ -1727,33 +1744,33 @@ The parameters, case by case (`test_density_parameters_are_required_and_finite`)
  408     return weighting
 ```
 
-📍 [`src/h3mlx/train.py:468-492`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L468-L492)
+📍 [`src/h3mlx/train.py:473-497`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L473-L497)
 ```python
- 468 def loss_weighting_for_sd3(weighting_scheme: str, sigmas) -> np.ndarray:
- 469     """diffusers' `compute_loss_weighting_for_sd3`, on float32 or float64 noise levels (numpy, or an `mx.array`).
- 470
- 471     * `"sigma_sqrt"`: `sigma ** -2`, which torch computes as `1 / (sigma * sigma)`; float32 (infinite at sigma 0).
- 472     * `"cosmap"`: `2 / (pi * (1 - 2 * sigma + 2 * sigma ** 2))`, in the input's dtype.
- 473     * anything else: ones.
- 474
- 475     `sigma` is the noise level in both conventions (1 is pure noise), so nothing changes for this model's `1 - t`.
- 476
- 477     Half-precision and integer levels are refused. Theirs computes a bf16 tensor's weighting in bf16, three digits of
- 478     it; the numpy result here can't hold bf16, and upcasting without saying so would be neither theirs nor exact."""
- 479     if isinstance(sigmas, mx.array):
- 480         if sigmas.dtype not in (mx.float32, mx.float64):
- 481             raise ValueError(f"sigmas must be float32 or float64, got {sigmas.dtype}: cast them first")
- 482         sigmas = np.array(sigmas)
- 483     s = np.asarray(sigmas)
- 484     if s.dtype not in (np.float32, np.float64):
- 485         raise ValueError(f"sigmas must be float32 or float64, got {s.dtype}: cast them first")
- 486     one, two = s.dtype.type(1), s.dtype.type(2)
- 487     if weighting_scheme == "sigma_sqrt":
- 488         return (one / (s * s)).astype(np.float32)
- 489     if weighting_scheme == "cosmap":
- 490         bot = one - two * s + two * (s * s)
- 491         return (two / (s.dtype.type(math.pi) * bot)).astype(s.dtype)
- 492     return np.ones_like(s)
+ 473 def loss_weighting_for_sd3(weighting_scheme: str, sigmas) -> np.ndarray:
+ 474     """diffusers' `compute_loss_weighting_for_sd3`, on float32 or float64 noise levels (numpy, or an `mx.array`).
+ 475
+ 476     * `"sigma_sqrt"`: `sigma ** -2`, which torch computes as `1 / (sigma * sigma)`; float32 (infinite at sigma 0).
+ 477     * `"cosmap"`: `2 / (pi * (1 - 2 * sigma + 2 * sigma ** 2))`, in the input's dtype.
+ 478     * anything else: ones.
+ 479
+ 480     `sigma` is the noise level in both conventions (1 is pure noise), so nothing changes for this model's `1 - t`.
+ 481
+ 482     Half-precision and integer levels are refused. Theirs computes a bf16 tensor's weighting in bf16, three digits of
+ 483     it; the numpy result here can't hold bf16, and upcasting without saying so would be neither theirs nor exact."""
+ 484     if isinstance(sigmas, mx.array):
+ 485         if sigmas.dtype not in (mx.float32, mx.float64):
+ 486             raise ValueError(f"sigmas must be float32 or float64, got {sigmas.dtype}: cast them first")
+ 487         sigmas = np.array(sigmas)
+ 488     s = np.asarray(sigmas)
+ 489     if s.dtype not in (np.float32, np.float64):
+ 490         raise ValueError(f"sigmas must be float32 or float64, got {s.dtype}: cast them first")
+ 491     one, two = s.dtype.type(1), s.dtype.type(2)
+ 492     if weighting_scheme == "sigma_sqrt":
+ 493         return (one / (s * s)).astype(np.float32)
+ 494     if weighting_scheme == "cosmap":
+ 495         bot = one - two * s + two * (s * s)
+ 496         return (two / (s.dtype.type(math.pi) * bot)).astype(s.dtype)
+ 497     return np.ones_like(s)
 ```
 
 Bit for bit, for float32 and float64 input (`test_loss_weighting_is_diffusers`). Two details carry that: torch
@@ -1786,7 +1803,7 @@ MiniMax H3's scheduler has a sampling grid and no training grid. The port builds
  178             # The shift compresses the grid near sigma = 1; collapse any float32 collisions it creates.
  179             sigmas = torch.unique_consecutive(sigmas)
 ```
-📍 [`src/h3mlx/ops.py:401-411`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/ops.py#L401-L411)
+📍 [`src/h3mlx/ops.py:401-411`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/ops.py#L401-L411)
 ```python
  401 def flow_sigmas(num_inference_steps: int, shift: float) -> np.ndarray:
  402     """linspace(1, 0, n) in float32, exponential shift, consecutive duplicates collapsed. Terminal 0 included."""
@@ -1801,41 +1818,41 @@ MiniMax H3's scheduler has a sampling grid and no training grid. The port builds
  411     return sig[keep]
 ```
 
-📍 [`src/h3mlx/train.py:495-504`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L495-L504)
+📍 [`src/h3mlx/train.py:500-509`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L500-L509)
 ```python
- 495 def training_sigmas(num_points: int, shift: float) -> np.ndarray:
- 496     """`num_points` noise levels to train at, from 1.0 (pure noise) down, float32: the scheduler's own shifted grid
- 497     for `num_points + 1` points (`ops.flow_sigmas`: `linspace(1, 0, n)` through `s * sigma / (1 + (s - 1) * sigma)`)
- 498     without its last point, sigma 0, where the sample is clean and there is nothing to predict. Both numbers are the
- 499     caller's: this module has no default shift or grid size."""
- 500     grid = ops.flow_sigmas(num_points + 1, shift)[:-1]
- 501     if len(grid) != num_points:
- 502         raise ValueError(f"shift {shift} merges neighbouring float32 levels of a {num_points}-point grid "
- 503                          f"({len(grid)} distinct): ask for fewer points")
- 504     return grid
+ 500 def training_sigmas(num_points: int, shift: float) -> np.ndarray:
+ 501     """`num_points` noise levels to train at, from 1.0 (pure noise) down, float32: the scheduler's own shifted grid
+ 502     for `num_points + 1` points (`ops.flow_sigmas`: `linspace(1, 0, n)` through `s * sigma / (1 + (s - 1) * sigma)`)
+ 503     without its last point, sigma 0, where the sample is clean and there is nothing to predict. Both numbers are the
+ 504     caller's: this module has no default shift or grid size."""
+ 505     grid = ops.flow_sigmas(num_points + 1, shift)[:-1]
+ 506     if len(grid) != num_points:
+ 507         raise ValueError(f"shift {shift} merges neighbouring float32 levels of a {num_points}-point grid "
+ 508                          f"({len(grid)} distinct): ask for fewer points")
+ 509     return grid
 ```
-📍 [`src/h3mlx/train.py:507-526`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L507-L526)
+📍 [`src/h3mlx/train.py:512-531`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L512-L531)
 ```python
- 507 def sample_sigmas(u, grid) -> tuple[np.ndarray, np.ndarray]:
- 508     """One noise level per `u`: `grid[floor(u * len(grid))]`, the multiplication in float32 (an SD3-style trainer's
- 509     `(u * num_train_timesteps).long()` lookup). Returns (sigmas, indices). `u = 1.0` would index one past the end,
- 510     which torch refuses; it is given the last level here (the logit-normal sigmoid rounds to 1.0 for a large draw, and
- 511     `"mode"` maps a draw of 0 to 1.0). The model's timestep for a level is `1 - sigma` in float32; `scale_noise` takes
- 512     those as `mx.array(1 - sigmas)`.
- 513
- 514     Every `u` must lie in [0, 1], which a NaN does not: cast to an index a NaN is 0 on this hardware, pure noise for
- 515     every such draw, here and in the torch lookup. The grid must be one non-empty row of finite levels."""
- 516     grid = np.asarray(grid)
- 517     if grid.ndim != 1 or grid.size == 0:
- 518         raise ValueError(f"the grid must be one non-empty row of noise levels, got shape {grid.shape}")
- 519     if not np.isfinite(grid).all():
- 520         raise ValueError("the grid holds levels that are not finite")
- 521     u = np.asarray(u, dtype=np.float32)
- 522     inside = (u >= 0) & (u <= 1)
- 523     if not inside.all():
- 524         raise ValueError(f"every u must lie in [0, 1] (a NaN does not): got {u[~inside][:4].tolist()}")
- 525     indices = np.minimum((u * np.float32(len(grid))).astype(np.int64), len(grid) - 1)
- 526     return grid[indices], indices
+ 512 def sample_sigmas(u, grid) -> tuple[np.ndarray, np.ndarray]:
+ 513     """One noise level per `u`: `grid[floor(u * len(grid))]`, the multiplication in float32 (an SD3-style trainer's
+ 514     `(u * num_train_timesteps).long()` lookup). Returns (sigmas, indices). `u = 1.0` would index one past the end,
+ 515     which torch refuses; it is given the last level here (the logit-normal sigmoid rounds to 1.0 for a large draw, and
+ 516     `"mode"` maps a draw of 0 to 1.0). The model's timestep for a level is `1 - sigma` in float32; `scale_noise` takes
+ 517     those as `mx.array(1 - sigmas)`.
+ 518
+ 519     Every `u` must lie in [0, 1], which a NaN does not: cast to an index a NaN is 0 on this hardware, pure noise for
+ 520     every such draw, here and in the torch lookup. The grid must be one non-empty row of finite levels."""
+ 521     grid = np.asarray(grid)
+ 522     if grid.ndim != 1 or grid.size == 0:
+ 523         raise ValueError(f"the grid must be one non-empty row of noise levels, got shape {grid.shape}")
+ 524     if not np.isfinite(grid).all():
+ 525         raise ValueError("the grid holds levels that are not finite")
+ 526     u = np.asarray(u, dtype=np.float32)
+ 527     inside = (u >= 0) & (u <= 1)
+ 528     if not inside.all():
+ 529         raise ValueError(f"every u must lie in [0, 1] (a NaN does not): got {u[~inside][:4].tolist()}")
+ 530     indices = np.minimum((u * np.float32(len(grid))).astype(np.int64), len(grid) - 1)
+ 531     return grid[indices], indices
 ```
 
 - **The grid** is `flow_sigmas(num_points + 1, shift)` without its terminal 0: `num_points` levels from 1.0 (pure
@@ -1896,31 +1913,31 @@ PEFT keeps each adapter's matrices under the adapter's name, so its state dict h
 file has `<module>.lora_A.weight`, whichever adapter it was. The port uses the same two spellings in the same two
 places:
 
-📍 [`src/h3mlx/lora.py:179-182`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L179-L182)
+📍 [`src/h3mlx/lora.py:179-182`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L179-L182)
 ```python
  179 def runtime_key(module: str, matrix: str, name: str | None = None) -> str:
  180     """A matrix's key in the weights dict: `<module>.lora_A.weight`, or for a named adapter PEFT's runtime name,
  181     `<module>.lora_A.<name>.weight`. (In a file neither carries a name: `Adapter.tensors`.)"""
  182     return f"{module}.lora_{matrix}.weight" if name is None else f"{module}.lora_{matrix}.{name}.weight"
 ```
-📍 [`src/h3mlx/lora.py:371-373`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L371-L373)
+📍 [`src/h3mlx/lora.py:384-386`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L384-L386)
 ```python
- 371 def runtime_tensors(adapter: Adapter, name: str) -> dict:
- 372     """An adapter's tensors under their runtime names for `name` (what `split` returns as `trainable`)."""
- 373     return {runtime_key(m, x, name): adapter.tensors[f"{m}.lora_{x}.weight"] for m in adapter.modules for x in "AB"}
+ 384 def runtime_tensors(adapter: Adapter, name: str) -> dict:
+ 385     """An adapter's tensors under their runtime names for `name` (what `split` returns as `trainable`)."""
+ 386     return {runtime_key(m, x, name): adapter.tensors[f"{m}.lora_{x}.weight"] for m in adapter.modules for x in "AB"}
 ```
-📍 [`src/h3mlx/lora.py:376-385`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L376-L385)
+📍 [`src/h3mlx/lora.py:389-398`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L389-L398)
 ```python
- 376 def file_tensors(tensors: dict, name: str) -> dict:
- 377     """The reverse: a named adapter's matrices back under the names they have in a file and in `Adapter.tensors`,
- 378     `<module>.lora_A/B.weight`, as PEFT strips the adapter's name when it saves."""
- 379     out = {}
- 380     for key, value in tensors.items():
- 381         m = RUNTIME_RE.match(key)
- 382         if m is None or m["name"] != name:
- 383             raise ValueError(f"{key!r} is not a matrix of the adapter {name!r}")
- 384         out[f"{m['module']}.lora_{m['matrix']}.weight"] = value
- 385     return out
+ 389 def file_tensors(tensors: dict, name: str) -> dict:
+ 390     """The reverse: a named adapter's matrices back under the names they have in a file and in `Adapter.tensors`,
+ 391     `<module>.lora_A/B.weight`, as PEFT strips the adapter's name when it saves."""
+ 392     out = {}
+ 393     for key, value in tensors.items():
+ 394         m = RUNTIME_RE.match(key)
+ 395         if m is None or m["name"] != name:
+ 396             raise ValueError(f"{key!r} is not a matrix of the adapter {name!r}")
+ 397         out[f"{m['module']}.lora_{m['matrix']}.weight"] = value
+ 398     return out
 ```
 
 - **In the weights:** `attach(..., name="subject")` puts the matrices under PEFT's runtime names. Beside them it adds
@@ -1950,75 +1967,76 @@ get wrong:
 
 `plinear` (§1.1) follows it to the letter. An unnamed adapter, HyperFlow's included, takes the old path untouched.
 
-📍 [`src/h3mlx/lora.py:205-254`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L205-L254)
+📍 [`src/h3mlx/lora.py:217-267`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L217-L267)
 ```python
- 205 def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None,
- 206            scale: float = 1.0) -> dict:
- 207     """The transformer's weights with the adapter beside them, for `ops.plinear`; `params` is not modified.
- 208
- 209     By default each matrix is cast to its base weight's dtype, as PEFT's injection does (`load_lora_adapter`, and
- 210     `hyperflow.attach`). `keep_dtype=True` leaves the adapter as it is: float32 factors over a bf16 base, what
- 211     `cast_training_params` gives a trainer (and what diffusers' `low_cpu_mem_usage=True` loading gives a float32 file).
- 212     A module whose scaling is not 1 also gets a `lora_scaling` entry.
- 213
- 214     `scale` is the adapter's strength, 1.0 being as trained: each module's scaling becomes `scale * alpha / rank`,
- 215     computed in that order, which is PEFT's `set_scale` and so what diffusers' `set_adapters(name, weights=scale)`
- 216     leaves on every layer. Any finite number: a negative one subtracts the adapter's delta, and zero keeps the adapter
- 217     attached with a delta of zero (`for_sampling` leaves it off instead).
- 218
- 219     Without a `name` the adapter is the only one its Linears can carry. With one it is stacked: its matrices go under
- 220     PEFT's runtime names, and the name is appended to each Linear's `lora_adapters`, so adapters apply in the order
- 221     they were attached (`set_active` changes that). A named and an unnamed adapter can't share a Linear, and a name is
- 222     used once: diffusers' `load_lora_adapter` refuses a name already in use too. That includes a name these weights
- 223     only list or carry a scaling for, which is what the frozen half of `split` looks like (`join` is the way back
- 224     from it); attaching onto that half would name the adapter twice on each Linear and apply it twice."""
- 225     check(adapter, cfg)
- 226     check_scale(scale)
- 227     if name is None:
- 228         taken = [m for m in adapter.modules if _carries_lora(params, m)]
- 229         if taken:
- 230             raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: one unnamed adapter per "
- 231                              "Linear; give each a name to stack them")
- 232     else:
- 233         if not name or "." in name:
- 234             raise ValueError(f"an adapter name is a non-empty word without dots, got {name!r}")
- 235         taken = [m for m in adapter.modules if m + ".lora_A.weight" in params]
- 236         if taken:
- 237             raise ValueError(f"{len(taken)} Linear(s) already carry an unnamed LoRA, e.g. {taken[:3]}")
- 238         used = _named_parts(params, name)
- 239         if used:
- 240             raise ValueError(f"the adapter name {name!r} is already in use in these weights ({len(used)} keys, e.g. "
- 241                              f"{used[:2]}). If they are the frozen half of `split`, `join` it with its trainable half; "
- 242                              "a changed adapter goes in as that trainable half, not through a second `attach`")
- 243     out = dict(params)
- 244     for module in adapter.modules:
- 245         dtype = params[module + ".weight"].dtype
- 246         for matrix in ("A", "B"):
- 247             tensor = adapter.tensors[f"{module}.lora_{matrix}.weight"]
- 248             out[runtime_key(module, matrix, name)] = tensor if keep_dtype else tensor.astype(dtype)
- 249         scaling = adapter.scaling(module) if scale == 1.0 else scale * adapter.alpha[module] / adapter.rank(module)
- 250         if scaling != 1.0:
- 251             out[module + SCALING + ("" if name is None else "." + name)] = mx.array(scaling, dtype=mx.float32)
- 252         if name is not None:
- 253             out[module + ADAPTERS] = params.get(module + ADAPTERS, ()) + (name,)
- 254     return out
+ 217 def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None,
+ 218            scale: float = 1.0) -> dict:
+ 219     """The transformer's weights with the adapter beside them, for `ops.plinear`; `params` is not modified.
+ 220
+ 221     By default each matrix is cast to its base weight's dtype, as PEFT's injection does (`load_lora_adapter`, and
+ 222     `hyperflow.attach`). `keep_dtype=True` leaves the adapter as it is: float32 factors over a bf16 base, what
+ 223     `cast_training_params` gives a trainer (and what diffusers' `low_cpu_mem_usage=True` loading gives a float32 file).
+ 224     A module whose scaling is not 1 also gets a `lora_scaling` entry, in float32; a scaling that is finite as a Python
+ 225     float and not in float32 (a scale of 1e40) is refused.
+ 226
+ 227     `scale` is the adapter's strength, 1.0 being as trained: each module's scaling becomes `scale * alpha / rank`,
+ 228     computed in that order, which is PEFT's `set_scale` and so what diffusers' `set_adapters(name, weights=scale)`
+ 229     leaves on every layer. Any finite number: a negative one subtracts the adapter's delta, and zero keeps the adapter
+ 230     attached with a delta of zero (`for_sampling` leaves it off instead).
+ 231
+ 232     Without a `name` the adapter is the only one its Linears can carry. With one it is stacked: its matrices go under
+ 233     PEFT's runtime names, and the name is appended to each Linear's `lora_adapters`, so adapters apply in the order
+ 234     they were attached (`set_active` changes that). A named and an unnamed adapter can't share a Linear, and a name is
+ 235     used once: diffusers' `load_lora_adapter` refuses a name already in use too. That includes a name these weights
+ 236     only list or carry a scaling for, which is what the frozen half of `split` looks like (`join` is the way back
+ 237     from it); attaching onto that half would name the adapter twice on each Linear and apply it twice."""
+ 238     check(adapter, cfg)
+ 239     check_scalings(adapter, scale)
+ 240     if name is None:
+ 241         taken = [m for m in adapter.modules if _carries_lora(params, m)]
+ 242         if taken:
+ 243             raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: one unnamed adapter per "
+ 244                              "Linear; give each a name to stack them")
+ 245     else:
+ 246         if not name or "." in name:
+ 247             raise ValueError(f"an adapter name is a non-empty word without dots, got {name!r}")
+ 248         taken = [m for m in adapter.modules if m + ".lora_A.weight" in params]
+ 249         if taken:
+ 250             raise ValueError(f"{len(taken)} Linear(s) already carry an unnamed LoRA, e.g. {taken[:3]}")
+ 251         used = _named_parts(params, name)
+ 252         if used:
+ 253             raise ValueError(f"the adapter name {name!r} is already in use in these weights ({len(used)} keys, e.g. "
+ 254                              f"{used[:2]}). If they are the frozen half of `split`, `join` it with its trainable half; "
+ 255                              "a changed adapter goes in as that trainable half, not through a second `attach`")
+ 256     out = dict(params)
+ 257     for module in adapter.modules:
+ 258         dtype = params[module + ".weight"].dtype
+ 259         for matrix in ("A", "B"):
+ 260             tensor = adapter.tensors[f"{module}.lora_{matrix}.weight"]
+ 261             out[runtime_key(module, matrix, name)] = tensor if keep_dtype else tensor.astype(dtype)
+ 262         scaling = adapter.scaling(module) if scale == 1.0 else scale * adapter.alpha[module] / adapter.rank(module)
+ 263         if scaling != 1.0:
+ 264             out[module + SCALING + ("" if name is None else "." + name)] = mx.array(scaling, dtype=mx.float32)
+ 265         if name is not None:
+ 266             out[module + ADAPTERS] = params.get(module + ADAPTERS, ()) + (name,)
+ 267     return out
 ```
-📍 [`src/h3mlx/lora.py:262-275`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L262-L275)
+📍 [`src/h3mlx/lora.py:275-288`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L275-L288)
 ```python
- 262 def set_active(params: dict, names) -> dict:
- 263     """The weights with the adapters `names` active, in that order, and every other named adapter switched off: PEFT's
- 264     `set_adapters`. A Linear applies those of `names` it carries. The matrices of an adapter that is off stay in the
- 265     dict, unused, so it can be switched back on; `params` is not modified."""
- 266     names = tuple(names)
- 267     unknown = sorted(set(names) - set(adapter_names(params)))
- 268     if unknown or len(set(names)) != len(names):
- 269         raise ValueError(f"adapters {unknown or list(names)} are not attached, or are named twice; attached: {adapter_names(params)}")
- 270     out = dict(params)
- 271     for key in params:
- 272         if key.endswith(ADAPTERS):
- 273             module = key[: -len(ADAPTERS)]
- 274             out[key] = tuple(n for n in names if runtime_key(module, "A", n) in params)
- 275     return out
+ 275 def set_active(params: dict, names) -> dict:
+ 276     """The weights with the adapters `names` active, in that order, and every other named adapter switched off: PEFT's
+ 277     `set_adapters`. A Linear applies those of `names` it carries. The matrices of an adapter that is off stay in the
+ 278     dict, unused, so it can be switched back on; `params` is not modified."""
+ 279     names = tuple(names)
+ 280     unknown = sorted(set(names) - set(adapter_names(params)))
+ 281     if unknown or len(set(names)) != len(names):
+ 282         raise ValueError(f"adapters {unknown or list(names)} are not attached, or are named twice; attached: {adapter_names(params)}")
+ 283     out = dict(params)
+ 284     for key in params:
+ 285         if key.endswith(ADAPTERS):
+ 286             module = key[: -len(ADAPTERS)]
+ 287             out[key] = tuple(n for n in names if runtime_key(module, "A", n) in params)
+ 288     return out
 ```
 
 - **A name is used once.** `attach` refuses a name already in use anywhere in the weights, as diffusers'
@@ -2044,19 +2062,19 @@ In PEFT itself the two orders give different bits in both cases; the test checks
 
 ### 5.3 Two groups of weights
 
-📍 [`src/h3mlx/lora.py:278-288`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L278-L288)
+📍 [`src/h3mlx/lora.py:291-301`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L291-L301)
 ```python
- 278 def split(params: dict, name: str) -> tuple[dict, dict]:
- 279     """(frozen, trainable): the weights without the two matrices of the adapter `name`, and those matrices alone under
- 280     their runtime names. The two are separate groups: a trainer differentiates with respect to `trainable` only, and
- 281     merges them (`{**frozen, **trainable}`) inside the function it differentiates, so the base weights and every other
- 282     adapter are constants. The adapter's scalings and its place in each Linear's `lora_adapters` stay in `frozen`,
- 283     which is therefore not a model on its own: the forward refuses it, and so does `attach` for the same name. `join`
- 284     puts the two back together."""
- 285     trainable = {k: v for k, v in params.items() if (m := RUNTIME_RE.match(k)) and m["name"] == name}
- 286     if not trainable:
- 287         raise ValueError(f"no adapter named {name!r} in these weights; attached: {adapter_names(params)}")
- 288     return {k: v for k, v in params.items() if k not in trainable}, trainable
+ 291 def split(params: dict, name: str) -> tuple[dict, dict]:
+ 292     """(frozen, trainable): the weights without the two matrices of the adapter `name`, and those matrices alone under
+ 293     their runtime names. The two are separate groups: a trainer differentiates with respect to `trainable` only, and
+ 294     merges them (`{**frozen, **trainable}`) inside the function it differentiates, so the base weights and every other
+ 295     adapter are constants. The adapter's scalings and its place in each Linear's `lora_adapters` stay in `frozen`,
+ 296     which is therefore not a model on its own: the forward refuses it, and so does `attach` for the same name. `join`
+ 297     puts the two back together."""
+ 298     trainable = {k: v for k, v in params.items() if (m := RUNTIME_RE.match(k)) and m["name"] == name}
+ 299     if not trainable:
+ 300         raise ValueError(f"no adapter named {name!r} in these weights; attached: {adapter_names(params)}")
+ 301     return {k: v for k, v in params.items() if k not in trainable}, trainable
 ```
 
 `split(params, "subject")` returns the trainable adapter's matrices as one dict and everything else as another: the
@@ -2082,59 +2100,59 @@ rather than left to go wrong quietly (`test_the_frozen_half_of_a_split_is_not_a_
 - `attach` under the same name onto the frozen half is refused: the name is still in use there, by a list entry or a
   scaling. Accepted, it would list the adapter twice on each `Linear` and apply it twice.
 
-📍 [`src/h3mlx/lora.py:363-368`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L363-L368)
+📍 [`src/h3mlx/lora.py:376-381`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L376-L381)
 ```python
- 363 def join(frozen: dict, trainable: dict) -> dict:
- 364     """The reverse of `split`: the two groups as one dict of weights again, for a forward outside the loss (a
- 365     validation sample), for `set_active`, or for `file_tensors` and `save` after training. `trainable` is checked as
- 366     a loss checks it (`check_trainable`)."""
- 367     check_trainable(trainable, frozen)
- 368     return {**frozen, **trainable}
+ 376 def join(frozen: dict, trainable: dict) -> dict:
+ 377     """The reverse of `split`: the two groups as one dict of weights again, for a forward outside the loss (a
+ 378     validation sample), for `set_active`, or for `file_tensors` and `save` after training. `trainable` is checked as
+ 379     a loss checks it (`check_trainable`)."""
+ 380     check_trainable(trainable, frozen)
+ 381     return {**frozen, **trainable}
 ```
-📍 [`src/h3mlx/lora.py:291-332`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L291-L332)
+📍 [`src/h3mlx/lora.py:304-345`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L304-L345)
 ```python
- 291 def check_trainable(trainable: dict, frozen: dict) -> None:
- 292     """Refuses a pair of groups in which `trainable` would not be what the forward trains.
- 293
- 294     `ops.plinear` reads a named adapter's matrices only where the Linear lists that name as active. Matrices under a
- 295     file's names, for a name that was never attached, or for an adapter that `set_active` switched off are merged
- 296     into the weights and then ignored: the loss comes out without them and their gradients are exactly zero, with no
- 297     error. (A file's names on a Linear with no named adapter are read, but as an unnamed adapter of scaling 1.)
- 298
- 299     So: `trainable` is not empty; each of its keys is a runtime name, `<module>.lora_A/B.<name>.weight`; that name is
- 300     in `frozen`'s list of active adapters for that module; and each module's two matrices come together.
- 301
- 302     Two more, about the pair as a whole. No key is in both groups: merged, the trainable one would win, and an
- 303     adapter thought frozen would be trained. And the two together are a model: every adapter a Linear lists has its
- 304     matrices in one group or the other, so a trainable group that holds only some of an adapter's modules is refused
- 305     here and not later, inside the forward."""
- 306     if not trainable:
- 307         raise ValueError("no trainable matrices: `trainable` is empty")
- 308     shared = sorted(set(trainable) & set(frozen))
- 309     if shared:
- 310         raise ValueError(f"{len(shared)} key(s) are in both groups, e.g. {shared[0]!r}: a matrix is trained or frozen, "
- 311                          "not both")
- 312     seen: dict = {}
- 313     for key in trainable:
- 314         m = RUNTIME_RE.match(key)
- 315         if m is None:
- 316             raise ValueError(f"{key!r} is not an attached adapter's matrix (`<module>.lora_A/B.<name>.weight`): "
- 317                              "`attach` the adapter under a name and `split` it; a file's keys are not read by the forward")
- 318         active = frozen.get(m["module"] + ADAPTERS, ())
- 319         if m["name"] not in active:
- 320             raise ValueError(f"the adapter {m['name']!r} is not active on {m['module']!r} in the frozen weights (active "
- 321                              f"there: {list(active)}): its matrices would not be used and their gradients would be zero")
- 322         seen.setdefault((m["module"], m["name"]), set()).add(m["matrix"])
- 323     half = sorted(module for (module, _), matrices in seen.items() if matrices != {"A", "B"})
- 324     if half:
- 325         raise ValueError(f"{len(half)} module(s) have one of lora_A / lora_B without the other, e.g. {half[:3]}")
- 326     absent = sorted((name, key[: -len(ADAPTERS)]) for key, active in frozen.items() if key.endswith(ADAPTERS)
- 327                     for name in active
- 328                     if runtime_key(key[: -len(ADAPTERS)], "A", name) not in frozen and (key[: -len(ADAPTERS)], name) not in seen)
- 329     if absent:
- 330         raise ValueError(f"the adapter {absent[0][0]!r} is listed on {len(absent)} Linear(s) whose matrices are in "
- 331                          f"neither group, e.g. {absent[0][1]!r}: the trainable group must hold every module of the "
- 332                          "adapter that was split off")
+ 304 def check_trainable(trainable: dict, frozen: dict) -> None:
+ 305     """Refuses a pair of groups in which `trainable` would not be what the forward trains.
+ 306
+ 307     `ops.plinear` reads a named adapter's matrices only where the Linear lists that name as active. Matrices under a
+ 308     file's names, for a name that was never attached, or for an adapter that `set_active` switched off are merged
+ 309     into the weights and then ignored: the loss comes out without them and their gradients are exactly zero, with no
+ 310     error. (A file's names on a Linear with no named adapter are read, but as an unnamed adapter of scaling 1.)
+ 311
+ 312     So: `trainable` is not empty; each of its keys is a runtime name, `<module>.lora_A/B.<name>.weight`; that name is
+ 313     in `frozen`'s list of active adapters for that module; and each module's two matrices come together.
+ 314
+ 315     Two more, about the pair as a whole. No key is in both groups: merged, the trainable one would win, and an
+ 316     adapter thought frozen would be trained. And the two together are a model: every adapter a Linear lists has its
+ 317     matrices in one group or the other, so a trainable group that holds only some of an adapter's modules is refused
+ 318     here and not later, inside the forward."""
+ 319     if not trainable:
+ 320         raise ValueError("no trainable matrices: `trainable` is empty")
+ 321     shared = sorted(set(trainable) & set(frozen))
+ 322     if shared:
+ 323         raise ValueError(f"{len(shared)} key(s) are in both groups, e.g. {shared[0]!r}: a matrix is trained or frozen, "
+ 324                          "not both")
+ 325     seen: dict = {}
+ 326     for key in trainable:
+ 327         m = RUNTIME_RE.match(key)
+ 328         if m is None:
+ 329             raise ValueError(f"{key!r} is not an attached adapter's matrix (`<module>.lora_A/B.<name>.weight`): "
+ 330                              "`attach` the adapter under a name and `split` it; a file's keys are not read by the forward")
+ 331         active = frozen.get(m["module"] + ADAPTERS, ())
+ 332         if m["name"] not in active:
+ 333             raise ValueError(f"the adapter {m['name']!r} is not active on {m['module']!r} in the frozen weights (active "
+ 334                              f"there: {list(active)}): its matrices would not be used and their gradients would be zero")
+ 335         seen.setdefault((m["module"], m["name"]), set()).add(m["matrix"])
+ 336     half = sorted(module for (module, _), matrices in seen.items() if matrices != {"A", "B"})
+ 337     if half:
+ 338         raise ValueError(f"{len(half)} module(s) have one of lora_A / lora_B without the other, e.g. {half[:3]}")
+ 339     absent = sorted((name, key[: -len(ADAPTERS)]) for key, active in frozen.items() if key.endswith(ADAPTERS)
+ 340                     for name in active
+ 341                     if runtime_key(key[: -len(ADAPTERS)], "A", name) not in frozen and (key[: -len(ADAPTERS)], name) not in seen)
+ 342     if absent:
+ 343         raise ValueError(f"the adapter {absent[0][0]!r} is listed on {len(absent)} Linear(s) whose matrices are in "
+ 344                          f"neither group, e.g. {absent[0][1]!r}: the trainable group must hold every module of the "
+ 345                          "adapter that was split off")
 ```
 
 `join` is the way back: the two halves as one dict again, for a forward outside the loss, for `set_active`, or for
@@ -2154,34 +2172,34 @@ It also looks at the pair as a whole (`test_the_two_groups_share_nothing_and_mak
   group that holds only some of the split adapter's modules is refused here, not part of the way through a forward.
   (The rest of the adapter moved to the frozen side is fine: that is training some modules and freezing the others.)
 
-📍 [`src/h3mlx/lora.py:335-360`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L335-L360)
+📍 [`src/h3mlx/lora.py:348-373`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L348-L373)
 ```python
- 335 def check_config(trainable: dict, frozen: dict, cfg: dict) -> None:
- 336     """Refuses weights or trainable matrices that are not this config's transformer's.
- 337
- 338     The forward runs `cfg`'s blocks. Weights with more blocks than that would run as a shorter model, and trainable
- 339     matrices on the blocks left out would never be read: their gradients would be exactly zero, with no error. So the
- 340     weights have the config's transformer blocks and refiner blocks, the last of each and none beyond; every
- 341     trainable matrix sits on a Linear of this config (`wired_shapes`); and its shape is that Linear's, with one rank
- 342     for the pair."""
- 343     for prefix, count in (("transformer_blocks", cfg["num_layers"]), ("token_refiner.refiner_blocks", cfg["num_refiner_layers"])):
- 344         if f"{prefix}.{count}.attn.to_q.weight" in frozen or (count and f"{prefix}.{count - 1}.attn.to_q.weight" not in frozen):
- 345             raise ValueError(f"the config has {count} {prefix}, and the weights do not: they are another model's, or "
- 346                              "the config is")
- 347     wired = wired_shapes(cfg)
- 348     ranks: dict = {}
- 349     for key, value in trainable.items():
- 350         m = RUNTIME_RE.match(key)
- 351         if m is None or m["module"] not in wired:
- 352             raise ValueError(f"{key!r} is not on a Linear of the transformer this config describes: it would never be "
- 353                              "read, and its gradient would be zero")
- 354         out_features, in_features = wired[m["module"]]
- 355         shape = tuple(value.shape)
- 356         rank = shape[0 if m["matrix"] == "A" else -1] if len(shape) == 2 else 0
- 357         if rank < 1 or shape != ((rank, in_features) if m["matrix"] == "A" else (out_features, rank)):
- 358             raise ValueError(f"{key!r} has shape {shape}, which does not fit a Linear of {out_features} x {in_features}")
- 359         if ranks.setdefault((m["module"], m["name"]), rank) != rank:
- 360             raise ValueError(f"{m['module']}: lora_A and lora_B of {m['name']!r} have different ranks")
+ 348 def check_config(trainable: dict, frozen: dict, cfg: dict) -> None:
+ 349     """Refuses weights or trainable matrices that are not this config's transformer's.
+ 350
+ 351     The forward runs `cfg`'s blocks. Weights with more blocks than that would run as a shorter model, and trainable
+ 352     matrices on the blocks left out would never be read: their gradients would be exactly zero, with no error. So the
+ 353     weights have the config's transformer blocks and refiner blocks, the last of each and none beyond; every
+ 354     trainable matrix sits on a Linear of this config (`wired_shapes`); and its shape is that Linear's, with one rank
+ 355     for the pair."""
+ 356     for prefix, count in (("transformer_blocks", cfg["num_layers"]), ("token_refiner.refiner_blocks", cfg["num_refiner_layers"])):
+ 357         if f"{prefix}.{count}.attn.to_q.weight" in frozen or (count and f"{prefix}.{count - 1}.attn.to_q.weight" not in frozen):
+ 358             raise ValueError(f"the config has {count} {prefix}, and the weights do not: they are another model's, or "
+ 359                              "the config is")
+ 360     wired = wired_shapes(cfg)
+ 361     ranks: dict = {}
+ 362     for key, value in trainable.items():
+ 363         m = RUNTIME_RE.match(key)
+ 364         if m is None or m["module"] not in wired:
+ 365             raise ValueError(f"{key!r} is not on a Linear of the transformer this config describes: it would never be "
+ 366                              "read, and its gradient would be zero")
+ 367         out_features, in_features = wired[m["module"]]
+ 368         shape = tuple(value.shape)
+ 369         rank = shape[0 if m["matrix"] == "A" else -1] if len(shape) == 2 else 0
+ 370         if rank < 1 or shape != ((rank, in_features) if m["matrix"] == "A" else (out_features, rank)):
+ 371             raise ValueError(f"{key!r} has shape {shape}, which does not fit a Linear of {out_features} x {in_features}")
+ 372         if ranks.setdefault((m["module"], m["name"]), rank) != rank:
+ 373             raise ValueError(f"{m['module']}: lora_A and lora_B of {m['name']!r} have different ranks")
 ```
 
 `check_config` is the third thing a loss checks: the weights and the trainable matrices are the config's. The forward
@@ -2340,7 +2358,7 @@ the base-class method its audio rows pass through, and its own packing of the se
  944         return torch.unique(row_timesteps, sorted=True, return_inverse=True)
 ```
 
-📍 [`src/h3mlx/train.py:98-118`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L98-L118)
+📍 [`src/h3mlx/train.py:98-118`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L98-L118)
 ```python
   98 @dataclass
   99 class Example:
@@ -2364,7 +2382,7 @@ the base-class method its audio rows pass through, and its own packing of the se
  117         taken over, against `target`. The rows are told apart by their place in the layout, as `denoise` does it."""
  118         return video_pred[:, self.num_condition_rows:]
 ```
-📍 [`src/h3mlx/train.py:140-212`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L140-L212)
+📍 [`src/h3mlx/train.py:140-212`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L140-L212)
 ```python
  140 def build_example(cfg: dict, text_token_tags, latents: mx.array, sigma, noise, *, condition_t: float,
  141                   condition_latents=(), audio_sigma=None) -> Example:
@@ -2476,7 +2494,7 @@ Three inputs are refused that would otherwise build a wrong example without an e
 
 ### 6.3 The loss mask
 
-📍 [`src/h3mlx/train.py:121-127`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L121-L127)
+📍 [`src/h3mlx/train.py:121-127`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L121-L127)
 ```python
  121 def loss_mask(layout: Layout) -> np.ndarray:
  122     """True at the packed-sequence rows a picture's loss covers: the generated video rows. Text rows, audio rows and
@@ -2507,7 +2525,7 @@ on, and the layout's mask is unchanged.
   65     return (latents - latents_mean) / latents_std
 ```
 
-📍 [`src/h3mlx/vae.py:253-264`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/vae.py#L253-L264)
+📍 [`src/h3mlx/vae.py:253-264`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/vae.py#L253-L264)
 ```python
  253 def encode_condition(vae: VideoVAE, pixels_u8: mx.array, pixel_mean, pixel_std, latents_mean, latents_std, noise_fn,
  254                      float16_round: bool = True):
@@ -2522,7 +2540,7 @@ on, and the layout's mask is unchanged.
  263         lat = lat.astype(mx.float16).astype(mx.float32)
  264     return (lat - mx.array(latents_mean)) / mx.array(latents_std)
 ```
-📍 [`src/h3mlx/train.py:130-137`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L130-L137)
+📍 [`src/h3mlx/train.py:130-137`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L130-L137)
 ```python
  130 def encode_references(components, pictures, *, float16_round: bool) -> list:
  131     """The latents of an edit example's reference pictures: `image.encode_pictures` (a seed-42 posterior sample each),
@@ -2569,7 +2587,7 @@ one torch generator in the pipeline's order.
 
 ## 7. The example's loss and its gradient
 
-📍 [`src/h3mlx/train.py:218-236`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L218-L236)
+📍 [`src/h3mlx/train.py:218-236`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L218-L236)
 ```python
  218 def check_inputs(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array) -> None:
  219     """What every loss and gradient of an example checks first.
@@ -2591,32 +2609,32 @@ one torch generator in the pipeline's order.
  235         raise ValueError(f"text must be an array of shape {want} (1, the layout's text rows, text dim), got "
  236                          f"{tuple(text.shape) if hasattr(text, 'shape') else type(text).__name__}")
 ```
-📍 [`src/h3mlx/train.py:285-300`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L285-L300)
+📍 [`src/h3mlx/train.py:290-305`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L290-L305)
 ```python
- 285 def example_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None) -> mx.array:
- 286     """One example's loss: the transformer's forward on the example's rows with the weights `{**frozen, **trainable}`
- 287     (`ExampleForward`), then `flow_match_loss` of the generated video rows against the example's target. Nothing is
- 288     taken from the audio output or from the condition rows.
- 289
- 290     The weights come in as two arguments, the trainable matrices first (`lora.split`), so the function can be
- 291     differentiated with respect to them and to nothing else; `check_inputs` refuses a `trainable` the forward would
- 292     not use and a `text` that is not (1, text rows, text dim), the prompt's embeddings. Products with float32 LoRA
- 293     matrices are float32 whatever the base's dtype (`ops.plinear`), and the loss is float32."""
- 294     check_inputs(trainable, frozen, cfg, example, text)
- 295     p = {**frozen, **trainable}
- 296     forward = ExampleForward(cfg, example, text, weight)
- 297     x, temb = forward.start(p)
- 298     for i in range(cfg["num_layers"]):
- 299         x = forward.block(x, temb, ops._sub(p, f"transformer_blocks.{i}."))
- 300     return forward.finish(x, temb, p)
+ 290 def example_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None) -> mx.array:
+ 291     """One example's loss: the transformer's forward on the example's rows with the weights `{**frozen, **trainable}`
+ 292     (`ExampleForward`), then `flow_match_loss` of the generated video rows against the example's target. Nothing is
+ 293     taken from the audio output or from the condition rows.
+ 294
+ 295     The weights come in as two arguments, the trainable matrices first (`lora.split`), so the function can be
+ 296     differentiated with respect to them and to nothing else; `check_inputs` refuses a `trainable` the forward would
+ 297     not use and a `text` that is not (1, text rows, text dim), the prompt's embeddings. Products with float32 LoRA
+ 298     matrices are float32 whatever the base's dtype (`ops.plinear`), and the loss is float32."""
+ 299     check_inputs(trainable, frozen, cfg, example, text)
+ 300     p = {**frozen, **trainable}
+ 301     forward = ExampleForward(cfg, example, text, weight)
+ 302     x, temb = forward.start(p)
+ 303     for i in range(cfg["num_layers"]):
+ 304         x = forward.block(x, temb, ops._sub(p, f"transformer_blocks.{i}."))
+ 305     return forward.finish(x, temb, p)
 ```
-📍 [`src/h3mlx/train.py:303-307`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L303-L307)
+📍 [`src/h3mlx/train.py:308-312`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L308-L312)
 ```python
- 303 def loss_and_gradients(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None):
- 304     """(loss, gradients) of `example_loss`. The gradients are a dict with `trainable`'s keys and no others: the base
- 305     weights and any other adapter in `frozen` are constants of the differentiation and get none."""
- 306     check_inputs(trainable, frozen, cfg, example, text)
- 307     return mx.value_and_grad(example_loss)(trainable, frozen, cfg, example, text, weight)
+ 308 def loss_and_gradients(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None):
+ 309     """(loss, gradients) of `example_loss`. The gradients are a dict with `trainable`'s keys and no others: the base
+ 310     weights and any other adapter in `frozen` are constants of the differentiation and get none."""
+ 311     check_inputs(trainable, frozen, cfg, example, text)
+ 312     return mx.value_and_grad(example_loss)(trainable, frozen, cfg, example, text, weight)
 ```
 
 The weights come in as two arguments, the trainable group first. `mx.value_and_grad` differentiates with respect to
@@ -2642,7 +2660,7 @@ both gradients of §8:
 
 ### 7.1 The forward that is differentiated
 
-📍 [`src/h3mlx/train.py:239-282`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L239-L282)
+📍 [`src/h3mlx/train.py:239-287`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L239-L287)
 ```python
  239 class ExampleForward:
  240     """The transformer's forward on one example, for differentiating, in three stages: `start` (the projections, the
@@ -2650,44 +2668,49 @@ both gradients of §8:
  242     the heads and the loss). Each stage takes its weights as a dict, so a caller chooses which of them are arguments
  243     of a transform.
  244
- 245     These are `ops.dit_forward`'s operations in its order, and the loss is the same bit for bit. Three things differ,
- 246     and none changes a value. Nothing is evaluated between the stages: the sampling forward evaluates after every
- 247     block, and an array evaluated while it is being traced keeps its graph. The modulation tables' rows are gathered
- 248     with `ops.take_rows_for_training`, whose gradient over a half-precision table is the sum torch's is. And the
- 249     attention is `ops.attention_for_training`, which runs half-precision q, k and v through the same call in
- 250     float32: its backward is then right when attention logits are large, which the half-precision call's is not."""
+ 245     These are `ops.dit_forward`'s operations in its order. Three things differ. Nothing is evaluated between the
+ 246     stages: the sampling forward evaluates after every block, and an array evaluated while it is being traced keeps
+ 247     its graph. The modulation tables' rows are gathered with `ops.take_rows_for_training`, whose gradient over a
+ 248     half-precision table is the sum torch's is. And the attention is `ops.attention_for_training`, which runs
+ 249     half-precision q, k and v through the same call in float32: its backward is then right when attention scores are
+ 250     large, which the half-precision call's is not.
  251
- 252     def __init__(self, cfg: dict, example: Example, text: mx.array, weight=None):
- 253         lay = example.layout
- 254         self.cfg, self.example, self.text, self.weight = cfg, example, text, weight
- 255         self.video, self.audio = example.video_rows[None], example.audio_rows[None]
- 256         self.timestep, self.t_rows = mx.array(example.timestep), mx.array(example.timestep_indices)
- 257         self.video_indices, self.audio_indices = mx.array(lay.video_indices), mx.array(lay.audio_indices)
- 258         self.text_indices = mx.array(lay.text_indices)
- 259         self.seq = len(lay.token_tags)
- 260         self.adaln_indices = self.t_rows * ops.MODALITY_NUM + mx.array(lay.token_tags)
- 261         self.rotary = ops.rope_cos_sin(mx.array(lay.position_ids.astype(np.float32)),
- 262                                        ops.rope_inv_freq(cfg["rope_freq_dim"], cfg["rope_theta"]))
- 263
- 264     def start(self, p: dict) -> tuple[mx.array, mx.array]:
- 265         """(the packed rows before the first block, the time embedding) from the whole dict of weights."""
- 266         x = ops.dit_inputs(p, self.cfg, self.video, self.audio, self.text, self.seq, self.video_indices,
- 267                            self.audio_indices, self.text_indices, attend=ops.attention_for_training)
- 268         return x, ops.two_time_embedding(self.timestep, None, p, self.cfg)
- 269
- 270     def block(self, x: mx.array, temb: mx.array, block_p: dict) -> mx.array:
- 271         """One block on its own weights (the keys under `transformer_blocks.<i>.`, without that prefix)."""
- 272         cfg = self.cfg
- 273         return ops.dit_block(x, temb, self.adaln_indices, self.rotary, block_p, cfg["num_attention_heads"],
- 274                              cfg["hidden_size"], cfg["norm_eps"], cfg["qk_norm_eps"], take=ops.take_rows_for_training,
- 275                              attend=ops.attention_for_training)
- 276
- 277     def finish(self, x: mx.array, temb: mx.array, p: dict) -> mx.array:
- 278         """The loss from the last block's output, from the whole dict of weights."""
- 279         shift, scale = ops.norm_out_tables(temb, p)
- 280         video_pred, _ = ops.dit_outputs(x, p, self.cfg, shift, scale, self.t_rows, self.video_indices,
- 281                                         self.audio_indices, take=ops.take_rows_for_training)
- 282         return flow_match_loss(self.example.generated(video_pred), self.example.target[None], self.weight)
+ 252     Where the release runs (MLX's fused kernels on the GPU), none of the three changes a value: the loss is the
+ 253     sampling forward's bit for bit, in float32 and over a bf16 base (tested at head width 64; the release's is 128).
+ 254     Where MLX computes a half-precision attention in half precision instead (head width 32, the CPU), the float32
+ 255     call is the more exact of the two and the losses differ by rounding (within 0.2% on the tiny models)."""
+ 256
+ 257     def __init__(self, cfg: dict, example: Example, text: mx.array, weight=None):
+ 258         lay = example.layout
+ 259         self.cfg, self.example, self.text, self.weight = cfg, example, text, weight
+ 260         self.video, self.audio = example.video_rows[None], example.audio_rows[None]
+ 261         self.timestep, self.t_rows = mx.array(example.timestep), mx.array(example.timestep_indices)
+ 262         self.video_indices, self.audio_indices = mx.array(lay.video_indices), mx.array(lay.audio_indices)
+ 263         self.text_indices = mx.array(lay.text_indices)
+ 264         self.seq = len(lay.token_tags)
+ 265         self.adaln_indices = self.t_rows * ops.MODALITY_NUM + mx.array(lay.token_tags)
+ 266         self.rotary = ops.rope_cos_sin(mx.array(lay.position_ids.astype(np.float32)),
+ 267                                        ops.rope_inv_freq(cfg["rope_freq_dim"], cfg["rope_theta"]))
+ 268
+ 269     def start(self, p: dict) -> tuple[mx.array, mx.array]:
+ 270         """(the packed rows before the first block, the time embedding) from the whole dict of weights."""
+ 271         x = ops.dit_inputs(p, self.cfg, self.video, self.audio, self.text, self.seq, self.video_indices,
+ 272                            self.audio_indices, self.text_indices, attend=ops.attention_for_training)
+ 273         return x, ops.two_time_embedding(self.timestep, None, p, self.cfg)
+ 274
+ 275     def block(self, x: mx.array, temb: mx.array, block_p: dict) -> mx.array:
+ 276         """One block on its own weights (the keys under `transformer_blocks.<i>.`, without that prefix)."""
+ 277         cfg = self.cfg
+ 278         return ops.dit_block(x, temb, self.adaln_indices, self.rotary, block_p, cfg["num_attention_heads"],
+ 279                              cfg["hidden_size"], cfg["norm_eps"], cfg["qk_norm_eps"], take=ops.take_rows_for_training,
+ 280                              attend=ops.attention_for_training)
+ 281
+ 282     def finish(self, x: mx.array, temb: mx.array, p: dict) -> mx.array:
+ 283         """The loss from the last block's output, from the whole dict of weights."""
+ 284         shift, scale = ops.norm_out_tables(temb, p)
+ 285         video_pred, _ = ops.dit_outputs(x, p, self.cfg, shift, scale, self.t_rows, self.video_indices,
+ 286                                         self.audio_indices, take=ops.take_rows_for_training)
+ 287         return flow_match_loss(self.example.generated(video_pred), self.example.target[None], self.weight)
 ```
 
 `example_loss` does not call `ops.dit_forward`. It runs that forward's operations in its order, from the functions
@@ -2713,13 +2736,13 @@ graph that made it, so every block's intermediates stay alive until the backward
  365         attn_output = self.attn(norm_hidden_states, rotary_emb, attention_mask)
  366         hidden_states = residual + gate_msa.index_select(0, adaln_indices) * attn_output
 ```
-📍 [`src/h3mlx/ops.py:166-168`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/ops.py#L166-L168)
+📍 [`src/h3mlx/ops.py:166-168`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/ops.py#L166-L168)
 ```python
  166 def take_rows(table: mx.array, rows: mx.array) -> mx.array:
  167     """table[rows] along the first axis: each sequence row's entry of a (t, modality) table."""
  168     return mx.take(table, rows, axis=0)
 ```
-📍 [`src/h3mlx/ops.py:171-183`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/ops.py#L171-L183)
+📍 [`src/h3mlx/ops.py:171-183`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/ops.py#L171-L183)
 ```python
  171 def take_rows_for_training(table: mx.array, rows: mx.array) -> mx.array:
  172     """`take_rows` for a forward that is differentiated: the same values bit for bit, with a half-precision table
@@ -2792,7 +2815,7 @@ diffusers and here:
  208         )
  209         hidden_states = hidden_states.flatten(2, 3).type_as(query)
 ```
-📍 [`src/h3mlx/ops.py:212-220`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/ops.py#L212-L220)
+📍 [`src/h3mlx/ops.py:212-220`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/ops.py#L212-L220)
 ```python
  212 def attention(q: mx.array, k: mx.array, v: mx.array, mask: mx.array | None = None) -> mx.array:
  213     """Full self-attention. q, k, v: (batch, seq, heads, head_dim) as diffusers lays them out; returns the same layout.
@@ -2804,7 +2827,7 @@ diffusers and here:
  219     o = mx.fast.scaled_dot_product_attention(qt, kt, vt, scale=scale, mask=mask)
  220     return o.transpose(0, 2, 1, 3)
 ```
-📍 [`src/h3mlx/ops.py:223-244`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/ops.py#L223-L244)
+📍 [`src/h3mlx/ops.py:223-244`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/ops.py#L223-L244)
 ```python
  223 def attention_for_training(q: mx.array, k: mx.array, v: mx.array, mask: mx.array | None = None) -> mx.array:
  224     """`attention` for a forward that is differentiated: half-precision q, k and v go through the same call in
@@ -2970,7 +2993,7 @@ was tested where a wrong one would hurt: rows far below the epsilon, where the d
 exact zeros, rows of 1e6, affine weights of 40, and rows of every size from 1e-6 to 1e4 at once, at epsilons of 1e-5
 and 1e-6, on both devices. The gradients for the input and for the weight are within 0.5% of torch's float32
 gradients in every case, where torch's own bf16 backward is at 0.3%
-(`test_rms_norm_backward_in_bf16_is_torchs`, and the bench's fourth table). Nothing was changed there. The layer
+(`test_rms_norm_backward_in_bf16_is_torchs`, and the bench's fifth table). Nothing was changed there. The layer
 norm and the attention of the VAEs are fused ops too, and they are in the encoders, which are not differentiated.
 
 ### 7.2 Float32
@@ -3007,7 +3030,7 @@ the same matrices.
 **Float32 products, pinned.** The test above cannot tell float32 products from bf16 ones: with ordinary matrices
 either is within bf16's noise of the float32 run. An adapter whose rows cancel can:
 
-📍 [`tests/test_train_gradients.py:100-115`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/tests/test_train_gradients.py#L100-L115)
+📍 [`tests/test_train_gradients.py:100-115`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/tests/test_train_gradients.py#L100-L115)
 ```python
  100 def cancelling_adapter(cfg, modules, half, delta, seed, std=0.1):
  101     """An adapter that only float32 products get right. lora_A's second half is minus its first half plus
@@ -3100,7 +3123,7 @@ two other ways to get the same loss and the same gradients. There is no library 
 
 ### 8.1 Each block checkpointed
 
-📍 [`src/h3mlx/backward.py:41-57`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/backward.py#L41-L57)
+📍 [`src/h3mlx/backward.py:41-57`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/backward.py#L41-L57)
 ```python
   41 def checkpointed_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None) -> mx.array:
   42     """`train.example_loss` with each block run as an `mx.checkpoint` of (the block's input, the time embedding, the
@@ -3120,7 +3143,7 @@ two other ways to get the same loss and the same gradients. There is no library 
   56         x = mx.checkpoint(block)(x, temb, *[trainable[prefix + k] for k in names])
   57     return forward.finish(x, temb, p)
 ```
-📍 [`src/h3mlx/backward.py:60-65`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/backward.py#L60-L65)
+📍 [`src/h3mlx/backward.py:60-65`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/backward.py#L60-L65)
 ```python
   60 def loss_and_gradients_checkpointed(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array,
   61                                     weight=None):
@@ -3148,7 +3171,7 @@ has a minimal test:
 
 ### 8.2 Block by block, by hand
 
-📍 [`src/h3mlx/backward.py:68-125`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/backward.py#L68-L125)
+📍 [`src/h3mlx/backward.py:68-125`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/backward.py#L68-L125)
 ```python
   68 def loss_and_gradients_blockwise(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array,
   69                                  weight=None, after_stage=None):
@@ -3318,73 +3341,73 @@ The checkpointed path is not asserted on the default device.
 
 ## 9. The optimizer step
 
-📍 [`src/h3mlx/train.py:317-337`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L317-L337)
+📍 [`src/h3mlx/train.py:322-342`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L322-L342)
 ```python
- 317 def adamw(*, learning_rate: float, betas, eps: float, weight_decay: float) -> optim.AdamW:
- 318     """MLX's AdamW set up to compute `torch.optim.AdamW`'s update: with `bias_correction=True`. MLX leaves the bias
- 319     correction out by default, and its first step is then `(1 - beta1) / sqrt(1 - beta2)` times torch's, 3.2 times
- 320     for betas of (0.9, 0.999). No hyper-parameter has a default here: every one is the caller's to give.
- 321
- 322     The arguments are checked as torch's constructor checks them, which MLX's does not: a learning rate and a weight
- 323     decay of at least 0, betas in [0, 1), none of them NaN. Three things are stricter than torch's: they must be
- 324     finite; the learning rate is a number (a schedule is not built); and `eps` must be above 0. torch takes an `eps`
- 325     of 0, and so does the arithmetic until a gradient element is exactly zero: the update is then 0 / 0. That is
- 326     every element of `lora_A` on the first step from PEFT's initialisation, where `lora_B` is zero."""
- 327     for what, value in (("learning_rate", learning_rate), ("weight_decay", weight_decay)):
- 328         if not _real(value) or not math.isfinite(value) or value < 0:
- 329             raise ValueError(f"{what} must be a finite number of at least 0, got {value!r}")
- 330     betas = list(betas)
- 331     if len(betas) != 2 or not all(_real(b) and 0 <= b < 1 for b in betas):
- 332         raise ValueError(f"betas must be two numbers in [0, 1), got {betas!r}")
- 333     if not _real(eps) or not math.isfinite(eps) or eps <= 0:
- 334         raise ValueError(f"eps must be a finite number above 0, got {eps!r}: with 0, a gradient element that is "
- 335                          "exactly zero is updated by 0 / 0")
- 336     return optim.AdamW(learning_rate=learning_rate, betas=betas, eps=eps, weight_decay=weight_decay,
- 337                        bias_correction=True)
+ 322 def adamw(*, learning_rate: float, betas, eps: float, weight_decay: float) -> optim.AdamW:
+ 323     """MLX's AdamW set up to compute `torch.optim.AdamW`'s update: with `bias_correction=True`. MLX leaves the bias
+ 324     correction out by default, and its first step is then `(1 - beta1) / sqrt(1 - beta2)` times torch's, 3.2 times
+ 325     for betas of (0.9, 0.999). No hyper-parameter has a default here: every one is the caller's to give.
+ 326
+ 327     The arguments are checked as torch's constructor checks them, which MLX's does not: a learning rate and a weight
+ 328     decay of at least 0, betas in [0, 1), none of them NaN. Three things are stricter than torch's: they must be
+ 329     finite; the learning rate is a number (a schedule is not built); and `eps` must be above 0. torch takes an `eps`
+ 330     of 0, and so does the arithmetic until a gradient element is exactly zero: the update is then 0 / 0. That is
+ 331     every element of `lora_A` on the first step from PEFT's initialisation, where `lora_B` is zero."""
+ 332     for what, value in (("learning_rate", learning_rate), ("weight_decay", weight_decay)):
+ 333         if not _real(value) or not math.isfinite(value) or value < 0:
+ 334             raise ValueError(f"{what} must be a finite number of at least 0, got {value!r}")
+ 335     betas = list(betas)
+ 336     if len(betas) != 2 or not all(_real(b) and 0 <= b < 1 for b in betas):
+ 337         raise ValueError(f"betas must be two numbers in [0, 1), got {betas!r}")
+ 338     if not _real(eps) or not math.isfinite(eps) or eps <= 0:
+ 339         raise ValueError(f"eps must be a finite number above 0, got {eps!r}: with 0, a gradient element that is "
+ 340                          "exactly zero is updated by 0 / 0")
+ 341     return optim.AdamW(learning_rate=learning_rate, betas=betas, eps=eps, weight_decay=weight_decay,
+ 342                        bias_correction=True)
 ```
-📍 [`src/h3mlx/train.py:340-380`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L340-L380)
+📍 [`src/h3mlx/train.py:345-385`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L345-L385)
 ```python
- 340 def optimizer_step(optimizer, trainable: dict, grads: dict, *, max_grad_norm: float) -> tuple[dict, float]:
- 341     """One step: (the updated matrices, the gradients' global norm before clipping), both evaluated.
- 342
- 343     The gradients are scaled down to a global norm of `max_grad_norm` when theirs is larger, as torch's
- 344     `clip_grad_norm_` scales them (`math.inf` clips nothing), and the optimizer applies them. Refused before any
- 345     matrix is touched:
- 346
- 347     * matrices that are not float32. At a learning rate of 1e-4 a bf16 element of magnitude 2**-5 or more does not
- 348       move at all, because the update is under half its spacing, and a smaller one moves by whole steps of its
- 349       spacing; in float16 the second moment of small gradients underflows and the update is NaN. So the trainable
- 350       matrices are float32 over whatever base (`lora.attach(..., keep_dtype=True)`).
- 351     * gradients whose keys are not the matrices' keys, or that are not float32 arrays of their matrix's shape. A
- 352       gradient of another shape that broadcasts would be applied, and would leave moments of its own shape in the
- 353       optimizer. A bf16 gradient would have its norm summed in bf16 by MLX's clip (which widens float16 and not
- 354       bf16), a sum that stalls, and would leave bf16 moments;
- 355     * a `max_grad_norm` that is not a positive number;
- 356     * a gradient norm that is not finite, which torch's clip refuses under `error_if_nonfinite` and otherwise lets
- 357       through into the weights."""
- 358     if not trainable or set(grads) != set(trainable):
- 359         raise ValueError(f"the gradients' keys must be the trainable matrices' keys: {len(grads)} against {len(trainable)}")
- 360     narrow = sorted(k for k, v in trainable.items() if v.dtype != mx.float32)
- 361     if narrow:
- 362         raise ValueError(f"the trainable matrices must be float32; {len(narrow)} are not, e.g. {narrow[0]} "
- 363                          f"({trainable[narrow[0]].dtype}): half-precision matrices do not take updates of this size")
- 364     wrong = sorted(k for k, v in trainable.items()
- 365                    if not isinstance(grads[k], mx.array) or grads[k].dtype != mx.float32 or grads[k].shape != v.shape)
- 366     if wrong:
- 367         g = grads[wrong[0]]
- 368         found = f"{g.dtype} {tuple(g.shape)}" if isinstance(g, mx.array) else type(g).__name__
- 369         raise ValueError(f"each gradient must be a float32 array of its matrix's shape; {len(wrong)} are not, e.g. "
- 370                          f"{wrong[0]}: {found} for a matrix of {tuple(trainable[wrong[0]].shape)}")
- 371     if not isinstance(max_grad_norm, numbers.Real) or isinstance(max_grad_norm, bool) or not max_grad_norm > 0:
- 372         raise ValueError(f"max_grad_norm must be a positive number (math.inf to clip nothing), got {max_grad_norm!r}")
- 373     clipped, norm = optim.clip_grad_norm(grads, float(max_grad_norm))
- 374     norm = float(norm)
- 375     if not math.isfinite(norm):
- 376         raise ValueError(f"the gradients' norm is {norm}: not applied")
- 377     updated = optimizer.apply_gradients(clipped, trainable)
- 378     updated = {k: updated[k] for k in trainable}
- 379     mx.eval(updated, optimizer.state)
- 380     return updated, norm
+ 345 def optimizer_step(optimizer, trainable: dict, grads: dict, *, max_grad_norm: float) -> tuple[dict, float]:
+ 346     """One step: (the updated matrices, the gradients' global norm before clipping), both evaluated.
+ 347
+ 348     The gradients are scaled down to a global norm of `max_grad_norm` when theirs is larger, as torch's
+ 349     `clip_grad_norm_` scales them (`math.inf` clips nothing), and the optimizer applies them. Refused before any
+ 350     matrix is touched:
+ 351
+ 352     * matrices that are not float32. At a learning rate of 1e-4 a bf16 element of magnitude 2**-5 or more does not
+ 353       move at all, because the update is under half its spacing, and a smaller one moves by whole steps of its
+ 354       spacing; in float16 the second moment of small gradients underflows and the update is NaN. So the trainable
+ 355       matrices are float32 over whatever base (`lora.attach(..., keep_dtype=True)`).
+ 356     * gradients whose keys are not the matrices' keys, or that are not float32 arrays of their matrix's shape. A
+ 357       gradient of another shape that broadcasts would be applied, and would leave moments of its own shape in the
+ 358       optimizer. A bf16 gradient would have its norm summed in bf16 by MLX's clip (which widens float16 and not
+ 359       bf16), a sum that stalls, and would leave bf16 moments;
+ 360     * a `max_grad_norm` that is not a positive number;
+ 361     * a gradient norm that is not finite, which torch's clip refuses under `error_if_nonfinite` and otherwise lets
+ 362       through into the weights."""
+ 363     if not trainable or set(grads) != set(trainable):
+ 364         raise ValueError(f"the gradients' keys must be the trainable matrices' keys: {len(grads)} against {len(trainable)}")
+ 365     narrow = sorted(k for k, v in trainable.items() if v.dtype != mx.float32)
+ 366     if narrow:
+ 367         raise ValueError(f"the trainable matrices must be float32; {len(narrow)} are not, e.g. {narrow[0]} "
+ 368                          f"({trainable[narrow[0]].dtype}): half-precision matrices do not take updates of this size")
+ 369     wrong = sorted(k for k, v in trainable.items()
+ 370                    if not isinstance(grads[k], mx.array) or grads[k].dtype != mx.float32 or grads[k].shape != v.shape)
+ 371     if wrong:
+ 372         g = grads[wrong[0]]
+ 373         found = f"{g.dtype} {tuple(g.shape)}" if isinstance(g, mx.array) else type(g).__name__
+ 374         raise ValueError(f"each gradient must be a float32 array of its matrix's shape; {len(wrong)} are not, e.g. "
+ 375                          f"{wrong[0]}: {found} for a matrix of {tuple(trainable[wrong[0]].shape)}")
+ 376     if not isinstance(max_grad_norm, numbers.Real) or isinstance(max_grad_norm, bool) or not max_grad_norm > 0:
+ 377         raise ValueError(f"max_grad_norm must be a positive number (math.inf to clip nothing), got {max_grad_norm!r}")
+ 378     clipped, norm = optim.clip_grad_norm(grads, float(max_grad_norm))
+ 379     norm = float(norm)
+ 380     if not math.isfinite(norm):
+ 381         raise ValueError(f"the gradients' norm is {norm}: not applied")
+ 382     updated = optimizer.apply_gradients(clipped, trainable)
+ 383     updated = {k: updated[k] for k in trainable}
+ 384     mx.eval(updated, optimizer.state)
+ 385     return updated, norm
 ```
 
 The original is torch's: `torch.optim.AdamW` after `torch.nn.utils.clip_grad_norm_`. The port uses MLX's own
@@ -3478,47 +3501,47 @@ float16 the optimizer's own state breaks first.
 
 ### 9.5 Saving the optimizer's state
 
-📍 [`src/h3mlx/train.py:383-395`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L383-L395)
+📍 [`src/h3mlx/train.py:388-400`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L388-L400)
 ```python
- 383 def optimizer_state(optimizer, trainable: dict) -> dict:
- 384     """The optimizer's state as a flat dict of arrays, for a checkpoint: the step count and, for each trainable
- 385     matrix, Adam's two moments, under `m.<key>` and `v.<key>`. The learning rate is not state here: it is constant
- 386     and an argument (`adamw`). Before the first step there is no state to save, which is an error."""
- 387     state = optimizer.state
- 388     missing = sorted(k for k in trainable if k not in state or set(state[k]) != {"m", "v"})
- 389     if missing or "step" not in state:
- 390         raise ValueError(f"the optimizer has no Adam state for {len(missing)} of {len(trainable)} matrices: it has not "
- 391                          "stepped on them yet")
- 392     out = {"step": mx.array(int(state["step"].item()), dtype=mx.uint64)}
- 393     for key in trainable:
- 394         out["m." + key], out["v." + key] = state[key]["m"], state[key]["v"]
- 395     return out
+ 388 def optimizer_state(optimizer, trainable: dict) -> dict:
+ 389     """The optimizer's state as a flat dict of arrays, for a checkpoint: the step count and, for each trainable
+ 390     matrix, Adam's two moments, under `m.<key>` and `v.<key>`. The learning rate is not state here: it is constant
+ 391     and an argument (`adamw`). Before the first step there is no state to save, which is an error."""
+ 392     state = optimizer.state
+ 393     missing = sorted(k for k in trainable if k not in state or set(state[k]) != {"m", "v"})
+ 394     if missing or "step" not in state:
+ 395         raise ValueError(f"the optimizer has no Adam state for {len(missing)} of {len(trainable)} matrices: it has not "
+ 396                          "stepped on them yet")
+ 397     out = {"step": mx.array(int(state["step"].item()), dtype=mx.uint64)}
+ 398     for key in trainable:
+ 399         out["m." + key], out["v." + key] = state[key]["m"], state[key]["v"]
+ 400     return out
 ```
-📍 [`src/h3mlx/train.py:398-420`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/train.py#L398-L420)
+📍 [`src/h3mlx/train.py:403-425`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/train.py#L403-L425)
 ```python
- 398 def restore_optimizer(optimizer, trainable: dict, saved: dict) -> None:
- 399     """Put a saved state (`optimizer_state`) into a new optimizer made with the same hyper-parameters, so that its
- 400     next step is the step the saved one would have taken. The saved moments must be exactly the trainable matrices',
- 401     in their shapes and float32."""
- 402     want = {"step"} | {f"{moment}.{key}" for key in trainable for moment in "mv"}
- 403     if set(saved) != want:
- 404         raise ValueError(f"the saved optimizer state is not for these matrices: {len(set(saved) ^ want)} names differ, "
- 405                          f"e.g. {sorted(set(saved) ^ want)[:2]}")
- 406     step = int(np.array(saved["step"]).item())
- 407     if step < 1:
- 408         raise ValueError(f"a saved optimizer state has taken at least one step, got {step}")
- 409     for key, matrix in trainable.items():
- 410         for moment in "mv":
- 411             got = saved[f"{moment}.{key}"]
- 412             if got.shape != matrix.shape or got.dtype != mx.float32:
- 413                 raise ValueError(f"{moment}.{key}: saved as {got.dtype} {tuple(got.shape)}, the matrix is float32 "
- 414                                  f"{tuple(matrix.shape)}")
- 415     optimizer.init(trainable)
- 416     state = optimizer.state
- 417     state["step"] = mx.array(step, dtype=state["step"].dtype)
- 418     for key in trainable:
- 419         state[key] = {"m": saved["m." + key], "v": saved["v." + key]}
- 420     mx.eval(state)
+ 403 def restore_optimizer(optimizer, trainable: dict, saved: dict) -> None:
+ 404     """Put a saved state (`optimizer_state`) into a new optimizer made with the same hyper-parameters, so that its
+ 405     next step is the step the saved one would have taken. The saved moments must be exactly the trainable matrices',
+ 406     in their shapes and float32."""
+ 407     want = {"step"} | {f"{moment}.{key}" for key in trainable for moment in "mv"}
+ 408     if set(saved) != want:
+ 409         raise ValueError(f"the saved optimizer state is not for these matrices: {len(set(saved) ^ want)} names differ, "
+ 410                          f"e.g. {sorted(set(saved) ^ want)[:2]}")
+ 411     step = int(np.array(saved["step"]).item())
+ 412     if step < 1:
+ 413         raise ValueError(f"a saved optimizer state has taken at least one step, got {step}")
+ 414     for key, matrix in trainable.items():
+ 415         for moment in "mv":
+ 416             got = saved[f"{moment}.{key}"]
+ 417             if got.shape != matrix.shape or got.dtype != mx.float32:
+ 418                 raise ValueError(f"{moment}.{key}: saved as {got.dtype} {tuple(got.shape)}, the matrix is float32 "
+ 419                                  f"{tuple(matrix.shape)}")
+ 420     optimizer.init(trainable)
+ 421     state = optimizer.state
+ 422     state["step"] = mx.array(step, dtype=state["step"].dtype)
+ 423     for key in trainable:
+ 424         state[key] = {"m": saved["m." + key], "v": saved["v." + key]}
+ 425     mx.eval(state)
 ```
 
 The state is the step count and Adam's two moments for each matrix; the learning rate is an argument, not state.
@@ -3551,7 +3574,7 @@ What it takes from elsewhere are two rules for sizing a reference picture: diffu
 
 ### 10.1 The request is the key
 
-📍 [`src/h3mlx/cache.py:149-196`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L149-L196)
+📍 [`src/h3mlx/cache.py:149-196`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L149-L196)
 ```python
  149 def request(*, picture: str, references, prompt: str, height: int, width: int, latent_seed: int,
  150             latent_float16_round: bool, reference_sizing: str, reference_seed: int, reference_float16_round: bool,
@@ -3602,7 +3625,7 @@ What it takes from elsewhere are two rules for sizing a reference picture: diffu
  195         "versions": versions(),
  196     }
 ```
-📍 [`src/h3mlx/cache.py:199-200`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L199-L200)
+📍 [`src/h3mlx/cache.py:199-200`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L199-L200)
 ```python
  199 def key(request: dict) -> str:
  200     return files.sha256_json(request)
@@ -3644,7 +3667,7 @@ No argument of `request` has a default.
     there, inside the folders it fills, and that changes without the component changing: counted, it would make
     every entry a miss and every resume a refusal for no reason.
 
-📍 [`src/h3mlx/cache.py:53-60`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L53-L60)
+📍 [`src/h3mlx/cache.py:53-60`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L53-L60)
 ```python
   53 def code_digest(package: Path | None = None) -> str:
   54     """A digest of this package's source: every `.py` file's name and bytes. Any change to the code gives another
@@ -3655,7 +3678,7 @@ No argument of `request` has a default.
   59         raise ValueError(f"no source files in {package}")
   60     return files.sha256_json([[str(p.relative_to(package)), files.sha256_file(p)] for p in sources])
 ```
-📍 [`src/h3mlx/cache.py:75-92`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L75-L92)
+📍 [`src/h3mlx/cache.py:75-92`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L75-L92)
 ```python
   75 def identity(directory) -> str:
   76     """A digest that identifies one component of a release without reading its weights: every file's name, with the
@@ -3679,7 +3702,7 @@ No argument of `request` has a default.
 
 ### 10.2 Two files, written whole, read with suspicion
 
-📍 [`src/h3mlx/cache.py:269-317`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L269-L317)
+📍 [`src/h3mlx/cache.py:269-317`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L269-L317)
 ```python
  269 def write(directory, request: dict, tensors: dict, wait: float = 30.0) -> str:
  270     """Write one entry and return its key.
@@ -3731,7 +3754,7 @@ No argument of `request` has a default.
  316         staged.unlink(missing_ok=True)
  317     return name
 ```
-📍 [`src/h3mlx/files.py:136-151`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/files.py#L136-L151)
+📍 [`src/h3mlx/files.py:136-151`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/files.py#L136-L151)
 ```python
  136 def atomic_write(path, write) -> None:
  137     """`write(temporary_path)` makes the file; it is flushed and renamed onto `path`.
@@ -3750,7 +3773,7 @@ No argument of `request` has a default.
  150         raise
  151     flush_renamed(path)
 ```
-📍 [`src/h3mlx/files.py:52-87`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/files.py#L52-L87)
+📍 [`src/h3mlx/files.py:52-87`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/files.py#L52-L87)
 ```python
   52 @contextlib.contextmanager
   53 def exclusive(path, what: str, wait: float = 0.0):
@@ -3789,7 +3812,7 @@ No argument of `request` has a default.
   86             fcntl.flock(fd, fcntl.LOCK_UN)
   87         os.close(fd)
 ```
-📍 [`src/h3mlx/cache.py:320-350`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L320-L350)
+📍 [`src/h3mlx/cache.py:320-350`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L320-L350)
 ```python
  320 def load(record_path, request: dict) -> Entry:
  321     """The entry whose record is at `record_path`, if it is the one `request` asks for and whole; otherwise a
@@ -3823,7 +3846,7 @@ No argument of `request` has a default.
  349     return Entry(latents=arrays["latents"], condition_latents=[arrays[f"condition_latents.{i}"] for i in range(count)],
  350                  text=arrays["text"], text_token_tags=np.array(arrays["text_token_tags"]), record=record)
 ```
-📍 [`src/h3mlx/cache.py:353-359`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L353-L359)
+📍 [`src/h3mlx/cache.py:353-359`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L353-L359)
 ```python
  353 def read(directory, request: dict) -> Entry | None:
  354     """The entry for `request` in `directory`, or None when there is none. An entry that is there under the
@@ -3897,7 +3920,7 @@ same for the source digest and for each library.
   66     scale = math.sqrt(min(max(area, min_pixels), max_pixels) / area)
   67     return tuple(max(multiple, round(side * scale / multiple) * multiple) for side in (width, height))
 ```
-📍 [`src/h3mlx/cache.py:98-104`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L98-L104)
+📍 [`src/h3mlx/cache.py:98-104`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L98-L104)
 ```python
   98 def scale_down_to_area(width: int, height: int, pixels: int, multiple: int) -> tuple[int, int]:
   99     """(width, height) at the picture's own aspect ratio, scaled down to `pixels` when it has more and never scaled
@@ -3907,7 +3930,7 @@ same for the source digest and for each library.
  103     return (max(multiple, round(width * scale / multiple) * multiple),
  104             max(multiple, round(height * scale / multiple) * multiple))
 ```
-📍 [`src/h3mlx/cache.py:107-125`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L107-L125)
+📍 [`src/h3mlx/cache.py:107-125`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L107-L125)
 ```python
  107 def reference_sizes(sizing: str, width: int, height: int, *, target_height: int, target_width: int,
  108                     min_pixels: int, max_pixels: int, vision_pixels: int, multiple: int) -> tuple[tuple, tuple]:
@@ -3958,7 +3981,7 @@ recorded in the request, and it has one value.
 
 ### 10.4 The encode
 
-📍 [`src/h3mlx/cache.py:365-369`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L365-L369)
+📍 [`src/h3mlx/cache.py:365-369`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L365-L369)
 ```python
  365 def oriented(picture):
  366     """The picture as RGB with its EXIF orientation applied. Every picture an entry is made from goes through this,
@@ -3966,14 +3989,14 @@ recorded in the request, and it has one value.
  368     applied the orientation is no longer pending: doing it twice changes nothing."""
  369     return ImageOps.exif_transpose(picture).convert("RGB")
 ```
-📍 [`src/h3mlx/cache.py:372-375`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L372-L375)
+📍 [`src/h3mlx/cache.py:372-375`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L372-L375)
 ```python
  372 def load_picture(path):
  373     """A picture file as `encode` takes it: opened, oriented, RGB."""
  374     with Image.open(path) as opened:
  375         return oriented(opened)
 ```
-📍 [`src/h3mlx/cache.py:413-422`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L413-L422)
+📍 [`src/h3mlx/cache.py:413-422`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L413-L422)
 ```python
  413 def target_picture(picture, height: int, width: int, multiple: int):
  414     """The picture, oriented and RGB (`oriented`), at (width, height), resized with Lanczos when it is another size.
@@ -3986,7 +4009,7 @@ recorded in the request, and it has one value.
  421                          "(width x height): crop it first")
  422     return I.resize(picture, (width, height))
 ```
-📍 [`src/h3mlx/cache.py:394-410`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L394-L410)
+📍 [`src/h3mlx/cache.py:394-410`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L394-L410)
 ```python
  394 def load_encoders(weights, vae_dtype: str):
  395     """`image.Components` for `encode`, from a release folder: the VAE (loaded with `vae_dtype`'s policy), the text
@@ -4006,7 +4029,7 @@ recorded in the request, and it has one value.
  409         connector=loaders.load_safetensors(weights / "text_connector"), vae=vae, vae_latents_mean=mean,
  410         vae_latents_std=std, dit_params={}, dit_cfg=transformer, settings=settings)
 ```
-📍 [`src/h3mlx/cache.py:425-466`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/cache.py#L425-L466)
+📍 [`src/h3mlx/cache.py:425-466`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/cache.py#L425-L466)
 ```python
  425 def encode(components, request: dict, picture, references) -> dict:
  426     """The tensors of the entry `request` asks for, from the pictures themselves (PIL images, the ones whose digests
@@ -4142,7 +4165,7 @@ processor folder that is missing is an error and not a fetch.
 
 No learning-rate schedule: the rate is constant. The recipe's schedule and its optimizer settings were not read.
 
-📍 [`src/h3mlx/trainer.py:126-183`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/trainer.py#L126-L183)
+📍 [`src/h3mlx/trainer.py:126-183`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/trainer.py#L126-L183)
 ```python
  126 def trajectory(*, cfg: dict, transformer: str, dataset, rank: int, alpha: float, targets, refiner: bool,
  127                assistant: str | None, learning_rate: float, betas, eps: float, weight_decay: float,
@@ -4203,7 +4226,7 @@ No learning-rate schedule: the rate is constant. The recipe's schedule and its o
  182         "versions": cache.versions(),
  183     }
 ```
-📍 [`src/h3mlx/trainer.py:186-192`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/trainer.py#L186-L192)
+📍 [`src/h3mlx/trainer.py:186-192`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/trainer.py#L186-L192)
 ```python
  186 def limits(*, max_steps: int, max_seconds: float, max_peak_memory_gb: float, checkpoint_every: int) -> dict:
  187     """When a session stops, and how often it checkpoints. Each is required, and each stops the run: reaching
@@ -4221,7 +4244,7 @@ the same trajectory; its limits may change.
 
 ### 11.2 `--plan-only`
 
-📍 [`src/h3mlx/trainer.py:228-265`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/trainer.py#L228-L265)
+📍 [`src/h3mlx/trainer.py:228-265`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/trainer.py#L228-L265)
 ```python
  228 def plan(traj: dict, lim: dict, cfg: dict, examples: list, *, run_dir, cache_dir, weights: dict | None = None,
  229          block_dtype: str | None = None) -> dict:
@@ -4290,7 +4313,7 @@ there, and one that does not is reported as a bad argument is, with the tensor's
 
 ### 11.3 What a step draws
 
-📍 [`src/h3mlx/trainer.py:65-69`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/trainer.py#L65-L69)
+📍 [`src/h3mlx/trainer.py:65-69`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/trainer.py#L65-L69)
 ```python
   65 def step_seed(seed: int, step: int, stream: str) -> int:
   66     """A seed for one of step `step`'s draws (`stream`: the example order, the noise level, the noise; `"init"` at
@@ -4298,7 +4321,7 @@ there, and one that does not is reported as a bad argument is, with the tensor's
   68     neighbouring steps and streams share nothing. 63 bits, which is what a torch generator takes."""
   69     return int(np.random.SeedSequence([seed, step, STREAMS[stream]]).generate_state(1, dtype=np.uint64)[0] >> 1)
 ```
-📍 [`src/h3mlx/trainer.py:72-76`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/trainer.py#L72-L76)
+📍 [`src/h3mlx/trainer.py:72-76`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/trainer.py#L72-L76)
 ```python
   72 def example_at(seed: int, step: int, count: int) -> int:
   73     """Which example step `step` trains on: the examples in a new random order for every pass over them."""
@@ -4306,7 +4329,7 @@ there, and one that does not is reported as a bad argument is, with the tensor's
   75     order = np.random.default_rng(np.random.SeedSequence([seed, epoch, STREAMS["order"]])).permutation(count)
   76     return int(order[position])
 ```
-📍 [`src/h3mlx/trainer.py:79-91`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/trainer.py#L79-L91)
+📍 [`src/h3mlx/trainer.py:79-91`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/trainer.py#L79-L91)
 ```python
   79 def noise_level(hyper: dict, grid: np.ndarray, step: int) -> tuple[np.float32, float | None]:
   80     """(sigma, loss weight or None) for step `step`: one draw of the density from the step's own generator, looked up
@@ -4333,7 +4356,7 @@ The examples are taken in a new random order on every pass, each once a pass.
 
 ### 11.4 One session in a run directory, and the checks that come first
 
-📍 [`src/h3mlx/trainer.py:395-447`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/trainer.py#L395-L447)
+📍 [`src/h3mlx/trainer.py:395-447`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/trainer.py#L395-L447)
 ```python
  395 @contextlib.contextmanager
  396 def open_run(run_dir, traj: dict, lim: dict, cfg: dict, *, resume: bool):
@@ -4473,7 +4496,7 @@ a higher one goes on, to the weights a run given the higher one from the start r
 
 ### 11.8 Checkpoints, and resuming
 
-📍 [`src/h3mlx/trainer.py:293-320`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/trainer.py#L293-L320)
+📍 [`src/h3mlx/trainer.py:293-320`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/trainer.py#L293-L320)
 ```python
  293 def write_checkpoint(run_dir, step: int, traj: dict, trainable: dict, optimizer, losses: list) -> Path:
  294     """One checkpoint: the adapter as a diffusers LoRA file, the optimizer's state, and a record with the step, the
@@ -4504,7 +4527,7 @@ a higher one goes on, to the weights a run given the higher one from the start r
  319     files.flush_renamed(final)  # after the rename: a failure here is `files.NotDurable`, and the checkpoint stands
  320     return final
 ```
-📍 [`src/h3mlx/trainer.py:331-361`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/trainer.py#L331-L361)
+📍 [`src/h3mlx/trainer.py:331-361`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/trainer.py#L331-L361)
 ```python
  331 def read_checkpoint(path: Path, traj: dict, cfg: dict) -> tuple[int, dict, dict, list]:
  332     """(step, trainable matrices, optimizer state, losses) from a checkpoint directory, if it is whole and belongs to
@@ -4631,36 +4654,50 @@ neither the forward nor the sampler: `src/h3mlx/ops.py` and `src/h3mlx/image.py`
 
 ### 12.1 Attached, not merged
 
-📍 [`src/h3mlx/lora.py:710-737`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L710-L737)
+📍 [`src/h3mlx/lora.py:725-766`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L725-L766)
 ```python
- 710 def for_sampling(params: dict, cfg: dict, adapter: Adapter, scale) -> dict:
- 711     """The weights a sampler runs with `adapter` at `scale` times its trained strength; `params` is not modified.
- 712
- 713     The adapter is attached, not merged. It stays beside the base weights and `ops.plinear` adds its delta on every
- 714     call: the computation diffusers runs after `load_lora_adapter`, and the one the port tests against PEFT. Its
- 715     matrices are cast to their base weight's dtype, as that loader casts them. Merging is not the same picture on a
- 716     bf16 base: the sum is rounded once into each weight, which has eight significant bits, so whatever part of the
- 717     delta is under half a step of its weight is rounded away, and a small adapter can vanish whole. Attached, the
- 718     adapter also keeps its precision when the base is quantized afterwards: `load.quantize_transformer` touches the
- 719     base matrices only, so the result is the quantized base plus the dense delta, which is what PEFT computes over a
- 720     quantized Linear.
- 721
- 722     A scale of exactly 0 returns `params` itself. The picture is then the one without the adapter bit for bit. An
- 723     attached adapter scaled by zero (diffusers at weight 0) adds a zero delta instead: the same numbers, but a
- 724     negative zero in a Linear's output becomes a positive one.
- 725
- 726     Whatever the scale, the adapter is checked against the transformer and its matrices are read and must be finite:
- 727     one NaN in an adapter is a NaN in every picture, and here it is refused before anything else runs."""
- 728     check_scale(scale)
- 729     check(adapter, cfg)
- 730     finite = {key: mx.isfinite(tensor).all() for key, tensor in adapter.tensors.items()}
- 731     mx.eval(finite)
- 732     bad = sorted(key for key, ok in finite.items() if not ok.item())
- 733     if bad:
- 734         raise ValueError(f"{len(bad)} of the adapter's {len(finite)} matrices hold a NaN or an infinity, e.g. {bad[:3]}")
- 735     if scale == 0:
- 736         return params
- 737     return attach(params, cfg, adapter, scale=scale)
+ 725 def for_sampling(params: dict, cfg: dict, adapter: Adapter, scale) -> dict:
+ 726     """The weights a sampler runs with `adapter` at `scale` times its trained strength; `params` is not modified.
+ 727
+ 728     The adapter is attached, not merged. It stays beside the base weights and `ops.plinear` adds its delta on every
+ 729     call: the computation diffusers runs after `load_lora_adapter`, and the one the port tests against PEFT. Its
+ 730     matrices are cast to their base weight's dtype, as that loader casts them. Merging is not the same picture on a
+ 731     bf16 base: the sum is rounded once into each weight, which has eight significant bits, so whatever part of the
+ 732     delta is under half a step of its weight is rounded away, and a small adapter can vanish whole. Attached, the
+ 733     adapter also keeps its precision when the base is quantized afterwards: `load.quantize_transformer` touches the
+ 734     base matrices only, so the result is the quantized base plus the dense delta, which is what PEFT computes over a
+ 735     quantized Linear.
+ 736
+ 737     A scale of exactly 0 returns `params` itself. The picture is then the one without the adapter bit for bit. An
+ 738     attached adapter scaled by zero (diffusers at weight 0) adds a zero delta instead: the same numbers, but a
+ 739     negative zero in a Linear's output becomes a positive one.
+ 740
+ 741     Whatever the scale, the adapter is checked against the transformer and its matrices are read and must be finite:
+ 742     one NaN in an adapter is a NaN in every picture, and here it is refused before anything else runs. They must
+ 743     stay finite once cast to their base weight's dtype too: a float32 factor of 1e5 is an infinity over a float16
+ 744     base (the release's bf16 has float32's range)."""
+ 745     check_scale(scale)
+ 746     check(adapter, cfg)
+ 747     finite = {key: mx.isfinite(tensor).all() for key, tensor in adapter.tensors.items()}
+ 748     mx.eval(finite)
+ 749     bad = sorted(key for key, ok in finite.items() if not ok.item())
+ 750     if bad:
+ 751         raise ValueError(f"{len(bad)} of the adapter's {len(finite)} matrices hold a NaN or an infinity, e.g. {bad[:3]}")
+ 752     taken = [m for m in adapter.modules if _carries_lora(params, m)]
+ 753     if taken:  # `attach` refuses this too; checked here so that scale 0 does not pass weights that run another adapter
+ 754         raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: the sampler takes the base "
+ 755                          "weights and one adapter")
+ 756     if scale == 0:
+ 757         return params
+ 758     out = attach(params, cfg, adapter, scale=scale)
+ 759     cast = {runtime_key(m, x): out[runtime_key(m, x)] for m in adapter.modules for x in ("A", "B")}
+ 760     finite = {key: mx.isfinite(tensor).all() for key, tensor in cast.items()}
+ 761     mx.eval(finite)
+ 762     bad = sorted(key for key, ok in finite.items() if not ok.item())
+ 763     if bad:
+ 764         raise ValueError(f"{len(bad)} of the adapter's {len(finite)} matrices are finite in the file and not in their "
+ 765                          f"base weight's dtype, e.g. {bad[:3]}")
+ 766     return out
 ```
 
 The choice was between `attach` (§1.3) and `merge` (§1.4), and each of the sampler's options points the same way.
@@ -4713,7 +4750,7 @@ a NaN in every picture, and it is refused when the file is read, before the text
  794             self.scaling[adapter] = scale * self.lora_alpha[adapter] / self.r[adapter]
 ```
 
-📍 [`src/h3mlx/lora.py:198-202`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L198-L202)
+📍 [`src/h3mlx/lora.py:198-202`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L198-L202)
 ```python
  198 def check_scale(scale) -> None:
  199     """A scale is a finite number. PEFT's `set_scale` takes anything; NaN or infinity would poison every Linear the
@@ -4810,61 +4847,66 @@ and the port's is the first: it is a function of the arguments, with nothing to 
 
 ### 12.3 The plan, the record, and what is refused
 
-📍 [`src/h3mlx/lora.py:740-759`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L740-L759)
+📍 [`src/h3mlx/lora.py:769-792`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L769-L792)
 ```python
- 740 def from_header(path, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
- 741     """The adapter `load` would give, from the file's safetensors header alone: the same modules, shapes and alphas,
- 742     with every tensor a zero stand-in that is never evaluated. Nothing but the header is read from the file, so a
- 743     plan can name an adapter (`summary`) and `check` can refuse one that does not fit before any tensor is opened.
- 744
- 745     The stand-ins go through `read`, the path a loaded file takes, so every layout it reads is covered and every
- 746     refusal that needs no tensor value is raised here too. One thing only a load can see: a file in the original
- 747     layout that carries `.alpha` tensors has them folded into its matrices when it is loaded, and a zero, negative
- 748     or non-finite one is refused then."""
- 749     from . import files
- 750
- 751     header = files.safetensors_header(path)
- 752     if not isinstance(header, dict):
- 753         raise ValueError(f"{path}: not a safetensors header")
- 754     metadata = header.pop("__metadata__", None) or {}
- 755     if not all(isinstance(entry, dict) and isinstance(entry.get("shape"), list) for entry in header.values()):
- 756         raise ValueError(f"{path}: not a safetensors header")
- 757     stand_ins = {key: mx.ones(()) if key.endswith(".alpha") else mx.zeros(tuple(entry["shape"]))
- 758                  for key, entry in header.items()}
- 759     return read(stand_ins, metadata, prefix, head_dim)
+ 769 def from_header(path, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
+ 770     """The adapter `load` would give, from the file's safetensors header alone: the same modules, shapes and alphas,
+ 771     with every tensor a zero stand-in that is never evaluated. Nothing but the header is read from the file, so a
+ 772     plan can name an adapter (`summary`) and `check` can refuse one that does not fit before any tensor is opened.
+ 773
+ 774     The stand-ins go through `read`, the path a loaded file takes, so every layout it reads is covered and every
+ 775     refusal that needs no tensor value is raised here too. One thing only a load can see: a file in the original
+ 776     layout that carries `.alpha` tensors has them folded into its matrices when it is loaded, and a zero, negative
+ 777     or non-finite one is refused then."""
+ 778     from . import files
+ 779
+ 780     header = files.safetensors_header(path)
+ 781     if not isinstance(header, dict):
+ 782         raise ValueError(f"{path}: not a safetensors header")
+ 783     metadata = header.pop("__metadata__", None) or {}
+ 784     if not (isinstance(metadata, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in metadata.items())):
+ 785         raise ValueError(f"{path}: not a safetensors header (its __metadata__ is not a map of strings to strings)")
+ 786     dims_ok = lambda shape: all(type(d) is int and 0 <= d < 2**31 for d in shape)  # noqa: E731 (bool is not int here)
+ 787     if not all(isinstance(entry, dict) and isinstance(entry.get("shape"), list) and dims_ok(entry["shape"])
+ 788                for entry in header.values()):
+ 789         raise ValueError(f"{path}: not a safetensors header (a tensor without a shape of non-negative integers)")
+ 790     stand_ins = {key: mx.ones(()) if key.endswith(".alpha") else mx.zeros(tuple(entry["shape"]))
+ 791                  for key, entry in header.items()}
+ 792     return read(stand_ins, metadata, prefix, head_dim)
 ```
-📍 [`src/h3mlx/lora.py:773-794`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/src/h3mlx/lora.py#L773-L794)
+📍 [`src/h3mlx/lora.py:806-828`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/src/h3mlx/lora.py#L806-L828)
 ```python
- 773 def summary(adapter: Adapter, scale=1.0) -> dict:
- 774     """What an adapter is, for a plan or a record: how many Linears it is on and which (each kind of Linear with the
- 775     blocks it covers, `*` standing for the block's index; a Linear outside the blocks maps to None), the ranks and
- 776     alphas in use, the scalings the forward multiplies by at `scale` (`scale * alpha / rank`), and the number of
- 777     parameters. From shapes alone, so it works on `from_header`'s stand-ins."""
- 778     check_keys(adapter)
- 779     check_scale(scale)
- 780     kinds = {}
- 781     for module in adapter.modules:
- 782         m = re.match(r"^(.*?)\.(\d+)\.(.*)$", module)
- 783         if m is None:
- 784             kinds[module] = None
- 785         else:
- 786             kinds.setdefault(f"{m[1]}.*.{m[3]}", []).append(int(m[2]))
- 787     return {
- 788         "modules": len(adapter.modules),
- 789         "module_kinds": {kind: None if blocks is None else _ranges(blocks) for kind, blocks in sorted(kinds.items())},
- 790         "ranks": sorted({adapter.rank(m) for m in adapter.modules}),
- 791         "alphas": sorted({float(adapter.alpha[m]) for m in adapter.modules}),
- 792         "scalings": sorted({float(scale * adapter.alpha[m] / adapter.rank(m)) for m in adapter.modules}),
- 793         "parameters": sum(math.prod(t.shape) for t in adapter.tensors.values()),
- 794     }
+ 806 def summary(adapter: Adapter, scale=1.0) -> dict:
+ 807     """What an adapter is, for a plan or a record: how many Linears it is on and which (each kind of Linear with the
+ 808     blocks it covers, `*` standing for the block's index; a Linear outside the blocks maps to None), the ranks and
+ 809     alphas in use, the scalings the forward multiplies by at `scale` (`scale * alpha / rank`), and the number of
+ 810     parameters. From shapes alone, so it works on `from_header`'s stand-ins; a scale whose scalings overflow float32 is
+ 811     refused here as `attach` refuses it, so a plan does not pass what the run would refuse."""
+ 812     check_keys(adapter)
+ 813     check_scalings(adapter, scale)
+ 814     kinds = {}
+ 815     for module in adapter.modules:
+ 816         m = re.match(r"^(.*?)\.(\d+)\.(.*)$", module)
+ 817         if m is None:
+ 818             kinds[module] = None
+ 819         else:
+ 820             kinds.setdefault(f"{m[1]}.*.{m[3]}", []).append(int(m[2]))
+ 821     return {
+ 822         "modules": len(adapter.modules),
+ 823         "module_kinds": {kind: None if blocks is None else _ranges(blocks) for kind, blocks in sorted(kinds.items())},
+ 824         "ranks": sorted({adapter.rank(m) for m in adapter.modules}),
+ 825         "alphas": sorted({float(adapter.alpha[m]) for m in adapter.modules}),
+ 826         "scalings": sorted({float(scale * adapter.alpha[m] / adapter.rank(m)) for m in adapter.modules}),
+ 827         "parameters": sum(math.prod(t.shape) for t in adapter.tensors.values()),
+ 828     }
 ```
-📍 [`scripts/run_p_h3_image.py:105-112`](https://github.com/sublimator/minimax-h3-mlx/blob/edcf4ec72890703772598b73de816a651104913f/scripts/run_p_h3_image.py#L105-L112)
+📍 [`scripts/run_p_h3_image.py:105-112`](https://github.com/sublimator/minimax-h3-mlx/blob/3e47ce1eb7d0c9cdd14a6fdfb33845827385f923/scripts/run_p_h3_image.py#L105-L112)
 ```python
  105 def adapter_plan(path: Path, scale: float, cfg: dict) -> dict:
  106     """What `--lora` applies, from the adapter file's header alone (no tensor is read): the file, its hash, the scale,
  107     and the adapter's Linears, ranks, alphas and scalings (`lora.summary`). An adapter that is not a LoRA file the port
  108     reads, or that does not fit this transformer's Linears, is a ValueError here."""
- 109     shapes = lora.from_header(path)
+ 109     shapes = lora.from_header(path, head_dim=cfg["attention_head_dim"])
  110     lora.check(shapes, cfg)
  111     return {"path": str(path), "sha256": sha256(path), "bytes": path.stat().st_size, "scale": scale,
  112             "applied": scale != 0, **lora.summary(shapes, scale)}
@@ -4881,6 +4923,25 @@ and the port's is the first: it is a function of the arguments, with nothing to 
   finite, a file that is not there or is not a LoRA file, and an adapter that does not fit this transformer's
   Linears are refused when the arguments are checked, before a model loads and before `run.json` exists. Scale 0
   excuses none of them.
+- **Finite, and still finite where it is used.** A scale can be a finite Python float and overflow float32, the
+  dtype the forward multiplies by, once it is `scale * alpha / rank` (1e40 does): `check_scalings` refuses it, in
+  the plan's summary and again in `attach`. The adapter's matrices are checked as read and again once cast to their
+  base weight's dtype, since a finite float32 factor can be an infinity in float16 (bf16 has float32's range)
+  (`test_a_scale_finite_in_python_and_not_in_float32_is_refused`,
+  `test_factors_finite_in_the_file_and_not_in_the_base_dtype_are_refused`,
+  `test_the_plan_refuses_a_scale_that_overflows_float32`).
+- **Weights that already carry an adapter are refused at every scale.** At 0 the sampler hands back the weights it
+  was given, so without the check those weights would still run the adapter already on them.
+- **A malformed header is a ValueError, so an argument error.** A header shorter than its stated length, a
+  `__metadata__` that is not a map of strings to strings, a tensor whose shape is not a list of non-negative
+  integers, and a `lora_adapter_metadata` that is not a JSON object are each refused as such
+  (`test_from_header_refuses_a_malformed_header_as_a_value_error`). They used to escape as other exceptions, past
+  the arguments' check.
+- **An original-layout file is read at the transformer's head width.** A DiffSynth-Studio file fuses q, k and v per
+  head (§2.3). The plan, the sampler's load and the training script's `--assistant` pass the transformer's
+  `attention_head_dim`, where they used to take the default of 128: a tiny model's file was refused, and at 4 x 32
+  one would have been split at the wrong stride with no error
+  (`test_the_sampler_reads_an_original_file_at_the_transformers_head_width`).
 - **The record.** `run.json` has the plan's entry, the two arguments, and a `lora` event when the adapter goes on,
   before the run starts. `final_rows.npz` carries the file's path, its hash and the scale in its `source` record
   beside the prompt and the seed, and `null` when there was no adapter; a re-decode (`--decode-from`) reports them as
