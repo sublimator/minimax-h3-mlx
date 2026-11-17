@@ -7,6 +7,7 @@ release's processor, encodes from pictures with the tiny encoders instead.
 """
 
 import json
+import math
 import os
 import shutil
 import signal
@@ -25,13 +26,14 @@ from test_dit_mixed_precision import to_mixed
 from test_dit_tiny import TINY
 from test_hyperflow import randomised
 from test_p_h3_image import NEEDS_PROCESSOR, VAE
+from test_train_gradients import SHARP, attention_by_hand, largest_scores, sharpened, swapped
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import train_lora as T  # noqa: E402
 
-from h3mlx import cache, files, load, lora, train, trainer  # noqa: E402
+from h3mlx import cache, files, load, lora, ops, train, trainer  # noqa: E402
 from h3mlx.pipeline import Noise  # noqa: E402
 from h3mlx.vae import VaeConfig  # noqa: E402
 
@@ -54,10 +56,13 @@ REQUIRED = {
 REFERENCE = {"--reference-sizing": ["recipe"], "--reference-seed": ["42"], "--no-reference-float16-round": []}
 
 
-def make_release(folder: Path, mixed: bool = False) -> Path:
+def make_release(folder: Path, mixed: bool = False, cfg: dict = TINY, sharpen=None) -> Path:
     """A release folder with what the script reads: the tiny transformer's weights and config, the VAE's config, the
-    pipeline's settings, and a small file in each encoder's folder (their identities are part of the cache keys)."""
-    model = randomised(TINY, 0)
+    pipeline's settings, and a small file in each encoder's folder (their identities are part of the cache keys).
+    `sharpen`: a gain for `test_train_gradients.sharpened`, which puts the attention scores in the tens of thousands."""
+    model = randomised(cfg, 0)
+    if sharpen is not None:
+        sharpened(model, sharpen)
     (to_mixed(model) if mixed else model).save_pretrained(str(folder / "transformer"))
     (folder / "vae").mkdir()
     (folder / "vae" / "config.json").write_text(json.dumps({"_class_name": "AutoencoderKLPH3Image", **VAE}))
@@ -505,6 +510,55 @@ def test_a_bf16_base_trains(tmp_path, data, capsys):
     assert run(argv) == 0
     trained = mx.load(str(tmp_path / "run" / "adapter.safetensors"))
     assert all(v.dtype == mx.float32 and float(mx.abs(v).max()) > 0 for v in trained.values())
+
+
+def test_a_bf16_base_with_sharp_attention_trains_on_the_right_gradient(tmp_path, data, capsys):
+    """What the first run on real weights met: a bf16 base whose attention scores are in the tens of thousands, at a
+    head width the default device's fused attention kernels take. Three steps of the script, and the first one again by
+    hand with the attention written out in float32 (`test_train_gradients.attention_by_hand`): the logged loss and
+    gradient norm are that step's. The same step with the sampling forward's attention in the training forward,
+    which is what the script ran before, has a norm more than a thousand times as large or is not finite, and the
+    script run that way either logs such a norm or stops on a norm that is not finite."""
+    sharp = make_release(tmp_path / "sharp", mixed=True, cfg=SHARP, sharpen=30)
+    argv = arguments(sharp, data, tmp_path / "cache", tmp_path / "run", **{"--max-steps": ["3"], "--max-grad-norm": ["1.0"]})
+    asked = fill_cache(argv)
+    assert run(argv) == 0
+    logged = record_of(tmp_path / "run")["losses"]
+    assert len(logged) == 3 and all(np.isfinite(x["grad_norm"]) for x in logged)
+
+    base, cfg = load.load_transformer(sharp / "transformer")
+    entries = [cache.read(tmp_path / "cache", request) for request in asked]
+    adapter = lora.init(cfg, 4, 8.0, trainer.adapter_modules(cfg, ["attn.to_q", "attn.to_v", "ff.net.2"], True),
+                        seed=trainer.step_seed(5, 0, "init"))
+    frozen, trainable = lora.split(lora.attach(base, cfg, adapter, keep_dtype=True, name="hand"), "hand")
+    entry = entries[trainer.example_at(5, 0, 2)]
+    u = train.density_for_timestep_sampling("uniform", 1, generator=torch.Generator().manual_seed(trainer.step_seed(5, 0, "level")))
+    sigma = train.sample_sigmas(u, train.training_sigmas(1000, 3.0))[0][0]
+    example = train.build_example(cfg, entry.text_token_tags, entry.latents, sigma, Noise(trainer.step_seed(5, 0, "noise")),
+                                  condition_t=0.999, condition_latents=entry.condition_latents)
+    args = (trainable, frozen, cfg, example, entry.text)
+    assert min(largest_scores(*args)) > 12_000
+
+    def step_with(attend):
+        """(loss, the gradient's global norm) of the first step with `attend` as the training forward's attention."""
+        with swapped("attention_for_training", attend):
+            loss, grads = train.loss_and_gradients(*args)
+            return float(loss), math.sqrt(sum(float((g * g).sum()) for g in grads.values()))
+
+    loss, norm = step_with(attention_by_hand)
+    before = step_with(ops.attention)[1]
+    print(f"step 1: logged loss {logged[0]['loss']:.6f}, norm {logged[0]['grad_norm']:.4g}; by hand {loss:.6f}, {norm:.4g}; "
+          f"with the bf16 call {before:.4g}")
+    assert abs(logged[0]["loss"] - loss) <= 1e-5 * loss and abs(logged[0]["grad_norm"] - norm) <= 3e-2 * norm
+    if mx.default_device() == mx.gpu:
+        assert not before < 1e3 * norm
+        with swapped("attention_for_training", ops.attention):
+            try:
+                finished = run(arguments(sharp, data, tmp_path / "cache", tmp_path / "before", **{"--max-steps": ["3"], "--max-grad-norm": ["1.0"]}))
+            except ValueError as error:
+                assert "norm is" in str(error)
+            else:
+                assert finished == 0 and max(x["grad_norm"] for x in record_of(tmp_path / "before")["losses"]) > 1e3 * norm
 
 
 # --- limits ------------------------------------------------------------------------------------------------------------

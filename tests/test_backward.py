@@ -14,7 +14,7 @@ from conftest import state_mx, to_mx
 from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
 from test_dit_mixed_precision import rel_err, to_mixed
 from test_dit_tiny import TINY
-from test_train_gradients import TABLE_FED, mlx_groups, sampling_forward_loss, setup
+from test_train_gradients import TABLE_FED, largest_scores, mlx_groups, sampling_forward_loss, setup, sharp_setup, swapped
 
 from h3mlx import backward, lora, ops, train
 from h3mlx.pipeline import Noise
@@ -105,6 +105,32 @@ def test_bounded_gradients_equal_the_plain_gradient(way, precision, stacked, mod
     assert rest < TOLERANCE
     assert table_fed < (UNORDERED if precision == "bf16 base" else TOLERANCE)
     assert all(g.dtype == mx.float32 and g.shape == trainable[k].shape for k, g in grads.items())
+
+
+@pytest.mark.parametrize("way", list(WAYS))
+@pytest.mark.parametrize("gain", [30, 50])
+def test_bounded_gradients_through_sharp_attention_over_a_bf16_base(way, gain):
+    """A bf16 base whose attention scores are in the tens of thousands, at a head width the fused attention kernels take
+    (`test_train_gradients.sharp_setup`): each bounded way is still the plain gradient, which there is the right one.
+    With the sampling forward's attention in the training forward, the same way returns a gradient more than a
+    thousand times as large, or one that is not finite: a bounded backward pass that went back to the bf16 call
+    would show here."""
+    s = sharp_setup(1, gain)
+    frozen, trainable = mlx_groups(s, base=to_mixed(s["model"]))
+    args = (s["cfg"], s["example"], to_mx(s["text"]))
+    assert min(largest_scores(trainable, frozen, *args)) > 12_000
+    want_loss, want = evaluated(train.loss_and_gradients, trainable, frozen, *args)
+    loss, grads = evaluated(WAYS[way], trainable, frozen, *args)
+    assert float(loss) == float(want_loss)
+    worst = max(worst_errors(grads, want))
+    with swapped("attention_for_training", ops.attention):
+        _, before = evaluated(WAYS[way], trainable, frozen, *args)
+    size = lambda g: float(np.sqrt(sum(float((v.astype(mx.float32) ** 2).sum()) for v in g.values())))  # noqa: E731
+    print(f"{way}, gain {gain}: worst tensor {worst:.1e} from the plain gradient; norm {size(grads):.3g}, with the bf16 "
+          f"call {size(before):.3g}")
+    assert worst < TOLERANCE
+    if mx.default_device() == mx.gpu:
+        assert not size(before) < 1e3 * size(grads)
 
 
 @pytest.mark.parametrize("way", list(WAYS))

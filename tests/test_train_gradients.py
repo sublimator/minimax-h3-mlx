@@ -5,9 +5,16 @@ parameters are float32 (`cast_training_params`), fed the example that diffusers'
 (`test_train_example.theirs`), `mse_loss` on the generated video rows, `backward`. Ours: `train.loss_and_gradients`
 with the weights as two arguments. In float32 the two agree closely; over a bf16 base each is scored against the
 float32 run, as the forward's mixed-precision tests do.
+
+A randomly initialised model's attention scores, q . k before the scale, are in the tens, and a pretrained model's
+reach the tens of thousands. The `sharpened` models here have scores that large (`SHARP`, at a head width the default
+device's fused attention kernels take), which is where the attention's bf16 backward goes wrong
+(`test_attention_backward.py`).
 """
 
+import contextlib
 import dataclasses
+import math
 
 import mlx.core as mx
 import numpy as np
@@ -106,6 +113,76 @@ def cancelling_adapter(cfg, modules, half, delta, seed, std=0.1):
         tensors[m + ".lora_B.weight"] = to_mx(torch.cat([b1, b1], dim=1))
         alpha[m] = 2 * half / delta
     return lora.Adapter(tensors, alpha)
+
+
+SHARP = dict(TINY, num_layers=4, attention_head_dim=64)  # a head width the fused attention kernel takes; the release's is 128
+
+
+def sharpened(model, gain, refiner=True):
+    """The model with the `norm_q` and `norm_k` weights of every attention (the blocks' and, with `refiner`, the
+    token refiner's) multiplied by `gain`, in place: attention scores `gain` squared times as large. At 30 the
+    largest are about 15,000 and more, which a bf16 score tile gets wrong by 4 in the logit and more."""
+    with torch.no_grad():
+        for name, prm in model.named_parameters():
+            if name.endswith(("norm_q.weight", "norm_k.weight")) and (refiner or name.startswith("transformer_blocks.")):
+                prm.mul_(gain)
+    return model
+
+
+def sharp_setup(seed, gain, cfg=SHARP, refiner=True):
+    """`setup` on a sharpened model, with the trainable adapter on the block and refiner matrices (what a run
+    trains)."""
+    s = setup(seed % 3, (0.9, 0.5, 0.2)[seed % 3], seed=seed, cfg=cfg, std=0.1, subject_modules=lora.block_modules(cfg))
+    sharpened(s["model"], gain, refiner)
+    return s
+
+
+@contextlib.contextmanager
+def swapped(name, function):
+    """`ops.<name>` replaced for the block: the training forward looks its gather and its attention up in `ops` when
+    it runs, so this is the training forward with another one."""
+    kept = getattr(ops, name)
+    setattr(ops, name, function)
+    try:
+        yield
+    finally:
+        setattr(ops, name, kept)
+
+
+def attention_by_hand(q, k, v, mask=None):
+    """Attention written out in float32 with MLX's plain ops (scores, softmax, product), the result cast back: an
+    independent backward pass for `ops.attention_for_training`'s."""
+    qt, kt, vt = (t.astype(mx.float32).transpose(0, 2, 1, 3) for t in (q, k, v))
+    scores = (qt * (1.0 / math.sqrt(q.shape[-1]))) @ kt.transpose(0, 1, 3, 2)
+    return (mx.softmax(scores, axis=-1, precise=True) @ vt).transpose(0, 2, 1, 3).astype(q.dtype)
+
+
+def largest_scores(trainable, frozen, cfg, example, text):
+    """The largest unscaled score |q . k| of each attention the training forward runs, in order (the refiner's, then
+    each block's). The logit is the score times 1 / sqrt(head width)."""
+    seen = []
+    plain = ops.attention_for_training
+
+    def record(q, k, v, mask=None):
+        qt, kt = (t.astype(mx.float32).transpose(0, 2, 1, 3) for t in (q, k))
+        seen.append(float(mx.abs(qt @ kt.transpose(0, 1, 3, 2)).max()))
+        return plain(q, k, v, mask)
+
+    with swapped("attention_for_training", record):
+        mx.eval(train.example_loss(trainable, frozen, cfg, example, text))
+    return seen
+
+
+def bf16_logit_error(score, width):
+    """What a score held in bf16 can be off by, as a logit: half a bf16 step at the score (eight significant bits),
+    times the scale 1 / sqrt(head width)."""
+    return 2.0 ** (math.floor(math.log2(score)) - 8) / math.sqrt(width)
+
+
+def evaluated(function, *args, **kwargs):
+    loss, grads = function(*args, **kwargs)
+    mx.eval(loss, grads)
+    return loss, grads
 
 
 def sampling_forward_loss(params, cfg, example, text, weight=None):
@@ -306,22 +383,107 @@ def test_products_with_float32_matrices_are_float32_over_a_bf16_base(tmp_path, s
 # --- the forward that is differentiated ----------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mixed", [False, True], ids=["float32", "bf16 base"])
+@pytest.mark.parametrize("base", ["float32", "bf16, head width 64", "bf16, head width 32"])
 @pytest.mark.parametrize("n_refs,sigma", [(0, 0.9), (1, 0.5), (2, 0.0005)])
-def test_the_training_forward_is_the_sampling_forward(mixed, n_refs, sigma):
-    """`train.example_loss` runs the forward in stages with nothing evaluated between them and gathers the modulation
-    tables' rows through float32; `ops.dit_forward`, which sampling runs and which is tested against diffusers,
-    evaluates after every block and gathers in the table's dtype. Neither difference changes a value: the loss is the
-    same bit for bit, in float32 and over a bf16 base, with adapters on every Linear."""
-    s = setup(n_refs, sigma, subject_modules=sorted(lora.wired_shapes(TINY)), std=0.1)
-    frozen, trainable = mlx_groups(s, base=to_mixed(s["model"]) if mixed else None)
+def test_the_training_forward_is_the_sampling_forward(base, n_refs, sigma):
+    """`train.example_loss` runs the forward in stages with nothing evaluated between them, gathers the modulation
+    tables' rows through float32 and runs the attention in float32; `ops.dit_forward`, which sampling runs and which
+    is tested against diffusers, evaluates after every block and does both in the weights' dtype. None of the three
+    changes a value where it matters: the loss is the same bit for bit in float32, and over a bf16 base at a head
+    width the default device's fused attention kernel takes (64 here, 128 in the release), where the bf16 attention
+    call already computes in float32 and rounds. With adapters on every Linear.
+
+    At a head width that kernel does not take (32, the other tiny models'), MLX computes the sampling forward's
+    attention in bf16, and the training forward's is the more exact of the two: the losses are within 0.2% of each
+    other (measured: 5e-4, 3e-5 and 2e-4) and not the same bits."""
+    cfg = dict(TINY, attention_head_dim=64) if base.endswith("64") else dict(TINY)
+    s = setup(n_refs, sigma, cfg=cfg, subject_modules=sorted(lora.wired_shapes(cfg)), std=0.1)
+    frozen, trainable = mlx_groups(s, base=None if base == "float32" else to_mixed(s["model"]))
     cfg, example, text = s["cfg"], s["example"], to_mx(s["text"])
     for weight in (None, 2.5):
         want = sampling_forward_loss(lora.join(frozen, trainable), cfg, example, text, weight)
         got = train.example_loss(trainable, frozen, cfg, example, text, weight)
-        assert got.dtype == want.dtype == mx.float32 and float(got) == float(want)
+        assert got.dtype == want.dtype == mx.float32
+        if base.endswith("32") or (base != "float32" and mx.default_device() != mx.gpu):
+            assert abs(float(got) - float(want)) < 2e-3 * float(want)
+        else:
+            assert float(got) == float(want)
     without_adapter = sampling_forward_loss(lora.set_active(lora.join(frozen, trainable), ()), cfg, example, text)
     assert abs(float(without_adapter) - float(want) / 2.5) > 1e-3, "the adapters count in the loss compared"
+
+
+# --- attention with logits in the thousands ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("gain", [30, 50])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_gradients_through_sharp_attention_over_a_bf16_base(tmp_path, seed, gain):
+    """The setting a real run is in: a bf16 base whose attention scores are in the tens of thousands, in the blocks
+    and in the token refiner (a bf16 score would be off by 4 to 32 in the logit), with float32 matrices on
+    their linears.
+
+    * The loss is still the sampling forward's, bit for bit.
+    * The gradient is the gradient of the same forward with the attention written out by hand in float32
+      (`attention_by_hand`: MLX's plain ops, another backward pass), within 2% as a whole (measured: at most 0.5%).
+    * With the sampling forward's attention in the training forward, which is what training ran before, the same
+      gradient is more than a hundred times too large or not finite (measured: 640 times at the least, 1e5 to 3e26
+      times in the other five cases).
+
+    Printed, not asserted: how far each gradient is from the float32 model's, torch's own bf16 gradient included
+    (measured: ours 0.3 to 1.1 of the gradient's size, torch's 0.7 to 33). With attention this sharp a bf16 base is
+    not the float32 model: rounding q and k to bf16 moves the logits by several units, and neither torch's gradient
+    nor ours stays near the float32 one."""
+    s = sharp_setup(seed, gain)
+    truth = torch_side(s, tmp_path)[1]
+    mixed = to_mixed(s["model"])
+    theirs = torch_side(s, tmp_path, base=mixed)[1]
+    frozen, trainable = mlx_groups(s, base=mixed)
+    args = (s["cfg"], s["example"], to_mx(s["text"]))
+    scores = largest_scores(trainable, frozen, *args)
+    width = SHARP["attention_head_dim"]
+    errors = [bf16_logit_error(score, width) for score in scores]
+    assert len(scores) == 1 + SHARP["num_layers"] and min(scores) > 12_000 and min(errors) >= 4, scores
+
+    loss, grads = evaluated(train.loss_and_gradients, trainable, frozen, *args)
+    assert all(g.dtype == mx.float32 for g in grads.values())
+    on_gpu = mx.default_device() == mx.gpu
+    if on_gpu:
+        assert float(loss) == float(sampling_forward_loss(lora.join(frozen, trainable), *args))
+    with swapped("attention_for_training", attention_by_hand):
+        want_loss, want = evaluated(train.loss_and_gradients, trainable, frozen, *args)
+    with swapped("attention_for_training", ops.attention):
+        _, before = evaluated(train.loss_and_gradients, trainable, frozen, *args)
+    keys = sorted(grads)
+    reference, exact = flat(want, keys), flat(truth, keys)
+    ours, old = rel_err(flat(grads, keys), reference), rel_err(flat(before, keys), reference)
+    print(f"gain {gain}, seed {seed}: largest scores {min(scores):,.0f} to {max(scores):,.0f} (a bf16 score is off by "
+          f"up to {min(errors):g} to {max(errors):g} in the logit); against the by-hand float32 "
+          f"attention, ours {ours:.1e}, the bf16 call {old:.1e}; against the float32 model, ours "
+          f"{rel_err(flat(grads, keys), exact):.2f}, torch over the bf16 base {rel_err(flat(theirs, keys), exact):.2f}")
+    assert abs(float(loss) - float(want_loss)) <= 1e-5 * float(want_loss)
+    assert ours < 2e-2
+    if on_gpu:
+        assert not old < 1e2, "the bf16 call's backward is what the reference tells apart"
+
+
+@pytest.mark.parametrize("gain", [30, 50])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_gradients_through_sharp_attention_in_float32_are_torchs(tmp_path, seed, gain):
+    """Float32 throughout, where there is an exact reference: the loss and the whole gradient against torch and PEFT
+    with the blocks' scores in the tens of thousands (measured: the gradient within 1e-3; single tensors whose gradient is
+    nearly zero, under attention this sharp, are not scored one by one). The refiner is left as it is here: with its
+    attention as sharp as the blocks' at a gain of 50, float32 on two machines' arithmetic is itself 10% apart in
+    one of these cases, which says how steep such a model is and nothing about either backward pass."""
+    s = sharp_setup(seed, gain, refiner=False)
+    want_loss, want, _ = torch_side(s, tmp_path)
+    frozen, trainable = mlx_groups(s)
+    args = (s["cfg"], s["example"], to_mx(s["text"]))
+    assert min(largest_scores(trainable, frozen, *args)[1:]) > 16_000
+    loss, grads = train.loss_and_gradients(trainable, frozen, *args)
+    keys = sorted(grads)
+    error = rel_err(flat(grads, keys), flat(want, keys))
+    print(f"float32, gain {gain}, seed {seed}: gradient {error:.1e} from torch's")
+    assert abs(float(loss) - want_loss) <= 1e-5 * want_loss and error < 5e-3
 
 
 # --- the gradient of a modulation table ----------------------------------------------------------------------------------
@@ -388,8 +550,9 @@ def test_a_tables_gradient_over_a_bf16_base_is_the_rows_sum():
     sequence row, each used once, so their gather's backward sums nothing: the rows' cotangents are summed later, in
     float32, by the product with the float32 matrices. The values in the forward are the same and so is the loss, bit
     for bit. With shared tables `train.loss_and_gradients` is within 1% of that reference (one rounding of each sum
-    to bf16 apart). Through the sampling forward's gather, which sums in bf16, the same gradients are more than 5%
-    away. Every other tensor's gradient is identical three times. On the CPU stream, for a fixed order of sums."""
+    to bf16 apart). With the sampling forward's gather in the training forward, which sums in bf16, the same
+    gradients are more than 5% away. Every other tensor's gradient is identical three times. On the CPU stream, for
+    a fixed order of sums."""
     cfg = dict(TINY)
     torch.manual_seed(0)
     model = to_mixed(randomised(cfg, 0))
@@ -406,7 +569,8 @@ def test_a_tables_gradient_over_a_bf16_base_is_the_rows_sum():
     with mx.stream(mx.cpu):
         want_loss, want = train.loss_and_gradients(trainable, frozen, cfg, own_row, text)
         loss, grads = train.loss_and_gradients(trainable, frozen, cfg, shared, text)
-        in_bf16 = mx.grad(lambda t: sampling_forward_loss({**frozen, **t}, cfg, shared, text))(trainable)
+        with swapped("take_rows_for_training", ops.take_rows):
+            in_bf16 = evaluated(train.loss_and_gradients, trainable, frozen, cfg, shared, text)[1]
         mx.eval(want_loss, want, loss, grads, in_bf16)
     assert float(loss) == float(want_loss)
     fed = [k for k in grads if any(part in k for part in TABLE_FED)]
