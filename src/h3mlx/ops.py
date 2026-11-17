@@ -220,6 +220,30 @@ def attention(q: mx.array, k: mx.array, v: mx.array, mask: mx.array | None = Non
     return o.transpose(0, 2, 1, 3)
 
 
+def attention_for_training(q: mx.array, k: mx.array, v: mx.array, mask: mx.array | None = None) -> mx.array:
+    """`attention` for a forward that is differentiated: half-precision q, k and v go through the same call in
+    float32, and the result is cast back to their dtype.
+
+    MLX 0.32.4 gave `mx.fast.scaled_dot_product_attention` a fused backward pass on the GPU. It recomputes the
+    unscaled scores `q . k` into a buffer of the inputs' dtype and rebuilds the probabilities from them as
+    `exp(score * scale - logsumexp)`. In bf16 a score keeps eight significant bits, so the logit under the
+    exponential is off by up to half a bf16 step of the score times the scale: 0.7 at a score of 2,800, 5.7 at
+    25,000, 22.6 at 100,000, at 128 a head. The probabilities stop summing to 1 and the gradients for q, k and v
+    come out wrong by that factor, while the forward stays right. A pretrained model has heads with scores that
+    large. In float16 the unscaled score overflows at 65,504. On float32 inputs the same backward is torch's to
+    float32 rounding, on that MLX and on earlier ones, whose bf16 backward was bounded and still several times off
+    for q and k at such scores.
+
+    The forward's values do not change where the fused kernels run (MLX 0.32.4, the default device, head widths
+    such as the release's 128): the bf16 call already returns the float32 result rounded to bf16, bit for bit.
+    Elsewhere MLX computes the bf16 call in bf16 and this one is the more exact. The cost is float32 copies of q, k
+    and v and of the result while the call runs, so sampling, which has no backward, keeps `attention`."""
+    dtype = _promoted(_promoted(q.dtype, k.dtype), v.dtype)
+    if dtype not in (mx.float16, mx.bfloat16):
+        return attention(q, k, v, mask)
+    return attention(q.astype(mx.float32), k.astype(mx.float32), v.astype(mx.float32), mask).astype(dtype)
+
+
 def key_padding_mask(used: int, total: int) -> mx.array:
     """Boolean (1, 1, total, total) mask letting every query see only the first `used` keys (the reference pads the
     packed sequence to a multiple of 64 and splits the tail off with cu_seqlens = [0, used, S])."""
@@ -234,8 +258,10 @@ def attn_block(
     qk_eps: float,
     rotary: tuple[mx.array, mx.array] | None,
     mask: mx.array | None = None,
+    attend=attention,
 ) -> mx.array:
-    """MiniMaxH3AttnProcessor with separate to_q/to_k/to_v (no bias), per-head RMSNorm on q/k, rope, to_out."""
+    """MiniMaxH3AttnProcessor with separate to_q/to_k/to_v (no bias), per-head RMSNorm on q/k, rope, to_out.
+    `attend`: the attention itself, `attention_for_training` in a forward that is differentiated."""
     b, s, _ = x.shape
     q = plinear(x, p, "to_q").reshape(b, s, heads, -1)
     k = plinear(x, p, "to_k").reshape(b, s, heads, -1)
@@ -245,7 +271,7 @@ def attn_block(
     if rotary is not None:
         q = apply_rotary(q, *rotary)
         k = apply_rotary(k, *rotary)
-    o = attention(q, k, v, mask).reshape(b, s, -1)
+    o = attend(q, k, v, mask).reshape(b, s, -1)
     return plinear(o, p, "to_out.0")
 
 
@@ -411,16 +437,18 @@ def dit_block(
     qk_eps: float = 1e-5,
     modulation: list[mx.array] | None = None,
     take=take_rows,
+    attend=attention,
 ) -> mx.array:
     """Pre-norm attention and SwiGLU FF, each shift/scale-modulated and gated per row from the (t, modality) table.
     `modulation`: the six precomputed tables (from `ModulationCache`) instead of projecting `temb` here. `take`: the
-    gather of a table's rows, `take_rows_for_training` in a forward that is differentiated."""
+    gather of a table's rows, `take_rows_for_training` in a forward that is differentiated. `attend`: the attention,
+    `attention_for_training` there."""
     if modulation is None:
         modulation = adaln_tables(temb, p, hidden_size)
     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation
     sub = lambda prefix: {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}  # noqa: E731
     h = modulate(rms_norm(x, p["norm1.weight"], norm_eps), shift_msa, scale_msa, adaln_indices, take)
-    x = x + take(gate_msa, adaln_indices) * attn_block(h, sub("attn."), heads, qk_eps, rotary)
+    x = x + take(gate_msa, adaln_indices) * attn_block(h, sub("attn."), heads, qk_eps, rotary, attend=attend)
     h = modulate(rms_norm(x, p["norm2.weight"], norm_eps), shift_mlp, scale_mlp, adaln_indices, take)
     return x + take(gate_mlp, adaln_indices) * swiglu_ff(h, sub("ff."))
 
@@ -432,26 +460,29 @@ def _sub(p: dict, prefix: str) -> dict:
     return {k[len(prefix) :]: v for k, v in p.items() if k.startswith(prefix)}
 
 
-def token_refiner(x: mx.array, p: dict, num_layers: int, heads: int, norm_eps: float, qk_eps: float, final_eps: float):
-    """Plain pre-norm blocks (no AdaLN, no rope), then a final RMSNorm."""
+def token_refiner(x: mx.array, p: dict, num_layers: int, heads: int, norm_eps: float, qk_eps: float, final_eps: float,
+                  attend=attention):
+    """Plain pre-norm blocks (no AdaLN, no rope), then a final RMSNorm. `attend` as in `attn_block`."""
     for i in range(num_layers):
         b = _sub(p, f"refiner_blocks.{i}.")
-        x = x + attn_block(rms_norm(x, b["norm1.weight"], norm_eps), _sub(b, "attn."), heads, qk_eps, None)
+        x = x + attn_block(rms_norm(x, b["norm1.weight"], norm_eps), _sub(b, "attn."), heads, qk_eps, None,
+                           attend=attend)
         x = x + swiglu_ff(rms_norm(x, b["norm2.weight"], norm_eps), _sub(b, "ff."))
     return rms_norm(x, p["final_norm.weight"], final_eps)
 
 
 def dit_inputs(p: dict, cfg: dict, video: mx.array, audio: mx.array, text: mx.array, seq: int,
-               video_indices: mx.array, audio_indices: mx.array, text_indices: mx.array) -> mx.array:
+               video_indices: mx.array, audio_indices: mx.array, text_indices: mx.array, attend=attention) -> mx.array:
     """The start of the forward: each modality projected at its own weights' dtype, the text through the token
-    refiner, and the rows scattered into the packed (batch, seq, hidden) buffer the blocks work on."""
+    refiner, and the rows scattered into the packed (batch, seq, hidden) buffer the blocks work on. `attend`: the
+    refiner's attention, as in `attn_block`."""
     heads = cfg["num_attention_heads"]
     eps, qk_eps, final_eps = cfg["norm_eps"], cfg["qk_norm_eps"], cfg["final_norm_eps"]
     #@@start project-and-scatter
     v = plinear(video.astype(p["proj_in.weight"].dtype), p, "proj_in", bias=True)
     a = plinear(audio.astype(p["audio_proj_in.weight"].dtype), p, "audio_proj_in", bias=True)
     t = plinear(text.astype(p["context_embedder.weight"].dtype), p, "context_embedder", bias=True)
-    t = token_refiner(t, _sub(p, "token_refiner."), cfg["num_refiner_layers"], heads, eps, qk_eps, final_eps)
+    t = token_refiner(t, _sub(p, "token_refiner."), cfg["num_refiner_layers"], heads, eps, qk_eps, final_eps, attend)
 
     x = mx.zeros((t.shape[0], seq, t.shape[-1]), dtype=t.dtype)
     x[:, text_indices] = t

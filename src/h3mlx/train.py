@@ -242,10 +242,12 @@ class ExampleForward:
     the heads and the loss). Each stage takes its weights as a dict, so a caller chooses which of them are arguments
     of a transform.
 
-    These are `ops.dit_forward`'s operations in its order, and the loss is the same bit for bit. Two things differ,
-    and neither changes a value. Nothing is evaluated between the stages: the sampling forward evaluates after every
-    block, and an array evaluated while it is being traced keeps its graph. And the modulation tables' rows are
-    gathered with `ops.take_rows_for_training`, whose gradient over a half-precision table is the sum torch's is."""
+    These are `ops.dit_forward`'s operations in its order, and the loss is the same bit for bit. Three things differ,
+    and none changes a value. Nothing is evaluated between the stages: the sampling forward evaluates after every
+    block, and an array evaluated while it is being traced keeps its graph. The modulation tables' rows are gathered
+    with `ops.take_rows_for_training`, whose gradient over a half-precision table is the sum torch's is. And the
+    attention is `ops.attention_for_training`, which runs half-precision q, k and v through the same call in
+    float32: its backward is then right when attention logits are large, which the half-precision call's is not."""
 
     def __init__(self, cfg: dict, example: Example, text: mx.array, weight=None):
         lay = example.layout
@@ -262,14 +264,15 @@ class ExampleForward:
     def start(self, p: dict) -> tuple[mx.array, mx.array]:
         """(the packed rows before the first block, the time embedding) from the whole dict of weights."""
         x = ops.dit_inputs(p, self.cfg, self.video, self.audio, self.text, self.seq, self.video_indices,
-                           self.audio_indices, self.text_indices)
+                           self.audio_indices, self.text_indices, attend=ops.attention_for_training)
         return x, ops.two_time_embedding(self.timestep, None, p, self.cfg)
 
     def block(self, x: mx.array, temb: mx.array, block_p: dict) -> mx.array:
         """One block on its own weights (the keys under `transformer_blocks.<i>.`, without that prefix)."""
         cfg = self.cfg
         return ops.dit_block(x, temb, self.adaln_indices, self.rotary, block_p, cfg["num_attention_heads"],
-                             cfg["hidden_size"], cfg["norm_eps"], cfg["qk_norm_eps"], take=ops.take_rows_for_training)
+                             cfg["hidden_size"], cfg["norm_eps"], cfg["qk_norm_eps"], take=ops.take_rows_for_training,
+                             attend=ops.attention_for_training)
 
     def finish(self, x: mx.array, temb: mx.array, p: dict) -> mx.array:
         """The loss from the last block's output, from the whole dict of weights."""
