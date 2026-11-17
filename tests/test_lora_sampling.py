@@ -431,6 +431,8 @@ def test_from_header_refuses_a_malformed_header_as_a_value_error(tmp_path):
         "truncated": (write("truncated", "{" + a + "}", length=5000), "a header of 5000 bytes"),
         "metadata a list": (write("meta-list", '{"__metadata__": [1, 2], ' + a + "}"), strings),
         "metadata not strings": (write("meta-int", '{"__metadata__": {"alpha": 8}, ' + a + "}"), strings),
+        **{f"metadata {v}": (write(f"meta-{i}", '{"__metadata__": ' + v + ", " + a + "}"), strings)
+           for i, v in enumerate(("0", "false", "[]", '""'))},
         "shape of text": (write("shape-text", "{" + entry("t.lora_A.weight", '["x", 4]') + "}"), shape),
         "shape of bools": (write("shape-bool", "{" + entry("t.lora_A.weight", "[true, 4]") + "}"), shape),
         "negative shape": (write("shape-neg", "{" + entry("t.lora_A.weight", "[-1, 4]") + "}"), shape),

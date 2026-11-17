@@ -787,7 +787,8 @@ def from_header(path, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Ad
     header = files.safetensors_header(path)
     if not isinstance(header, dict):
         raise ValueError(f"{path}: not a safetensors header")
-    metadata = header.pop("__metadata__", None) or {}
+    metadata = header.pop("__metadata__", None)
+    metadata = {} if metadata is None else metadata  # absent or null; a falsy non-map (0, [], "") is still refused
     if not (isinstance(metadata, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in metadata.items())):
         raise ValueError(f"{path}: not a safetensors header (its __metadata__ is not a map of strings to strings)")
     dims_ok = lambda shape: all(type(d) is int and 0 <= d < 2**31 for d in shape)  # noqa: E731 (bool is not int here)
