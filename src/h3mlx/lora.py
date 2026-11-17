@@ -182,6 +182,13 @@ def runtime_key(module: str, matrix: str, name: str | None = None) -> str:
     return f"{module}.lora_{matrix}.weight" if name is None else f"{module}.lora_{matrix}.{name}.weight"
 
 
+def carried_lora_keys(params: dict) -> list[str]:
+    """Every key in `params` that is part of an attached adapter, on any Linear: an unnamed adapter's matrices, a named
+    one's (PEFT's runtime names), a scaling, a list of active adapters. Empty for base weights."""
+    return sorted(k for k in params if k.endswith((".lora_A.weight", ".lora_B.weight")) or RUNTIME_RE.match(k)
+                  or SCALING in k or k.endswith(ADAPTERS))
+
+
 def _carries_lora(params: dict, module: str) -> bool:
     return module + ".lora_A.weight" in params or module + ADAPTERS in params
 
@@ -749,10 +756,10 @@ def for_sampling(params: dict, cfg: dict, adapter: Adapter, scale) -> dict:
     bad = sorted(key for key, ok in finite.items() if not ok.item())
     if bad:
         raise ValueError(f"{len(bad)} of the adapter's {len(finite)} matrices hold a NaN or an infinity, e.g. {bad[:3]}")
-    taken = [m for m in adapter.modules if _carries_lora(params, m)]
-    if taken:  # `attach` refuses this too; checked here so that scale 0 does not pass weights that run another adapter
-        raise ValueError(f"{len(taken)} Linear(s) already carry a LoRA, e.g. {taken[:3]}: the sampler takes the base "
-                         "weights and one adapter")
+    carried = carried_lora_keys(params)
+    if carried:  # on any Linear, not only the adapter's own: scale 0 hands these weights back, and they would run it
+        raise ValueError(f"these weights already carry a LoRA ({len(carried)} keys, e.g. {carried[:3]}): the sampler "
+                         "takes the base weights and one adapter")
     if scale == 0:
         return params
     out = attach(params, cfg, adapter, scale=scale)

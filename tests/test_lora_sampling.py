@@ -261,9 +261,15 @@ def test_for_sampling_refuses():
     for scale in (1.0, 0):
         with pytest.raises(ValueError, match="do not fit the Linear"):
             lora.for_sampling(base, cfg, misfit, scale)
+    q, v = "transformer_blocks.0.attn.to_q", "transformer_blocks.0.attn.to_v"
+    only_q, only_v = (random_adapter(cfg, {m: 1}, {m: 1}) for m in (q, v))
     for scale in (1.0, 0):  # at 0 too: the weights handed back would run the adapter already on them
         with pytest.raises(ValueError, match="already carry a LoRA"):
             lora.for_sampling(lora.attach(base, cfg, adapter), cfg, adapter, scale)
+        for carried in (lora.attach(base, cfg, only_q), lora.attach(base, cfg, only_q, name="first")):
+            with pytest.raises(ValueError, match="already carry a LoRA"):  # on another Linear than the new adapter's
+                lora.for_sampling(carried, cfg, only_v, scale)
+    assert lora.carried_lora_keys(base) == []
 
 
 def test_a_scale_finite_in_python_and_not_in_float32_is_refused():

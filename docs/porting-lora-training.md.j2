@@ -2050,7 +2050,8 @@ and the port's is the first: it is a function of the arguments, with nothing to 
   `test_factors_finite_in_the_file_and_not_in_the_base_dtype_are_refused`,
   `test_the_plan_refuses_a_scale_that_overflows_float32`).
 - **Weights that already carry an adapter are refused at every scale.** At 0 the sampler hands back the weights it
-  was given, so without the check those weights would still run the adapter already on them.
+  was given, so without the check those weights would still run the adapter already on them. The check is on the
+  whole dict (`carried_lora_keys`), so an adapter on another Linear than the new one's is caught too, named or not.
 - **A malformed header is a ValueError, so an argument error.** A header shorter than its stated length, a
   `__metadata__` that is not a map of strings to strings, a tensor whose shape is not a list of non-negative
   integers, and a `lora_adapter_metadata` that is not a JSON object are each refused as such
