@@ -1212,6 +1212,28 @@ def test_every_draw_is_a_function_of_the_seed_and_the_step():
     assert trainer.noise_level({**hyper, "weighting": "none"}, grid, 3) == (levels[3][0], None)
 
 
+def test_an_example_listed_twice_is_encoded_once(release, tmp_path, monkeypatch, capsys):
+    """A dataset may list an example twice to draw it twice as often. Both entries make one request, so one cache
+    key: the plan counts it once among those to encode, the encoder is asked for it once (the cache refuses a second
+    write of a key), and the run trains on all three entries."""
+    data = make_dataset(tmp_path / "data", examples=[EXAMPLES[0], EXAMPLES[0], EXAMPLES[1]])
+    argv = arguments(release, data, tmp_path / "cache", tmp_path / "run", **{"--max-steps": ["3"], "--checkpoint-every": ["3"]})
+    assert run(argv + ["--plan-only"]) == 0
+    plan = json.loads(capsys.readouterr().out)["plan"]
+    assert plan["examples"]["count"] == 3 and plan["examples"]["to_encode"] == 2
+    asked = []
+
+    def encode(weights, cache_dir, todo, vae_dtype, log):
+        asked.extend(cache.key(r) for _, r in todo)
+        fill_cache(argv)
+
+    monkeypatch.setattr(T, "encode_missing", encode)
+    assert run(argv) == 0
+    assert len(asked) == 2 == len(set(asked))
+    record = record_of(tmp_path / "run")
+    assert record["status"] == "finished" and record["plan"]["examples"]["count"] == 3
+
+
 # --- from pictures, with the tiny encoders -----------------------------------------------------------------------------
 
 

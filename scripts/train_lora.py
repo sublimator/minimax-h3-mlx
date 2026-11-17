@@ -246,7 +246,9 @@ def main(argv=None, clock=time.monotonic) -> int:
         # the run directory first: held by this process, and every reason to refuse the run found, before any
         # encoder or weight is loaded
         with trainer.open_run(run_dir, traj, lim, cfg, resume=args.resume) as session:
-            todo = [(e, r) for e, r in zip(examples, asked) if cache.read(cache_dir, r) is None]
+            # a dataset may list an example twice (drawn twice as often); its entries share one key, encoded once
+            todo = list({cache.key(r): (e, r) for e, r in zip(examples, asked)
+                         if cache.read(cache_dir, r) is None}.values())
             if todo:
                 encode_missing(weights, cache_dir, todo, args.vae_dtype, log)
             entries = [cache.read(cache_dir, r) for r in asked]

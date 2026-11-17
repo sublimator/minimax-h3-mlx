@@ -249,7 +249,7 @@ def plan(traj: dict, lim: dict, cfg: dict, examples: list, *, run_dir, cache_dir
         sizes["saved_block_inputs_bytes"] = cfg["num_layers"] * largest * cfg["hidden_size"] * BYTES[block_dtype]
     run_dir = Path(run_dir)
     return {
-        "examples": {"count": count, "to_encode": sum(not e["cached"] for e in examples), "list": examples},
+        "examples": {"count": count, "to_encode": len({e["key"] for e in examples if not e["cached"]}), "list": examples},
         "steps": {"max_steps": steps, "passes_over_the_examples": round(steps / count, 3),
                   "checkpoint_every": lim["checkpoint_every"], "checkpoints_at": checkpoints},
         "adapter": {**adapter, "scaling": adapter["alpha"] / adapter["rank"], "first_modules": modules[:3],
