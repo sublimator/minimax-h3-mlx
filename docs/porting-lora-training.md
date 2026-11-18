@@ -1,14 +1,14 @@
 <!--
 rendered_from: porting-lora-training.md.j2
-rendered_at: 2026-11-17T08:23:07Z
+rendered_at: 2026-11-18T15:07:36Z
 branch: main
-commit: 4c46aac
-commit_message: docs: guides re-rendered
+commit: 2bc9db8
+commit_message: fix: train: encode an example listed twice only once
 -->
 
 ---
 
-<sub>Last updated: 2026-11-17 | branch: main | commit: 4c46aac (docs: guides re-rendered)</sub>
+<sub>Last updated: 2026-11-18 | branch: main | commit: 2bc9db8 (fix: train: encode an example listed twice only once)</sub>
 
 ---
 
@@ -123,7 +123,7 @@ PEFT sets the scaling when it builds the layer, and applies it in the forward:
 rank and `hyperflow.attach` refuses anything else. A general adapter needs it, so `plinear` now multiplies when the
 weights carry a scaling, and is unchanged when they don't:
 
-📍 [`src/h3mlx/ops.py:100-105`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/ops.py#L100-L105)
+📍 [`src/h3mlx/ops.py:100-105`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/ops.py#L100-L105)
 ```python
  100 def times_scalar(x: mx.array, s) -> mx.array:
  101     """torch's `tensor * python_float`. A half-precision tensor is multiplied in float32 by the float32 scalar and
@@ -132,7 +132,7 @@ weights carry a scaling, and is unchanged when they don't:
  104         return (x.astype(mx.float32) * s).astype(x.dtype)
  105     return x * s
 ```
-📍 [`src/h3mlx/ops.py:108-146`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/ops.py#L108-L146)
+📍 [`src/h3mlx/ops.py:108-146`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/ops.py#L108-L146)
 ```python
  108 def plinear(x: mx.array, p: dict, name: str, bias: bool = False) -> mx.array:
  109     """The Linear `name` of state dict `p`, plus its LoRA when `name.lora_A.weight` / `name.lora_B.weight` are present.
@@ -211,7 +211,7 @@ alone and must equal PEFT's bit for bit in bf16 and float16; it also checks that
 `kaiming_uniform_(a=sqrt(5))` is a uniform draw in ±bound with bound = √3 · gain / √fan_in and gain = √(2 / (1 + a²)),
 which comes to 1 / √in. `lora_B` is zero, so a new adapter does nothing until it is trained.
 
-📍 [`src/h3mlx/lora.py:138-148`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L138-L148)
+📍 [`src/h3mlx/lora.py:138-148`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L138-L148)
 ```python
  138 def kaiming_uniform(shape, generator) -> np.ndarray:
  139     """`nn.init.kaiming_uniform_(weight, a=math.sqrt(5))` for a (rank, in) `lora_A`, drawn from a torch generator so the
@@ -225,7 +225,7 @@ which comes to 1 / √in. `lora_B` is zero, so a new adapter does nothing until 
  147     bound = math.sqrt(3.0) * std
  148     return torch.empty(tuple(shape), dtype=torch.float32).uniform_(-bound, bound, generator=generator).numpy()
 ```
-📍 [`src/h3mlx/lora.py:151-173`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L151-L173)
+📍 [`src/h3mlx/lora.py:151-173`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L151-L173)
 ```python
  151 def init(cfg: dict, rank: int, alpha: float | None = None, modules=None, seed: int = 0) -> Adapter:
  152     """A new adapter as PEFT initialises one (`init_lora_weights=True`): `lora_A` Kaiming-uniform, `lora_B` zero, so it
@@ -270,7 +270,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
 
 ### 1.3 Attaching, and the dtype
 
-📍 [`src/h3mlx/lora.py:38-63`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L38-L63)
+📍 [`src/h3mlx/lora.py:38-63`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L38-L63)
 ```python
   38 @dataclass
   39 class Adapter:
@@ -299,7 +299,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   62         """`lora_alpha / r`, as PEFT's `update_layer` sets it (without rsLoRA)."""
   63         return self.alpha[module] / self.rank(module)
 ```
-📍 [`src/h3mlx/lora.py:69-82`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L69-L82)
+📍 [`src/h3mlx/lora.py:69-82`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L69-L82)
 ```python
   69 def wired_shapes(cfg: dict) -> dict:
   70     """{module: (out, in)} for every Linear of the transformer, all of which the forward runs through `ops.plinear`:
@@ -316,7 +316,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   81                 "proj_out": (patch_dim, hidden), "audio_proj_out": (cfg["audio_in_channels"], hidden)})
   82     return out
 ```
-📍 [`src/h3mlx/lora.py:114-132`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L114-L132)
+📍 [`src/h3mlx/lora.py:114-132`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L114-L132)
 ```python
  114 def check(adapter: Adapter, cfg: dict) -> None:
  115     """Every module is a Linear of the transformer (the forward applies a LoRA on each of them, and on nothing else: a
@@ -338,7 +338,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
  131             raise ValueError(f"{module}: LoRA rank must be positive, got {a[0]}")
  132         check_alpha(module, adapter.alpha[module])
 ```
-📍 [`src/h3mlx/lora.py:224-274`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L224-L274)
+📍 [`src/h3mlx/lora.py:224-274`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L224-L274)
 ```python
  224 def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None,
  225            scale: float = 1.0) -> dict:
@@ -414,7 +414,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   refuses them, and so do `init`, `read` and `save` (§1.5). `test_alpha_must_be_positive_and_finite` shows PEFT's
   layer taking each of the four and ours refusing it at every entry and exit.
 
-📍 [`src/h3mlx/lora.py:91-100`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L91-L100)
+📍 [`src/h3mlx/lora.py:91-100`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L91-L100)
 ```python
   91 def check_alpha(what: str, alpha) -> None:
   92     """An alpha is a positive, finite number. PEFT takes any: zero leaves an adapter that does nothing and cannot
@@ -427,7 +427,7 @@ order of the draws, and that the forward with a fresh adapter is the base model'
   99     if not ok:
  100         raise ValueError(f"{what}: lora_alpha is {alpha!r}; it must be a positive, finite number")
 ```
-📍 [`src/h3mlx/lora.py:103-111`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L103-L111)
+📍 [`src/h3mlx/lora.py:103-111`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L103-L111)
 ```python
  103 def check_keys(adapter: Adapter) -> None:
  104     """The tensors are the two matrices of each module that has an alpha, and nothing else: no stray tensor, no half
@@ -517,7 +517,7 @@ float32 run at most 1.5× torch's own, plus 1e-3). Measured relative errors, tor
 1008                         base_layer.weight.data += delta_weight
 ```
 
-📍 [`src/h3mlx/lora.py:408-416`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L408-L416)
+📍 [`src/h3mlx/lora.py:408-416`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L408-L416)
 ```python
  408 def delta_weight(a: mx.array, b: mx.array, scaling: float) -> mx.array:
  409     """PEFT's `Linear.get_delta_weight` on CPU: `(B @ A) * scaling`, with half-precision factors multiplied in float32
@@ -529,7 +529,7 @@ float32 run at most 1.5× torch's own, plus 1e-3). Measured relative errors, tor
  415     out = (b @ a) * scaling
  416     return out.astype(dtype) if half else out
 ```
-📍 [`src/h3mlx/lora.py:419-440`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L419-L440)
+📍 [`src/h3mlx/lora.py:419-440`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L419-L440)
 ```python
  419 def merge(params: dict, cfg: dict, adapter: Adapter) -> dict:
  420     """The transformer's plain weights with the adapter added into them (PEFT's `Linear.merge`: `weight +=
@@ -853,7 +853,7 @@ The pipeline mixin adds three more rules before any of that, which matter for fi
 
 Ours is one reader for all of it, and one writer:
 
-📍 [`src/h3mlx/lora.py:611-617`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L611-L617)
+📍 [`src/h3mlx/lora.py:611-617`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L611-L617)
 ```python
  611 def pattern_key(pattern_keys, key_to_match: str) -> str:
  612     """PEFT's `get_pattern_key`: the first `rank_pattern` / `alpha_pattern` key that matches the module name as a
@@ -863,7 +863,7 @@ Ours is one reader for all of it, and one writer:
  616             return key
  617     return key_to_match
 ```
-📍 [`src/h3mlx/lora.py:620-635`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L620-L635)
+📍 [`src/h3mlx/lora.py:620-635`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L620-L635)
 ```python
  620 def _component(tensors: dict, prefix: str | None) -> tuple[dict, str | None]:
  621     """The keys of one component with its prefix removed (`load_lora_adapter(prefix=...)`'s filter), and that prefix.
@@ -882,7 +882,7 @@ Ours is one reader for all of it, and one writer:
  634         return dict(tensors), None
  635     return {k.removeprefix(prefix + "."): v for k, v in tensors.items() if k.startswith(prefix + ".")}, prefix
 ```
-📍 [`src/h3mlx/lora.py:638-642`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L638-L642)
+📍 [`src/h3mlx/lora.py:638-642`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L638-L642)
 ```python
  638 def _refuse_dora(keys) -> None:
  639     """DoRA is not implemented: refuse its keys (diffusers drops a kohya `dora_scale` with a warning, and loads PEFT's
@@ -890,7 +890,7 @@ Ours is one reader for all of it, and one writer:
  641     if any("dora_scale" in k or "lora_magnitude_vector" in k for k in keys):
  642         raise NotImplementedError("DoRA adapters are not supported")
 ```
-📍 [`src/h3mlx/lora.py:645-720`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L645-L720)
+📍 [`src/h3mlx/lora.py:645-720`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L645-L720)
 ```python
  645 def read(tensors: dict, header: dict | None = None, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
  646     """An adapter from a LoRA file's tensors and its safetensors header (`__metadata__`), as diffusers would load it.
@@ -969,7 +969,7 @@ Ours is one reader for all of it, and one writer:
  719             check_alpha("the file header's `alpha`", network_alpha)
  720     return Adapter(tensors, {m: (rank if network_alpha is None else network_alpha) for m, rank in ranks.items()})
 ```
-📍 [`src/h3mlx/lora.py:843-864`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L843-L864)
+📍 [`src/h3mlx/lora.py:843-864`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L843-L864)
 ```python
  843 def config(adapter: Adapter) -> dict:
  844     """The `LoraConfig` arguments that describe the adapter, as `get_peft_kwargs` derives them: the most common rank and
@@ -994,7 +994,7 @@ Ours is one reader for all of it, and one writer:
  863         "fan_in_fan_out": False,
  864     }
 ```
-📍 [`src/h3mlx/lora.py:867-885`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L867-L885)
+📍 [`src/h3mlx/lora.py:867-885`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L867-L885)
 ```python
  867 def save(path, adapter: Adapter, prefix: str | None = "transformer") -> None:
  868     """Write the adapter as diffusers does: `<prefix>.<module>.lora_A/B.weight` tensors and, in the safetensors header,
@@ -1182,7 +1182,7 @@ prefixes against the mixin's two loaders.
 3403         state_dict = unflattened
 ```
 
-📍 [`src/h3mlx/lora.py:445-456`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L445-L456)
+📍 [`src/h3mlx/lora.py:445-456`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L445-L456)
 ```python
  445 _FLATTENED = [  # musubi-tuner's `lora_unet_` names, every `.` collapsed to `_`
  446     (r"blocks_(\d+)_attn_(qkv|out)_proj", r"blocks.\1.attn.\2_proj"),
@@ -1230,7 +1230,7 @@ musubi-tuner's flattened names against the same ten patterns.
 A kohya-style file stores an `.alpha` scalar beside each pair. The converter multiplies `alpha / rank` into the two
 matrices, balancing the factor between them, and drops the scalar. The result therefore has scaling 1.
 
-📍 [`src/h3mlx/lora.py:533-542`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L533-L542)
+📍 [`src/h3mlx/lora.py:533-542`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L533-L542)
 ```python
  533         alpha = sd.pop(base + ".alpha", None)
  534         if alpha is not None:
@@ -1297,7 +1297,7 @@ matrices, balancing the factor between them, and drops the scalar. The result th
 3495                     converted_state_dict[f"{target}.attn.{proj}.lora_B.weight"] = up_proj.contiguous()
 ```
 
-📍 [`src/h3mlx/lora.py:563-581`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L563-L581)
+📍 [`src/h3mlx/lora.py:563-581`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L563-L581)
 ```python
  563             qkv = pull(f"{source}.attn.qkv_proj")
  564             if qkv is not None:
@@ -1371,7 +1371,7 @@ checkpoint's row order, q, k and v interleaved per head, and is reordered first.
 3532     return {f"transformer.{k}": v for k, v in converted_state_dict.items()}
 ```
 
-📍 [`src/h3mlx/lora.py:585-593`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L585-L593)
+📍 [`src/h3mlx/lora.py:585-593`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L585-L593)
 ```python
  585             fc1 = pull(f"{source}.mlp.fc1")
  586             if fc1 is not None:
@@ -1383,7 +1383,7 @@ checkpoint's row order, q, k and v interleaved per head, and is reordered first.
  592                 out[f"{target}.ff.net.0.proj.lora_A.weight"] = down
  593                 out[f"{target}.ff.net.0.proj.lora_B.weight"] = mx.concatenate([up_value, up_gate], axis=0)
 ```
-📍 [`src/h3mlx/lora.py:457-466`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L457-L466)
+📍 [`src/h3mlx/lora.py:457-466`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L457-L466)
 ```python
  457 _STANDALONE = {  # the projections outside the block stack
  458     "video_patch_proj": "proj_in",
@@ -1481,7 +1481,7 @@ The scheduler works in `t = 1 − sigma`, with `t = 1` clean. Its own notes stat
  256         return timestep * sample + (1.0 - timestep) * noise
 ```
 
-📍 [`src/h3mlx/train.py:30-54`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L30-L54)
+📍 [`src/h3mlx/train.py:30-54`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L30-L54)
 ```python
   30 def scale_noise(sample: mx.array, timestep, noise: mx.array) -> mx.array:
   31     """`MiniMaxH3Scheduler.scale_noise`: `x_t = t * x_0 + (1 - t) * noise`, `t` in [0, 1] and 1 clean.
@@ -1557,7 +1557,7 @@ diffusers has no function for the training target of this model. It is fixed by 
  328         ratio = sigma_next / sigma
  329         prev_sample = ratio * sample.to(dtype=compute_dtype) + (1.0 - ratio) * denoised.to(dtype=compute_dtype)
 ```
-📍 [`src/h3mlx/ops.py:414-422`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/ops.py#L414-L422)
+📍 [`src/h3mlx/ops.py:414-422`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/ops.py#L414-L422)
 ```python
  414 def flow_step(v: mx.array, t: float, x: mx.array, sigma: float, sigma_next: float) -> mx.array:
  415     """x0 = x + (1 - t) * v (sigma from the timestep, in x's dtype); x_next = r*x + (1 - r)*x0, r = s_next / s, f32."""
@@ -1573,7 +1573,7 @@ diffusers has no function for the training target of this model. It is fixed by 
 With `x_t = t·x_0 + (1 − t)·noise` and `x_0 = x_t + (1 − t)·v`, the model's output must satisfy
 `(1 − t)·v = (1 − t)·(x_0 − noise)`. So the target is `x_0 − noise` at every `t`.
 
-📍 [`src/h3mlx/train.py:57-61`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L57-L61)
+📍 [`src/h3mlx/train.py:57-61`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L57-L61)
 ```python
   57 def velocity_target(sample: mx.array, noise: mx.array) -> mx.array:
   58     """What the transformer is trained to predict for `scale_noise(sample, t, noise)`, at every `t`: `x_0 - noise`.
@@ -1595,7 +1595,7 @@ velocity with the other sign, and the wrong one for this model. Three tests fail
 
 ### 3.3 The loss
 
-📍 [`src/h3mlx/train.py:64-87`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L64-L87)
+📍 [`src/h3mlx/train.py:64-87`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L64-L87)
 ```python
   64 def flow_match_loss(pred: mx.array, target: mx.array, weight=None) -> mx.array:
   65     """`mean(weight * (pred - target) ** 2)` over every element, in float32 whatever the inputs' dtypes. `weight` is a
@@ -1670,7 +1670,7 @@ velocity with the other sign, and the wrong one for this model. Three tests fail
  390     return u
 ```
 
-📍 [`src/h3mlx/train.py:444-470`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L444-L470)
+📍 [`src/h3mlx/train.py:444-470`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L444-L470)
 ```python
  444 def density_for_timestep_sampling(weighting_scheme: str, batch_size: int, logit_mean: float | None = None,
  445                                   logit_std: float | None = None, mode_scale: float | None = None,
@@ -1744,7 +1744,7 @@ The parameters, case by case (`test_density_parameters_are_required_and_finite`)
  408     return weighting
 ```
 
-📍 [`src/h3mlx/train.py:473-497`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L473-L497)
+📍 [`src/h3mlx/train.py:473-497`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L473-L497)
 ```python
  473 def loss_weighting_for_sd3(weighting_scheme: str, sigmas) -> np.ndarray:
  474     """diffusers' `compute_loss_weighting_for_sd3`, on float32 or float64 noise levels (numpy, or an `mx.array`).
@@ -1803,7 +1803,7 @@ MiniMax H3's scheduler has a sampling grid and no training grid. The port builds
  178             # The shift compresses the grid near sigma = 1; collapse any float32 collisions it creates.
  179             sigmas = torch.unique_consecutive(sigmas)
 ```
-📍 [`src/h3mlx/ops.py:401-411`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/ops.py#L401-L411)
+📍 [`src/h3mlx/ops.py:401-411`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/ops.py#L401-L411)
 ```python
  401 def flow_sigmas(num_inference_steps: int, shift: float) -> np.ndarray:
  402     """linspace(1, 0, n) in float32, exponential shift, consecutive duplicates collapsed. Terminal 0 included."""
@@ -1818,7 +1818,7 @@ MiniMax H3's scheduler has a sampling grid and no training grid. The port builds
  411     return sig[keep]
 ```
 
-📍 [`src/h3mlx/train.py:500-509`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L500-L509)
+📍 [`src/h3mlx/train.py:500-509`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L500-L509)
 ```python
  500 def training_sigmas(num_points: int, shift: float) -> np.ndarray:
  501     """`num_points` noise levels to train at, from 1.0 (pure noise) down, float32: the scheduler's own shifted grid
@@ -1831,7 +1831,7 @@ MiniMax H3's scheduler has a sampling grid and no training grid. The port builds
  508                          f"({len(grid)} distinct): ask for fewer points")
  509     return grid
 ```
-📍 [`src/h3mlx/train.py:512-531`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L512-L531)
+📍 [`src/h3mlx/train.py:512-531`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L512-L531)
 ```python
  512 def sample_sigmas(u, grid) -> tuple[np.ndarray, np.ndarray]:
  513     """One noise level per `u`: `grid[floor(u * len(grid))]`, the multiplication in float32 (an SD3-style trainer's
@@ -1913,20 +1913,20 @@ PEFT keeps each adapter's matrices under the adapter's name, so its state dict h
 file has `<module>.lora_A.weight`, whichever adapter it was. The port uses the same two spellings in the same two
 places:
 
-📍 [`src/h3mlx/lora.py:179-182`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L179-L182)
+📍 [`src/h3mlx/lora.py:179-182`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L179-L182)
 ```python
  179 def runtime_key(module: str, matrix: str, name: str | None = None) -> str:
  180     """A matrix's key in the weights dict: `<module>.lora_A.weight`, or for a named adapter PEFT's runtime name,
  181     `<module>.lora_A.<name>.weight`. (In a file neither carries a name: `Adapter.tensors`.)"""
  182     return f"{module}.lora_{matrix}.weight" if name is None else f"{module}.lora_{matrix}.{name}.weight"
 ```
-📍 [`src/h3mlx/lora.py:391-393`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L391-L393)
+📍 [`src/h3mlx/lora.py:391-393`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L391-L393)
 ```python
  391 def runtime_tensors(adapter: Adapter, name: str) -> dict:
  392     """An adapter's tensors under their runtime names for `name` (what `split` returns as `trainable`)."""
  393     return {runtime_key(m, x, name): adapter.tensors[f"{m}.lora_{x}.weight"] for m in adapter.modules for x in "AB"}
 ```
-📍 [`src/h3mlx/lora.py:396-405`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L396-L405)
+📍 [`src/h3mlx/lora.py:396-405`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L396-L405)
 ```python
  396 def file_tensors(tensors: dict, name: str) -> dict:
  397     """The reverse: a named adapter's matrices back under the names they have in a file and in `Adapter.tensors`,
@@ -1967,7 +1967,7 @@ get wrong:
 
 `plinear` (§1.1) follows it to the letter. An unnamed adapter, HyperFlow's included, takes the old path untouched.
 
-📍 [`src/h3mlx/lora.py:224-274`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L224-L274)
+📍 [`src/h3mlx/lora.py:224-274`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L224-L274)
 ```python
  224 def attach(params: dict, cfg: dict, adapter: Adapter, keep_dtype: bool = False, name: str | None = None,
  225            scale: float = 1.0) -> dict:
@@ -2021,7 +2021,7 @@ get wrong:
  273             out[module + ADAPTERS] = params.get(module + ADAPTERS, ()) + (name,)
  274     return out
 ```
-📍 [`src/h3mlx/lora.py:282-295`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L282-L295)
+📍 [`src/h3mlx/lora.py:282-295`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L282-L295)
 ```python
  282 def set_active(params: dict, names) -> dict:
  283     """The weights with the adapters `names` active, in that order, and every other named adapter switched off: PEFT's
@@ -2062,7 +2062,7 @@ In PEFT itself the two orders give different bits in both cases; the test checks
 
 ### 5.3 Two groups of weights
 
-📍 [`src/h3mlx/lora.py:298-308`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L298-L308)
+📍 [`src/h3mlx/lora.py:298-308`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L298-L308)
 ```python
  298 def split(params: dict, name: str) -> tuple[dict, dict]:
  299     """(frozen, trainable): the weights without the two matrices of the adapter `name`, and those matrices alone under
@@ -2100,7 +2100,7 @@ rather than left to go wrong quietly (`test_the_frozen_half_of_a_split_is_not_a_
 - `attach` under the same name onto the frozen half is refused: the name is still in use there, by a list entry or a
   scaling. Accepted, it would list the adapter twice on each `Linear` and apply it twice.
 
-📍 [`src/h3mlx/lora.py:383-388`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L383-L388)
+📍 [`src/h3mlx/lora.py:383-388`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L383-L388)
 ```python
  383 def join(frozen: dict, trainable: dict) -> dict:
  384     """The reverse of `split`: the two groups as one dict of weights again, for a forward outside the loss (a
@@ -2109,7 +2109,7 @@ rather than left to go wrong quietly (`test_the_frozen_half_of_a_split_is_not_a_
  387     check_trainable(trainable, frozen)
  388     return {**frozen, **trainable}
 ```
-📍 [`src/h3mlx/lora.py:311-352`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L311-L352)
+📍 [`src/h3mlx/lora.py:311-352`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L311-L352)
 ```python
  311 def check_trainable(trainable: dict, frozen: dict) -> None:
  312     """Refuses a pair of groups in which `trainable` would not be what the forward trains.
@@ -2172,7 +2172,7 @@ It also looks at the pair as a whole (`test_the_two_groups_share_nothing_and_mak
   group that holds only some of the split adapter's modules is refused here, not part of the way through a forward.
   (The rest of the adapter moved to the frozen side is fine: that is training some modules and freezing the others.)
 
-📍 [`src/h3mlx/lora.py:355-380`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L355-L380)
+📍 [`src/h3mlx/lora.py:355-380`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L355-L380)
 ```python
  355 def check_config(trainable: dict, frozen: dict, cfg: dict) -> None:
  356     """Refuses weights or trainable matrices that are not this config's transformer's.
@@ -2358,7 +2358,7 @@ the base-class method its audio rows pass through, and its own packing of the se
  944         return torch.unique(row_timesteps, sorted=True, return_inverse=True)
 ```
 
-📍 [`src/h3mlx/train.py:98-118`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L98-L118)
+📍 [`src/h3mlx/train.py:98-118`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L98-L118)
 ```python
   98 @dataclass
   99 class Example:
@@ -2382,7 +2382,7 @@ the base-class method its audio rows pass through, and its own packing of the se
  117         taken over, against `target`. The rows are told apart by their place in the layout, as `denoise` does it."""
  118         return video_pred[:, self.num_condition_rows:]
 ```
-📍 [`src/h3mlx/train.py:140-212`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L140-L212)
+📍 [`src/h3mlx/train.py:140-212`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L140-L212)
 ```python
  140 def build_example(cfg: dict, text_token_tags, latents: mx.array, sigma, noise, *, condition_t: float,
  141                   condition_latents=(), audio_sigma=None) -> Example:
@@ -2494,7 +2494,7 @@ Three inputs are refused that would otherwise build a wrong example without an e
 
 ### 6.3 The loss mask
 
-📍 [`src/h3mlx/train.py:121-127`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L121-L127)
+📍 [`src/h3mlx/train.py:121-127`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L121-L127)
 ```python
  121 def loss_mask(layout: Layout) -> np.ndarray:
  122     """True at the packed-sequence rows a picture's loss covers: the generated video rows. Text rows, audio rows and
@@ -2525,7 +2525,7 @@ on, and the layout's mask is unchanged.
   65     return (latents - latents_mean) / latents_std
 ```
 
-📍 [`src/h3mlx/vae.py:253-264`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/vae.py#L253-L264)
+📍 [`src/h3mlx/vae.py:253-264`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/vae.py#L253-L264)
 ```python
  253 def encode_condition(vae: VideoVAE, pixels_u8: mx.array, pixel_mean, pixel_std, latents_mean, latents_std, noise_fn,
  254                      float16_round: bool = True):
@@ -2540,7 +2540,7 @@ on, and the layout's mask is unchanged.
  263         lat = lat.astype(mx.float16).astype(mx.float32)
  264     return (lat - mx.array(latents_mean)) / mx.array(latents_std)
 ```
-📍 [`src/h3mlx/train.py:130-137`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L130-L137)
+📍 [`src/h3mlx/train.py:130-137`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L130-L137)
 ```python
  130 def encode_references(components, pictures, *, float16_round: bool) -> list:
  131     """The latents of an edit example's reference pictures: `image.encode_pictures` (a seed-42 posterior sample each),
@@ -2587,7 +2587,7 @@ one torch generator in the pipeline's order.
 
 ## 7. The example's loss and its gradient
 
-📍 [`src/h3mlx/train.py:218-236`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L218-L236)
+📍 [`src/h3mlx/train.py:218-236`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L218-L236)
 ```python
  218 def check_inputs(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array) -> None:
  219     """What every loss and gradient of an example checks first.
@@ -2609,7 +2609,7 @@ one torch generator in the pipeline's order.
  235         raise ValueError(f"text must be an array of shape {want} (1, the layout's text rows, text dim), got "
  236                          f"{tuple(text.shape) if hasattr(text, 'shape') else type(text).__name__}")
 ```
-📍 [`src/h3mlx/train.py:290-305`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L290-L305)
+📍 [`src/h3mlx/train.py:290-305`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L290-L305)
 ```python
  290 def example_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None) -> mx.array:
  291     """One example's loss: the transformer's forward on the example's rows with the weights `{**frozen, **trainable}`
@@ -2628,7 +2628,7 @@ one torch generator in the pipeline's order.
  304         x = forward.block(x, temb, ops._sub(p, f"transformer_blocks.{i}."))
  305     return forward.finish(x, temb, p)
 ```
-📍 [`src/h3mlx/train.py:308-312`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L308-L312)
+📍 [`src/h3mlx/train.py:308-312`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L308-L312)
 ```python
  308 def loss_and_gradients(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None):
  309     """(loss, gradients) of `example_loss`. The gradients are a dict with `trainable`'s keys and no others: the base
@@ -2660,7 +2660,7 @@ both gradients of §8:
 
 ### 7.1 The forward that is differentiated
 
-📍 [`src/h3mlx/train.py:239-287`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L239-L287)
+📍 [`src/h3mlx/train.py:239-287`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L239-L287)
 ```python
  239 class ExampleForward:
  240     """The transformer's forward on one example, for differentiating, in three stages: `start` (the projections, the
@@ -2736,13 +2736,13 @@ graph that made it, so every block's intermediates stay alive until the backward
  365         attn_output = self.attn(norm_hidden_states, rotary_emb, attention_mask)
  366         hidden_states = residual + gate_msa.index_select(0, adaln_indices) * attn_output
 ```
-📍 [`src/h3mlx/ops.py:166-168`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/ops.py#L166-L168)
+📍 [`src/h3mlx/ops.py:166-168`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/ops.py#L166-L168)
 ```python
  166 def take_rows(table: mx.array, rows: mx.array) -> mx.array:
  167     """table[rows] along the first axis: each sequence row's entry of a (t, modality) table."""
  168     return mx.take(table, rows, axis=0)
 ```
-📍 [`src/h3mlx/ops.py:171-183`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/ops.py#L171-L183)
+📍 [`src/h3mlx/ops.py:171-183`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/ops.py#L171-L183)
 ```python
  171 def take_rows_for_training(table: mx.array, rows: mx.array) -> mx.array:
  172     """`take_rows` for a forward that is differentiated: the same values bit for bit, with a half-precision table
@@ -2815,7 +2815,7 @@ diffusers and here:
  208         )
  209         hidden_states = hidden_states.flatten(2, 3).type_as(query)
 ```
-📍 [`src/h3mlx/ops.py:212-220`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/ops.py#L212-L220)
+📍 [`src/h3mlx/ops.py:212-220`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/ops.py#L212-L220)
 ```python
  212 def attention(q: mx.array, k: mx.array, v: mx.array, mask: mx.array | None = None) -> mx.array:
  213     """Full self-attention. q, k, v: (batch, seq, heads, head_dim) as diffusers lays them out; returns the same layout.
@@ -2827,7 +2827,7 @@ diffusers and here:
  219     o = mx.fast.scaled_dot_product_attention(qt, kt, vt, scale=scale, mask=mask)
  220     return o.transpose(0, 2, 1, 3)
 ```
-📍 [`src/h3mlx/ops.py:223-244`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/ops.py#L223-L244)
+📍 [`src/h3mlx/ops.py:223-244`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/ops.py#L223-L244)
 ```python
  223 def attention_for_training(q: mx.array, k: mx.array, v: mx.array, mask: mx.array | None = None) -> mx.array:
  224     """`attention` for a forward that is differentiated: half-precision q, k and v go through the same call in
@@ -3030,7 +3030,7 @@ the same matrices.
 **Float32 products, pinned.** The test above cannot tell float32 products from bf16 ones: with ordinary matrices
 either is within bf16's noise of the float32 run. An adapter whose rows cancel can:
 
-📍 [`tests/test_train_gradients.py:100-115`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/tests/test_train_gradients.py#L100-L115)
+📍 [`tests/test_train_gradients.py:100-115`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/tests/test_train_gradients.py#L100-L115)
 ```python
  100 def cancelling_adapter(cfg, modules, half, delta, seed, std=0.1):
  101     """An adapter that only float32 products get right. lora_A's second half is minus its first half plus
@@ -3123,7 +3123,7 @@ two other ways to get the same loss and the same gradients. There is no library 
 
 ### 8.1 Each block checkpointed
 
-📍 [`src/h3mlx/backward.py:41-57`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/backward.py#L41-L57)
+📍 [`src/h3mlx/backward.py:41-57`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/backward.py#L41-L57)
 ```python
   41 def checkpointed_loss(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array, weight=None) -> mx.array:
   42     """`train.example_loss` with each block run as an `mx.checkpoint` of (the block's input, the time embedding, the
@@ -3143,7 +3143,7 @@ two other ways to get the same loss and the same gradients. There is no library 
   56         x = mx.checkpoint(block)(x, temb, *[trainable[prefix + k] for k in names])
   57     return forward.finish(x, temb, p)
 ```
-📍 [`src/h3mlx/backward.py:60-65`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/backward.py#L60-L65)
+📍 [`src/h3mlx/backward.py:60-65`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/backward.py#L60-L65)
 ```python
   60 def loss_and_gradients_checkpointed(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array,
   61                                     weight=None):
@@ -3171,7 +3171,7 @@ has a minimal test:
 
 ### 8.2 Block by block, by hand
 
-📍 [`src/h3mlx/backward.py:68-125`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/backward.py#L68-L125)
+📍 [`src/h3mlx/backward.py:68-125`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/backward.py#L68-L125)
 ```python
   68 def loss_and_gradients_blockwise(trainable: dict, frozen: dict, cfg: dict, example: Example, text: mx.array,
   69                                  weight=None, after_stage=None):
@@ -3341,7 +3341,7 @@ The checkpointed path is not asserted on the default device.
 
 ## 9. The optimizer step
 
-📍 [`src/h3mlx/train.py:322-342`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L322-L342)
+📍 [`src/h3mlx/train.py:322-342`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L322-L342)
 ```python
  322 def adamw(*, learning_rate: float, betas, eps: float, weight_decay: float) -> optim.AdamW:
  323     """MLX's AdamW set up to compute `torch.optim.AdamW`'s update: with `bias_correction=True`. MLX leaves the bias
@@ -3365,7 +3365,7 @@ The checkpointed path is not asserted on the default device.
  341     return optim.AdamW(learning_rate=learning_rate, betas=betas, eps=eps, weight_decay=weight_decay,
  342                        bias_correction=True)
 ```
-📍 [`src/h3mlx/train.py:345-385`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L345-L385)
+📍 [`src/h3mlx/train.py:345-385`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L345-L385)
 ```python
  345 def optimizer_step(optimizer, trainable: dict, grads: dict, *, max_grad_norm: float) -> tuple[dict, float]:
  346     """One step: (the updated matrices, the gradients' global norm before clipping), both evaluated.
@@ -3501,7 +3501,7 @@ float16 the optimizer's own state breaks first.
 
 ### 9.5 Saving the optimizer's state
 
-📍 [`src/h3mlx/train.py:388-400`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L388-L400)
+📍 [`src/h3mlx/train.py:388-400`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L388-L400)
 ```python
  388 def optimizer_state(optimizer, trainable: dict) -> dict:
  389     """The optimizer's state as a flat dict of arrays, for a checkpoint: the step count and, for each trainable
@@ -3517,7 +3517,7 @@ float16 the optimizer's own state breaks first.
  399         out["m." + key], out["v." + key] = state[key]["m"], state[key]["v"]
  400     return out
 ```
-📍 [`src/h3mlx/train.py:403-425`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/train.py#L403-L425)
+📍 [`src/h3mlx/train.py:403-425`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/train.py#L403-L425)
 ```python
  403 def restore_optimizer(optimizer, trainable: dict, saved: dict) -> None:
  404     """Put a saved state (`optimizer_state`) into a new optimizer made with the same hyper-parameters, so that its
@@ -3574,7 +3574,7 @@ What it takes from elsewhere are two rules for sizing a reference picture: diffu
 
 ### 10.1 The request is the key
 
-📍 [`src/h3mlx/cache.py:149-196`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L149-L196)
+📍 [`src/h3mlx/cache.py:149-196`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L149-L196)
 ```python
  149 def request(*, picture: str, references, prompt: str, height: int, width: int, latent_seed: int,
  150             latent_float16_round: bool, reference_sizing: str, reference_seed: int, reference_float16_round: bool,
@@ -3625,7 +3625,7 @@ What it takes from elsewhere are two rules for sizing a reference picture: diffu
  195         "versions": versions(),
  196     }
 ```
-📍 [`src/h3mlx/cache.py:199-200`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L199-L200)
+📍 [`src/h3mlx/cache.py:199-200`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L199-L200)
 ```python
  199 def key(request: dict) -> str:
  200     return files.sha256_json(request)
@@ -3667,7 +3667,7 @@ No argument of `request` has a default.
     there, inside the folders it fills, and that changes without the component changing: counted, it would make
     every entry a miss and every resume a refusal for no reason.
 
-📍 [`src/h3mlx/cache.py:53-60`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L53-L60)
+📍 [`src/h3mlx/cache.py:53-60`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L53-L60)
 ```python
   53 def code_digest(package: Path | None = None) -> str:
   54     """A digest of this package's source: every `.py` file's name and bytes. Any change to the code gives another
@@ -3678,7 +3678,7 @@ No argument of `request` has a default.
   59         raise ValueError(f"no source files in {package}")
   60     return files.sha256_json([[str(p.relative_to(package)), files.sha256_file(p)] for p in sources])
 ```
-📍 [`src/h3mlx/cache.py:75-92`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L75-L92)
+📍 [`src/h3mlx/cache.py:75-92`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L75-L92)
 ```python
   75 def identity(directory) -> str:
   76     """A digest that identifies one component of a release without reading its weights: every file's name, with the
@@ -3702,7 +3702,7 @@ No argument of `request` has a default.
 
 ### 10.2 Two files, written whole, read with suspicion
 
-📍 [`src/h3mlx/cache.py:269-317`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L269-L317)
+📍 [`src/h3mlx/cache.py:269-317`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L269-L317)
 ```python
  269 def write(directory, request: dict, tensors: dict, wait: float = 30.0) -> str:
  270     """Write one entry and return its key.
@@ -3754,7 +3754,7 @@ No argument of `request` has a default.
  316         staged.unlink(missing_ok=True)
  317     return name
 ```
-📍 [`src/h3mlx/files.py:136-151`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/files.py#L136-L151)
+📍 [`src/h3mlx/files.py:136-151`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/files.py#L136-L151)
 ```python
  136 def atomic_write(path, write) -> None:
  137     """`write(temporary_path)` makes the file; it is flushed and renamed onto `path`.
@@ -3773,7 +3773,7 @@ No argument of `request` has a default.
  150         raise
  151     flush_renamed(path)
 ```
-📍 [`src/h3mlx/files.py:52-87`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/files.py#L52-L87)
+📍 [`src/h3mlx/files.py:52-87`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/files.py#L52-L87)
 ```python
   52 @contextlib.contextmanager
   53 def exclusive(path, what: str, wait: float = 0.0):
@@ -3812,7 +3812,7 @@ No argument of `request` has a default.
   86             fcntl.flock(fd, fcntl.LOCK_UN)
   87         os.close(fd)
 ```
-📍 [`src/h3mlx/cache.py:320-350`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L320-L350)
+📍 [`src/h3mlx/cache.py:320-350`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L320-L350)
 ```python
  320 def load(record_path, request: dict) -> Entry:
  321     """The entry whose record is at `record_path`, if it is the one `request` asks for and whole; otherwise a
@@ -3846,7 +3846,7 @@ No argument of `request` has a default.
  349     return Entry(latents=arrays["latents"], condition_latents=[arrays[f"condition_latents.{i}"] for i in range(count)],
  350                  text=arrays["text"], text_token_tags=np.array(arrays["text_token_tags"]), record=record)
 ```
-📍 [`src/h3mlx/cache.py:353-359`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L353-L359)
+📍 [`src/h3mlx/cache.py:353-359`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L353-L359)
 ```python
  353 def read(directory, request: dict) -> Entry | None:
  354     """The entry for `request` in `directory`, or None when there is none. An entry that is there under the
@@ -3920,7 +3920,7 @@ same for the source digest and for each library.
   66     scale = math.sqrt(min(max(area, min_pixels), max_pixels) / area)
   67     return tuple(max(multiple, round(side * scale / multiple) * multiple) for side in (width, height))
 ```
-📍 [`src/h3mlx/cache.py:98-104`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L98-L104)
+📍 [`src/h3mlx/cache.py:98-104`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L98-L104)
 ```python
   98 def scale_down_to_area(width: int, height: int, pixels: int, multiple: int) -> tuple[int, int]:
   99     """(width, height) at the picture's own aspect ratio, scaled down to `pixels` when it has more and never scaled
@@ -3930,7 +3930,7 @@ same for the source digest and for each library.
  103     return (max(multiple, round(width * scale / multiple) * multiple),
  104             max(multiple, round(height * scale / multiple) * multiple))
 ```
-📍 [`src/h3mlx/cache.py:107-125`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L107-L125)
+📍 [`src/h3mlx/cache.py:107-125`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L107-L125)
 ```python
  107 def reference_sizes(sizing: str, width: int, height: int, *, target_height: int, target_width: int,
  108                     min_pixels: int, max_pixels: int, vision_pixels: int, multiple: int) -> tuple[tuple, tuple]:
@@ -3981,7 +3981,7 @@ recorded in the request, and it has one value.
 
 ### 10.4 The encode
 
-📍 [`src/h3mlx/cache.py:365-369`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L365-L369)
+📍 [`src/h3mlx/cache.py:365-369`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L365-L369)
 ```python
  365 def oriented(picture):
  366     """The picture as RGB with its EXIF orientation applied. Every picture an entry is made from goes through this,
@@ -3989,14 +3989,14 @@ recorded in the request, and it has one value.
  368     applied the orientation is no longer pending: doing it twice changes nothing."""
  369     return ImageOps.exif_transpose(picture).convert("RGB")
 ```
-📍 [`src/h3mlx/cache.py:372-375`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L372-L375)
+📍 [`src/h3mlx/cache.py:372-375`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L372-L375)
 ```python
  372 def load_picture(path):
  373     """A picture file as `encode` takes it: opened, oriented, RGB."""
  374     with Image.open(path) as opened:
  375         return oriented(opened)
 ```
-📍 [`src/h3mlx/cache.py:413-422`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L413-L422)
+📍 [`src/h3mlx/cache.py:413-422`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L413-L422)
 ```python
  413 def target_picture(picture, height: int, width: int, multiple: int):
  414     """The picture, oriented and RGB (`oriented`), at (width, height), resized with Lanczos when it is another size.
@@ -4009,7 +4009,7 @@ recorded in the request, and it has one value.
  421                          "(width x height): crop it first")
  422     return I.resize(picture, (width, height))
 ```
-📍 [`src/h3mlx/cache.py:394-410`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L394-L410)
+📍 [`src/h3mlx/cache.py:394-410`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L394-L410)
 ```python
  394 def load_encoders(weights, vae_dtype: str):
  395     """`image.Components` for `encode`, from a release folder: the VAE (loaded with `vae_dtype`'s policy), the text
@@ -4029,7 +4029,7 @@ recorded in the request, and it has one value.
  409         connector=loaders.load_safetensors(weights / "text_connector"), vae=vae, vae_latents_mean=mean,
  410         vae_latents_std=std, dit_params={}, dit_cfg=transformer, settings=settings)
 ```
-📍 [`src/h3mlx/cache.py:425-466`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/cache.py#L425-L466)
+📍 [`src/h3mlx/cache.py:425-466`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/cache.py#L425-L466)
 ```python
  425 def encode(components, request: dict, picture, references) -> dict:
  426     """The tensors of the entry `request` asks for, from the pictures themselves (PIL images, the ones whose digests
@@ -4165,7 +4165,7 @@ processor folder that is missing is an error and not a fetch.
 
 No learning-rate schedule: the rate is constant. The recipe's schedule and its optimizer settings were not read.
 
-📍 [`src/h3mlx/trainer.py:126-183`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/trainer.py#L126-L183)
+📍 [`src/h3mlx/trainer.py:126-183`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/trainer.py#L126-L183)
 ```python
  126 def trajectory(*, cfg: dict, transformer: str, dataset, rank: int, alpha: float, targets, refiner: bool,
  127                assistant: str | None, learning_rate: float, betas, eps: float, weight_decay: float,
@@ -4226,7 +4226,7 @@ No learning-rate schedule: the rate is constant. The recipe's schedule and its o
  182         "versions": cache.versions(),
  183     }
 ```
-📍 [`src/h3mlx/trainer.py:186-192`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/trainer.py#L186-L192)
+📍 [`src/h3mlx/trainer.py:186-192`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/trainer.py#L186-L192)
 ```python
  186 def limits(*, max_steps: int, max_seconds: float, max_peak_memory_gb: float, checkpoint_every: int) -> dict:
  187     """When a session stops, and how often it checkpoints. Each is required, and each stops the run: reaching
@@ -4244,7 +4244,7 @@ the same trajectory; its limits may change.
 
 ### 11.2 `--plan-only`
 
-📍 [`src/h3mlx/trainer.py:228-265`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/trainer.py#L228-L265)
+📍 [`src/h3mlx/trainer.py:228-265`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/trainer.py#L228-L265)
 ```python
  228 def plan(traj: dict, lim: dict, cfg: dict, examples: list, *, run_dir, cache_dir, weights: dict | None = None,
  229          block_dtype: str | None = None) -> dict:
@@ -4270,7 +4270,7 @@ the same trajectory; its limits may change.
  249         sizes["saved_block_inputs_bytes"] = cfg["num_layers"] * largest * cfg["hidden_size"] * BYTES[block_dtype]
  250     run_dir = Path(run_dir)
  251     return {
- 252         "examples": {"count": count, "to_encode": sum(not e["cached"] for e in examples), "list": examples},
+ 252         "examples": {"count": count, "to_encode": len({e["key"] for e in examples if not e["cached"]}), "list": examples},
  253         "steps": {"max_steps": steps, "passes_over_the_examples": round(steps / count, 3),
  254                   "checkpoint_every": lim["checkpoint_every"], "checkpoints_at": checkpoints},
  255         "adapter": {**adapter, "scaling": adapter["alpha"] / adapter["rank"], "first_modules": modules[:3],
@@ -4313,7 +4313,7 @@ there, and one that does not is reported as a bad argument is, with the tensor's
 
 ### 11.3 What a step draws
 
-📍 [`src/h3mlx/trainer.py:65-69`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/trainer.py#L65-L69)
+📍 [`src/h3mlx/trainer.py:65-69`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/trainer.py#L65-L69)
 ```python
   65 def step_seed(seed: int, step: int, stream: str) -> int:
   66     """A seed for one of step `step`'s draws (`stream`: the example order, the noise level, the noise; `"init"` at
@@ -4321,7 +4321,7 @@ there, and one that does not is reported as a bad argument is, with the tensor's
   68     neighbouring steps and streams share nothing. 63 bits, which is what a torch generator takes."""
   69     return int(np.random.SeedSequence([seed, step, STREAMS[stream]]).generate_state(1, dtype=np.uint64)[0] >> 1)
 ```
-📍 [`src/h3mlx/trainer.py:72-76`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/trainer.py#L72-L76)
+📍 [`src/h3mlx/trainer.py:72-76`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/trainer.py#L72-L76)
 ```python
   72 def example_at(seed: int, step: int, count: int) -> int:
   73     """Which example step `step` trains on: the examples in a new random order for every pass over them."""
@@ -4329,7 +4329,7 @@ there, and one that does not is reported as a bad argument is, with the tensor's
   75     order = np.random.default_rng(np.random.SeedSequence([seed, epoch, STREAMS["order"]])).permutation(count)
   76     return int(order[position])
 ```
-📍 [`src/h3mlx/trainer.py:79-91`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/trainer.py#L79-L91)
+📍 [`src/h3mlx/trainer.py:79-91`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/trainer.py#L79-L91)
 ```python
   79 def noise_level(hyper: dict, grid: np.ndarray, step: int) -> tuple[np.float32, float | None]:
   80     """(sigma, loss weight or None) for step `step`: one draw of the density from the step's own generator, looked up
@@ -4356,7 +4356,7 @@ The examples are taken in a new random order on every pass, each once a pass.
 
 ### 11.4 One session in a run directory, and the checks that come first
 
-📍 [`src/h3mlx/trainer.py:395-447`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/trainer.py#L395-L447)
+📍 [`src/h3mlx/trainer.py:395-447`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/trainer.py#L395-L447)
 ```python
  395 @contextlib.contextmanager
  396 def open_run(run_dir, traj: dict, lim: dict, cfg: dict, *, resume: bool):
@@ -4496,7 +4496,7 @@ a higher one goes on, to the weights a run given the higher one from the start r
 
 ### 11.8 Checkpoints, and resuming
 
-📍 [`src/h3mlx/trainer.py:293-320`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/trainer.py#L293-L320)
+📍 [`src/h3mlx/trainer.py:293-320`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/trainer.py#L293-L320)
 ```python
  293 def write_checkpoint(run_dir, step: int, traj: dict, trainable: dict, optimizer, losses: list) -> Path:
  294     """One checkpoint: the adapter as a diffusers LoRA file, the optimizer's state, and a record with the step, the
@@ -4527,7 +4527,7 @@ a higher one goes on, to the weights a run given the higher one from the start r
  319     files.flush_renamed(final)  # after the rename: a failure here is `files.NotDurable`, and the checkpoint stands
  320     return final
 ```
-📍 [`src/h3mlx/trainer.py:331-361`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/trainer.py#L331-L361)
+📍 [`src/h3mlx/trainer.py:331-361`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/trainer.py#L331-L361)
 ```python
  331 def read_checkpoint(path: Path, traj: dict, cfg: dict) -> tuple[int, dict, dict, list]:
  332     """(step, trainable matrices, optimizer state, losses) from a checkpoint directory, if it is whole and belongs to
@@ -4654,7 +4654,7 @@ neither the forward nor the sampler: `src/h3mlx/ops.py` and `src/h3mlx/image.py`
 
 ### 12.1 Attached, not merged
 
-📍 [`src/h3mlx/lora.py:732-773`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L732-L773)
+📍 [`src/h3mlx/lora.py:732-773`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L732-L773)
 ```python
  732 def for_sampling(params: dict, cfg: dict, adapter: Adapter, scale) -> dict:
  733     """The weights a sampler runs with `adapter` at `scale` times its trained strength; `params` is not modified.
@@ -4750,7 +4750,7 @@ a NaN in every picture, and it is refused when the file is read, before the text
  794             self.scaling[adapter] = scale * self.lora_alpha[adapter] / self.r[adapter]
 ```
 
-📍 [`src/h3mlx/lora.py:205-209`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L205-L209)
+📍 [`src/h3mlx/lora.py:205-209`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L205-L209)
 ```python
  205 def check_scale(scale) -> None:
  206     """A scale is a finite number. PEFT's `set_scale` takes anything; NaN or infinity would poison every Linear the
@@ -4847,7 +4847,7 @@ and the port's is the first: it is a function of the arguments, with nothing to 
 
 ### 12.3 The plan, the record, and what is refused
 
-📍 [`src/h3mlx/lora.py:776-800`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L776-L800)
+📍 [`src/h3mlx/lora.py:776-800`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L776-L800)
 ```python
  776 def from_header(path, prefix: str | None = None, head_dim: int = HEAD_DIM) -> Adapter:
  777     """The adapter `load` would give, from the file's safetensors header alone: the same modules, shapes and alphas,
@@ -4875,7 +4875,7 @@ and the port's is the first: it is a function of the arguments, with nothing to 
  799                  for key, entry in header.items()}
  800     return read(stand_ins, metadata, prefix, head_dim)
 ```
-📍 [`src/h3mlx/lora.py:814-836`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/src/h3mlx/lora.py#L814-L836)
+📍 [`src/h3mlx/lora.py:814-836`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/src/h3mlx/lora.py#L814-L836)
 ```python
  814 def summary(adapter: Adapter, scale=1.0) -> dict:
  815     """What an adapter is, for a plan or a record: how many Linears it is on and which (each kind of Linear with the
@@ -4901,7 +4901,7 @@ and the port's is the first: it is a function of the arguments, with nothing to 
  835         "parameters": sum(math.prod(t.shape) for t in adapter.tensors.values()),
  836     }
 ```
-📍 [`scripts/run_p_h3_image.py:105-112`](https://github.com/sublimator/minimax-h3-mlx/blob/4c46aac249f3e5fcc965fe052c215631455e80b2/scripts/run_p_h3_image.py#L105-L112)
+📍 [`scripts/run_p_h3_image.py:105-112`](https://github.com/sublimator/minimax-h3-mlx/blob/2bc9db813a91291e11fa0aeaa81ab0544715fcaf/scripts/run_p_h3_image.py#L105-L112)
 ```python
  105 def adapter_plan(path: Path, scale: float, cfg: dict) -> dict:
  106     """What `--lora` applies, from the adapter file's header alone (no tensor is read): the file, its hash, the scale,
